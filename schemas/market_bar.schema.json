@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["symbol", "timestamp", "open", "high", "low", "close", "volume", "source"],
+  "properties": {
+    "symbol": {"type": "string", "pattern": "^[A-Z][A-Z0-9.-]{0,15}$"},
+    "timestamp": {"type": "string", "format": "date-time"},
+    "open": {"type": "number", "exclusiveMinimum": 0},
+    "high": {"type": "number", "exclusiveMinimum": 0},
+    "low": {"type": "number", "exclusiveMinimum": 0},
+    "close": {"type": "number", "exclusiveMinimum": 0},
+    "volume": {"type": "number", "minimum": 0},
+    "source": {"type": "string", "minLength": 1}
+  }
+}

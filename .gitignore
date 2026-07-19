@@ -1,0 +1,36 @@
+# Secrets and machine-local configuration
+.env
+.env.*
+!.env.example
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Runtime state, generated reports, and local graph output
+logs/
+state/
+graphify-out/
+*.log
+*.pid
+*.sqlite
+*.sqlite3
+*.db
+
+# Editor and OS metadata
+.codex/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,67 @@
+vibe:
+  enabled: true
+  repo_path: ../references/repos/Vibe-Trading
+  expected_commit: 6fc038d37f1767ae429bab435654b9b425ae66f4
+  require_clean_worktree: true
+  python_executable_env: VIBE_PYTHON_EXECUTABLE
+  subprocess_timeout_seconds: 120
+  historical_data:
+    enabled: true
+    source: yahoo
+    interval: 1D
+    lookback_calendar_days: 90
+  backtest:
+    enabled: true
+    source: yahoo
+    interval: 1D
+    run_root: state/vibe_backtests
+  research_swarm:
+    enabled: false
+    preset_file: config/vibe_presets/equity_research_readonly.yaml
+    run_root: logs/vibe_research
+    timeout_seconds: 1800
+    allowed_tools:
+      - load_skill
+      - get_market_data
+      - factor_analysis
+      - backtest
+      - read_url
+
+forward_data:
+  quote_provider: alpaca
+  alpaca:
+    enabled: false
+    base_url: https://data.alpaca.markets
+    key_id_env: ALPACA_API_KEY_ID
+    secret_key_env: ALPACA_API_SECRET_KEY
+    feed: iex
+    timeout_seconds: 20
+    max_retries: 2
+  news_provider: exa
+  exa:
+    enabled: true
+    endpoint: https://api.exa.ai/search
+    api_key_env: EXA_API_KEY
+    timeout_seconds: 30
+    max_retries: 2
+    search_type: fast
+    lookback_hours: 48
+    num_results: 6
+    include_domains: []
+    exclude_domains: []
+
+runtime:
+  forward_cycle_seconds: 300
+  research_cycle_seconds: 3600
+  watchdog_max_age_seconds: 900
+  max_candidates_per_cycle: 3
+  order_notional_buffer_pct: 0.96
+  fail_if_history_unavailable: true
+
+historical_replay:
+  source: yahoo
+  interval: 5m
+  synthetic_spread_bps: 10
+  quote_delay_seconds: 1
+  require_intraday_for_preclose_exit: true
+  run_root: state/replays

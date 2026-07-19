@@ -1,0 +1,12 @@
+{
+  "SPY": {
+    "symbol": "SPY",
+    "bid": 620.00,
+    "ask": 620.10,
+    "last": 620.05,
+    "asof": "2026-07-04T14:00:00+00:00",
+    "source": "fixture",
+    "avg_daily_volume_usd": 50000000000,
+    "asset_class": "us_etf"
+  }
+}

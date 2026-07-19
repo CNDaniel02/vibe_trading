@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "already_priced_in": {
+      "type": "boolean"
+    },
+    "confidence": {
+      "maximum": 1,
+      "minimum": 0,
+      "type": "number"
+    },
+    "data_gaps": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "direction": {
+      "enum": [
+        "positive",
+        "negative",
+        "neutral",
+        "mixed",
+        "none"
+      ]
+    },
+    "events": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "already_priced_in": {
+            "type": "boolean"
+          },
+          "confidence": {
+            "maximum": 1,
+            "minimum": 0,
+            "type": "number"
+          },
+          "direction": {
+            "enum": [
+              "positive",
+              "negative",
+              "neutral",
+              "mixed"
+            ]
+          },
+          "first_seen_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "headline": {
+            "type": "string"
+          },
+          "novelty": {
+            "maximum": 1,
+            "minimum": 0,
+            "type": "number"
+          },
+          "published_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "source_tier": {
+            "maximum": 4,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "ticker_relevance": {
+            "maximum": 1,
+            "minimum": 0,
+            "type": "number"
+          }
+        },
+        "required": [
+          "headline",
+          "published_at",
+          "first_seen_at",
+          "source",
+          "source_tier",
+          "ticker_relevance",
+          "direction",
+          "novelty",
+          "already_priced_in",
+          "confidence"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "first_seen_at": {
+      "format": "date-time",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "novelty": {
+      "maximum": 1,
+      "minimum": 0,
+      "type": "number"
+    },
+    "published_at": {
+      "format": "date-time",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "source": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "source_tier": {
+      "maximum": 4,
+      "minimum": 1,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "ticker_relevance": {
+      "maximum": 1,
+      "minimum": 0,
+      "type": "number"
+    }
+  },
+  "required": [
+    "events",
+    "published_at",
+    "first_seen_at",
+    "source",
+    "source_tier",
+    "ticker_relevance",
+    "direction",
+    "novelty",
+    "already_priced_in",
+    "confidence",
+    "data_gaps"
+  ],
+  "type": "object"
+}

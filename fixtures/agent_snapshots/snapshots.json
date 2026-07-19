@@ -1,0 +1,176 @@
+{
+  "defaults": {
+    "decision_time": "2026-07-10T14:00:30+00:00",
+    "data_cutoff_time": "2026-07-10T14:00:20+00:00",
+    "ticker": "ACME",
+    "market_session": "regular",
+    "market_data": {
+      "quote": {
+        "bid": 100.00,
+        "ask": 100.05,
+        "last": 100.03,
+        "asof": "2026-07-10T14:00:15+00:00",
+        "source": "fixture-sip",
+        "avg_daily_volume_usd": 100000000,
+        "asset_class": "us_equity"
+      },
+      "market_regime": "neutral",
+      "benchmark_change_1d_pct": 0.2,
+      "volatility_change_pct": -1.0,
+      "binary_event_within_days": 30,
+      "has_position": false
+    },
+    "technical_signals": {
+      "relative_strength_20d": 0.72,
+      "price_change_1d_pct": 1.2,
+      "price_change_5d_pct": 4.0,
+      "volume_ratio": 1.4,
+      "chase_score": 0.2
+    },
+    "available_news": [],
+    "source_metadata": [],
+    "expected": {
+      "action": "no_trade",
+      "challenge_veto": false,
+      "forward_return_pct": 0.0
+    }
+  },
+  "cases": [
+    {
+      "snapshot_id": "positive_earnings_01",
+      "available_news": [{"headline": "ACME raises full-year guidance after earnings beat", "published_at": "2026-07-10T13:40:00+00:00", "first_seen_at": "2026-07-10T13:40:05+00:00", "source": "Company IR", "source_tier": 1, "ticker_relevance": 1.0, "direction": "positive", "novelty": 0.95, "already_priced_in": false, "confidence": 0.9}],
+      "source_metadata": [{"source": "Company IR", "source_tier": 1}],
+      "expected": {"action": "buy", "challenge_veto": false, "forward_return_pct": 2.2}
+    },
+    {
+      "snapshot_id": "positive_contract_02",
+      "available_news": [{"headline": "ACME announces material multi-year customer contract", "published_at": "2026-07-10T13:30:00+00:00", "first_seen_at": "2026-07-10T13:30:04+00:00", "source": "SEC filing", "source_tier": 1, "ticker_relevance": 0.98, "direction": "positive", "novelty": 0.9, "already_priced_in": false, "confidence": 0.88}],
+      "source_metadata": [{"source": "SEC filing", "source_tier": 1}],
+      "expected": {"action": "buy", "challenge_veto": false, "forward_return_pct": 1.4}
+    },
+    {
+      "snapshot_id": "negative_guidance_03",
+      "available_news": [{"headline": "ACME cuts revenue guidance", "published_at": "2026-07-10T13:25:00+00:00", "first_seen_at": "2026-07-10T13:25:03+00:00", "source": "Company IR", "source_tier": 1, "ticker_relevance": 1.0, "direction": "negative", "novelty": 0.95, "already_priced_in": false, "confidence": 0.94}],
+      "source_metadata": [{"source": "Company IR", "source_tier": 1}],
+      "expected": {"action": "no_trade", "challenge_veto": true, "forward_return_pct": -3.0}
+    },
+    {
+      "snapshot_id": "negative_investigation_04",
+      "available_news": [{"headline": "Regulator opens investigation into ACME disclosures", "published_at": "2026-07-10T13:10:00+00:00", "first_seen_at": "2026-07-10T13:10:02+00:00", "source": "Regulator", "source_tier": 1, "ticker_relevance": 1.0, "direction": "negative", "novelty": 0.98, "already_priced_in": false, "confidence": 0.92}],
+      "source_metadata": [{"source": "Regulator", "source_tier": 1}],
+      "expected": {"action": "no_trade", "challenge_veto": true, "forward_return_pct": -4.2}
+    },
+    {
+      "snapshot_id": "old_news_repeat_05",
+      "available_news": [{"headline": "ACME repeats product announcement from last month", "published_at": "2026-06-10T13:00:00+00:00", "first_seen_at": "2026-06-10T13:00:04+00:00", "source": "Company IR", "source_tier": 1, "ticker_relevance": 0.8, "direction": "positive", "novelty": 0.1, "already_priced_in": true, "confidence": 0.8}],
+      "source_metadata": [{"source": "Company IR", "source_tier": 1}],
+      "expected": {"action": "no_trade", "challenge_veto": true, "forward_return_pct": -0.3}
+    },
+    {"snapshot_id": "no_news_06", "expected": {"action": "no_trade", "challenge_veto": false, "forward_return_pct": 0.1}},
+    {
+      "snapshot_id": "news_price_conflict_07",
+      "technical_signals": {"price_change_1d_pct": -3.1},
+      "available_news": [{"headline": "ACME reports positive trial result", "published_at": "2026-07-10T13:20:00+00:00", "first_seen_at": "2026-07-10T13:20:02+00:00", "source": "Company IR", "source_tier": 1, "ticker_relevance": 1.0, "direction": "positive", "novelty": 0.9, "already_priced_in": false, "confidence": 0.86}],
+      "source_metadata": [{"source": "Company IR", "source_tier": 1}],
+      "expected": {"action": "no_trade", "challenge_veto": true, "forward_return_pct": -1.2}
+    },
+    {
+      "snapshot_id": "wide_spread_08",
+      "market_data": {"quote": {"bid": 100.0, "ask": 101.0, "last": 100.5}},
+      "expected": {"action": "no_trade", "challenge_veto": false, "forward_return_pct": -0.5}
+    },
+    {
+      "snapshot_id": "stale_quote_09",
+      "market_data": {"quote": {"asof": "2026-07-10T13:55:00+00:00"}},
+      "expected": {"action": "no_trade", "challenge_veto": false, "forward_return_pct": 0.2}
+    },
+    {
+      "snapshot_id": "missing_quote_10",
+      "market_data": {"quote": null},
+      "expected": {"action": "no_trade", "challenge_veto": false, "forward_return_pct": 0.0}
+    },
+    {
+      "snapshot_id": "market_risk_off_11",
+      "market_data": {"market_regime": "risk_off", "benchmark_change_1d_pct": -2.3, "volatility_change_pct": 18.0},
+      "expected": {"action": "no_trade", "challenge_veto": false, "forward_return_pct": -1.8}
+    },
+    {
+      "snapshot_id": "chase_risk_12",
+      "technical_signals": {"price_change_1d_pct": 9.0, "price_change_5d_pct": 16.0, "chase_score": 0.9},
+      "available_news": [{"headline": "ACME wins industry award", "published_at": "2026-07-10T13:35:00+00:00", "first_seen_at": "2026-07-10T13:35:02+00:00", "source": "Trade publication", "source_tier": 2, "ticker_relevance": 0.8, "direction": "positive", "novelty": 0.7, "already_priced_in": false, "confidence": 0.7}],
+      "source_metadata": [{"source": "Trade publication", "source_tier": 2}],
+      "expected": {"action": "no_trade", "challenge_veto": true, "forward_return_pct": -2.0}
+    },
+    {
+      "snapshot_id": "ambiguous_rumor_13",
+      "available_news": [{"headline": "Anonymous post claims possible ACME transaction", "published_at": "2026-07-10T13:45:00+00:00", "first_seen_at": "2026-07-10T13:45:03+00:00", "source": "Anonymous social", "source_tier": 4, "ticker_relevance": 0.6, "direction": "mixed", "novelty": 0.7, "already_priced_in": false, "confidence": 0.25}],
+      "source_metadata": [{"source": "Anonymous social", "source_tier": 4}],
+      "expected": {"action": "no_trade", "challenge_veto": true, "forward_return_pct": -0.8}
+    },
+    {
+      "snapshot_id": "conflicting_sources_14",
+      "available_news": [
+        {"headline": "ACME says demand remains strong", "published_at": "2026-07-10T13:20:00+00:00", "first_seen_at": "2026-07-10T13:20:02+00:00", "source": "Company IR", "source_tier": 1, "ticker_relevance": 0.9, "direction": "positive", "novelty": 0.8, "already_priced_in": false, "confidence": 0.8},
+        {"headline": "Distributor reports ACME order cancellations", "published_at": "2026-07-10T13:22:00+00:00", "first_seen_at": "2026-07-10T13:22:04+00:00", "source": "Distributor filing", "source_tier": 1, "ticker_relevance": 0.9, "direction": "negative", "novelty": 0.8, "already_priced_in": false, "confidence": 0.8}
+      ],
+      "source_metadata": [{"source": "Company IR", "source_tier": 1}, {"source": "Distributor filing", "source_tier": 1}],
+      "expected": {"action": "no_trade", "challenge_veto": true, "forward_return_pct": -1.0}
+    },
+    {
+      "snapshot_id": "weak_source_15",
+      "available_news": [{"headline": "Blog speculates on ACME demand", "published_at": "2026-07-10T13:40:00+00:00", "first_seen_at": "2026-07-10T13:40:02+00:00", "source": "Unknown blog", "source_tier": 4, "ticker_relevance": 0.7, "direction": "positive", "novelty": 0.6, "already_priced_in": false, "confidence": 0.35}],
+      "source_metadata": [{"source": "Unknown blog", "source_tier": 4}],
+      "expected": {"action": "no_trade", "challenge_veto": true, "forward_return_pct": -0.2}
+    },
+    {
+      "snapshot_id": "positive_upgrade_16",
+      "available_news": [{"headline": "Multiple analysts raise ACME estimates after new disclosure", "published_at": "2026-07-10T13:15:00+00:00", "first_seen_at": "2026-07-10T13:15:03+00:00", "source": "Estimate service", "source_tier": 2, "ticker_relevance": 0.9, "direction": "positive", "novelty": 0.82, "already_priced_in": false, "confidence": 0.78}],
+      "source_metadata": [{"source": "Estimate service", "source_tier": 2}],
+      "expected": {"action": "buy", "challenge_veto": false, "forward_return_pct": 1.1}
+    },
+    {
+      "snapshot_id": "positive_buyback_17",
+      "available_news": [{"headline": "ACME authorizes material accelerated share repurchase", "published_at": "2026-07-10T13:05:00+00:00", "first_seen_at": "2026-07-10T13:05:02+00:00", "source": "SEC filing", "source_tier": 1, "ticker_relevance": 0.95, "direction": "positive", "novelty": 0.9, "already_priced_in": false, "confidence": 0.84}],
+      "source_metadata": [{"source": "SEC filing", "source_tier": 1}],
+      "expected": {"action": "buy", "challenge_veto": false, "forward_return_pct": 0.9}
+    },
+    {
+      "snapshot_id": "binary_event_18",
+      "market_data": {"binary_event_within_days": 1},
+      "available_news": [{"headline": "ACME presents data tomorrow", "published_at": "2026-07-10T13:00:00+00:00", "first_seen_at": "2026-07-10T13:00:02+00:00", "source": "Company IR", "source_tier": 1, "ticker_relevance": 0.9, "direction": "positive", "novelty": 0.7, "already_priced_in": false, "confidence": 0.75}],
+      "source_metadata": [{"source": "Company IR", "source_tier": 1}],
+      "expected": {"action": "no_trade", "challenge_veto": true, "forward_return_pct": -2.5}
+    },
+    {
+      "snapshot_id": "missing_source_metadata_19",
+      "available_news": [{"headline": "ACME reports new customer", "published_at": "2026-07-10T13:12:00+00:00", "first_seen_at": "2026-07-10T13:12:02+00:00", "source": "Wire service", "source_tier": 2, "ticker_relevance": 0.9, "direction": "positive", "novelty": 0.75, "already_priced_in": false, "confidence": 0.72}],
+      "expected": {"action": "no_trade", "challenge_veto": true, "forward_return_pct": 0.1}
+    },
+    {
+      "snapshot_id": "neutral_news_20",
+      "available_news": [{"headline": "ACME schedules routine investor conference appearance", "published_at": "2026-07-10T13:18:00+00:00", "first_seen_at": "2026-07-10T13:18:02+00:00", "source": "Company IR", "source_tier": 1, "ticker_relevance": 0.7, "direction": "neutral", "novelty": 0.5, "already_priced_in": false, "confidence": 0.7}],
+      "source_metadata": [{"source": "Company IR", "source_tier": 1}],
+      "expected": {"action": "no_trade", "challenge_veto": false, "forward_return_pct": 0.0}
+    },
+    {
+      "snapshot_id": "negative_existing_position_21",
+      "market_data": {"has_position": true},
+      "available_news": [{"headline": "ACME loses major customer", "published_at": "2026-07-10T13:08:00+00:00", "first_seen_at": "2026-07-10T13:08:02+00:00", "source": "SEC filing", "source_tier": 1, "ticker_relevance": 1.0, "direction": "negative", "novelty": 0.95, "already_priced_in": false, "confidence": 0.9}],
+      "source_metadata": [{"source": "SEC filing", "source_tier": 1}],
+      "expected": {"action": "exit", "challenge_veto": true, "forward_return_pct": -3.5}
+    },
+    {
+      "snapshot_id": "future_news_22",
+      "available_news": [{"headline": "Future-dated ACME release", "published_at": "2026-07-10T14:05:00+00:00", "first_seen_at": "2026-07-10T14:05:01+00:00", "source": "Company IR", "source_tier": 1, "ticker_relevance": 1.0, "direction": "positive", "novelty": 1.0, "already_priced_in": false, "confidence": 0.9}],
+      "source_metadata": [{"source": "Company IR", "source_tier": 1}],
+      "expected": {"action": "no_trade", "challenge_veto": false, "forward_return_pct": 5.0, "invalid_timestamp": true}
+    },
+    {
+      "snapshot_id": "risk_gate_position_limit_23",
+      "market_data": {"quote": {"bid": 599.8, "ask": 600.0, "last": 599.9}},
+      "available_news": [{"headline": "ACME raises guidance on verified demand", "published_at": "2026-07-10T13:38:00+00:00", "first_seen_at": "2026-07-10T13:38:02+00:00", "source": "Company IR", "source_tier": 1, "ticker_relevance": 1.0, "direction": "positive", "novelty": 0.9, "already_priced_in": false, "confidence": 0.9}],
+      "source_metadata": [{"source": "Company IR", "source_tier": 1}],
+      "expected": {"action": "no_trade", "challenge_veto": false, "forward_return_pct": 1.0, "risk_veto": true}
+    }
+  ]
+}

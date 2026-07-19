@@ -1,0 +1,32 @@
+allowed_asset_classes:
+  - us_equity
+  - us_etf
+
+allow_long_only: true
+allow_otc: false
+allow_leveraged_etf: false
+allow_inverse_etf: false
+
+min_price_usd: 5
+min_avg_daily_volume_usd: 20000000
+max_spread_bps: 50
+
+default_watchlist:
+  - SPY
+  - QQQ
+  - AAPL
+  - MSFT
+  - NVDA
+  - AMZN
+  - META
+  - GOOGL
+  - XLK
+  - XLF
+
+excluded_symbols:
+  - TQQQ
+  - SQQQ
+  - SOXL
+  - SOXS
+  - SPXL
+  - SPXS

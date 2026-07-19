@@ -1,0 +1,16 @@
+mode:
+  paper: true
+  live_readonly: false
+  live_trading: false
+
+paper_initial_cash_usd: 2000
+base_currency: USD
+quote_stale_after_seconds: 60
+market_timezone: America/New_York
+regular_session:
+  open: "09:30"
+  close: "16:00"
+exit_before_close_minutes: 10
+open_order_expiry_seconds: 300
+state_dir: state
+log_dir: logs

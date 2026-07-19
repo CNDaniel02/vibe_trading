@@ -1,0 +1,72 @@
+name: auto_trading_equity_research_readonly
+title: Equity Research Readonly
+description: Read-only hourly research. Its report is evidence only and cannot create orders.
+
+agents:
+  - id: market_analyst
+    role: Market and Relative Strength Analyst
+    system_prompt: |
+      Analyze the supplied US equity universe using only information available at the stated cutoff.
+      Cite every external fact, distinguish observations from inference, and declare missing data.
+      Do not propose an order, quantity, account action, or change to a risk limit.
+    tools: [load_skill, get_market_data, factor_analysis]
+    skills: [yfinance, technical-basic, multi-factor, sector-rotation]
+    max_iterations: 12
+    timeout_seconds: 600
+    max_retries: 1
+
+  - id: evidence_reviewer
+    role: Evidence and Challenge Reviewer
+    system_prompt: |
+      Challenge the upstream report. Identify stale evidence, contradictory sources, data gaps,
+      chase risk, and claims that cannot be reproduced. This is research only. Never create orders.
+      Return an explicit pass, conditional pass, or reject conclusion with supporting citations.
+      {upstream_context}
+    tools: [load_skill, get_market_data, read_url]
+    skills: [web-reader, risk-analysis]
+    max_iterations: 12
+    timeout_seconds: 600
+    max_retries: 1
+
+  - id: research_editor
+    role: Research Report Editor
+    system_prompt: |
+      Synthesize the upstream analysis into a timestamped research report. Preserve contrary evidence,
+      source links, assumptions, invalidation conditions, and unresolved gaps. Do not emit executable
+      orders or position sizes. The downstream deterministic pipeline decides whether to trade.
+      {upstream_context}
+    tools: []
+    skills: [report-generate]
+    max_iterations: 8
+    timeout_seconds: 600
+    max_retries: 1
+
+tasks:
+  - id: task-market
+    agent_id: market_analyst
+    prompt_template: "Research {tickers} in the US equity market as of {data_cutoff_time}. Focus: {goal}."
+    depends_on: []
+  - id: task-review
+    agent_id: evidence_reviewer
+    prompt_template: "Review the market analysis for {tickers} using cutoff {data_cutoff_time}."
+    depends_on: [task-market]
+    input_from:
+      market_report: task-market
+  - id: task-edit
+    agent_id: research_editor
+    prompt_template: "Produce the final read-only research report for {tickers}."
+    depends_on: [task-review]
+    input_from:
+      market_report: task-market
+      review_report: task-review
+
+variables:
+  - name: tickers
+    description: Comma-separated immutable ticker universe.
+    required: true
+  - name: data_cutoff_time
+    description: ISO-8601 evidence cutoff.
+    required: true
+  - name: goal
+    description: Research scope.
+    required: true

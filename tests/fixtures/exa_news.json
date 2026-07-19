@@ -1,0 +1,12 @@
+{
+  "requestId": "fixture-request",
+  "results": [
+    {
+      "title": "Apple files material disclosure before market open",
+      "url": "https://www.sec.gov/Archives/example",
+      "publishedDate": "2026-07-13T13:15:00Z",
+      "highlights": ["Material disclosure fixture."]
+    }
+  ],
+  "costDollars": {"total": 0.001}
+}

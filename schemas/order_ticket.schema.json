@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["order_id", "decision_id", "symbol", "side", "order_type", "quantity", "status"],
+  "properties": {
+    "order_id": {"type": "string"},
+    "decision_id": {"type": "string"},
+    "symbol": {"type": "string"},
+    "side": {"enum": ["buy", "sell"]},
+    "order_type": {"enum": ["market", "limit"]},
+    "quantity": {"type": "number", "exclusiveMinimum": 0},
+    "status": {
+      "enum": ["created", "submitted_to_paper_broker", "open", "partially_filled", "filled", "cancelled", "expired", "rejected"]
+    }
+  }
+}

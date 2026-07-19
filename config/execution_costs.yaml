@@ -1,0 +1,4 @@
+commission_per_order_usd: 0
+slippage_bps: 5
+minimum_slippage_usd: 0.01
+spread_cost_enabled: true

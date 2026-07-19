@@ -1,0 +1,11 @@
+minimum_forward_sessions: 20
+minimum_closed_trades: 30
+minimum_profit_factor: 1.2
+minimum_net_return_pct: 0.0
+maximum_drawdown_pct: 10.0
+maximum_rule_violations: 0
+
+profitability_labels:
+  insufficient: insufficient_forward_evidence
+  passed: profitable_candidate
+  failed: not_profitable

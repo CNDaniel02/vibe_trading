@@ -1,0 +1,4 @@
+interface:
+  display_name: "Auto Trading Skill"
+  short_description: "Paper equity agents with strict risk and evals"
+  default_prompt: "Use $auto-trading-skill to run and evaluate a provider-neutral equity paper or shadow trading cycle."

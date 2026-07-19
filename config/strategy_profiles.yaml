@@ -1,0 +1,15 @@
+active_strategy: relative_strength_v1
+shadow_strategies:
+  - multi_agent_relative_strength_v2_candidate
+
+relative_strength_v1:
+  execution: paper_broker
+  allow_model_calls: false
+
+multi_agent_relative_strength_v2_candidate:
+  execution: shadow_only
+  allow_model_calls: true
+  max_model_calls_per_candidate: 3
+  may_replace_active_strategy: false
+  share_account_state_with_baseline: false
+  share_order_state_with_baseline: false

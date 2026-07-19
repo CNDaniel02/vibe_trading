@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "chase_risk": {
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "confidence_adjustment": {
+      "maximum": 0.25,
+      "minimum": -1,
+      "type": "number"
+    },
+    "contradictions": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "event_risk": {
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "missing_evidence": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "objections": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "recommendation": {
+      "enum": [
+        "proceed",
+        "reduce_confidence",
+        "no_trade"
+      ]
+    },
+    "stale_evidence": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "veto_recommended": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "objections",
+    "contradictions",
+    "missing_evidence",
+    "stale_evidence",
+    "chase_risk",
+    "event_risk",
+    "recommendation",
+    "confidence_adjustment",
+    "veto_recommended"
+  ],
+  "type": "object"
+}
