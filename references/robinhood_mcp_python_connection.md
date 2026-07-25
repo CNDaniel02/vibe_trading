@@ -1,10 +1,11 @@
 # Python Robinhood MCP connection
 
 The project uses a Python MCP client for the read-only capability audit in
-`scripts/broker/robinhood_mcp_audit.py` and, after that passes, the narrowly
-whitelisted `get_equity_quotes` call in the forward shadow loop. It does not
-provide a generic tool caller and cannot place, cancel, review, or mutate
-broker orders.
+`scripts/broker/robinhood_mcp_audit.py` and, after that passes, a strict
+read-only data allowlist. The allowlist includes quotes, historicals,
+fundamentals, financials, technical indicators, earnings, saved scans,
+instrument search, and option market data. It does not provide a public
+generic tool caller and cannot place, cancel, review, or mutate broker orders.
 
 ## First authorization
 
@@ -46,8 +47,9 @@ The audit performs only MCP `initialize`, `ping`, and `list_tools`. It expects
 the currently verified 50-tool Robinhood Trading MCP manifest. Missing tools
 make the command fail; newly exposed tools are reported for manual review.
 
-This does not authorize the project to use any listed tool other than
-`get_equity_quotes` for paper/shadow market observations. Review, order,
-cancellation, watchlist-write, and scan-write tools remain unavailable to the
-project. A separate live-trading milestone and narrow deny-by-default adapter
-remain required.
+This does not authorize account or mutation tools. Review, order,
+cancellation, watchlist-write, scanner creation/update, and portfolio mutation
+tools remain unavailable to the project. `get_equity_tradability` requires an
+explicit live account number and is not called by catalyst discovery. A
+separate live-trading milestone and narrow deny-by-default adapter remain
+required.

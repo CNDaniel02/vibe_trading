@@ -90,6 +90,22 @@ EXPECTED_ROBINHOOD_TOOLS = frozenset(
     }
 )
 
+READ_ONLY_DATA_TOOLS = frozenset(
+    {
+        "get_earnings_calendar",
+        "get_earnings_results",
+        "get_equity_fundamentals",
+        "get_equity_historicals",
+        "get_equity_quotes",
+        "get_equity_technical_indicators",
+        "get_equity_tradability",
+        "get_financials",
+        "get_scans",
+        "run_scan",
+        "search",
+    }
+)
+
 
 class CredentialStore:
     """Persist OAuth material in a current-user DPAPI encrypted local file.
@@ -276,7 +292,14 @@ class RobinhoodMcpCapabilityClient:
             raise RuntimeError("Robinhood get_equity_quotes returned no structured payload")
         return payload
 
-    async def get_equity_historicals(self, symbols: list[str], start_time: str, end_time: str) -> dict[str, Any]:
+    async def get_equity_historicals(
+        self,
+        symbols: list[str],
+        start_time: str,
+        end_time: str,
+        *,
+        interval: str = "5minute",
+    ) -> dict[str, Any]:
         normalized = sorted({symbol.strip().upper() for symbol in symbols if symbol.strip()})
         if not normalized or len(normalized) > 10:
             raise ValueError("Robinhood get_equity_historicals requires 1 to 10 symbols")
@@ -284,13 +307,89 @@ class RobinhoodMcpCapabilityClient:
             "symbols": normalized,
             "start_time": start_time,
             "end_time": end_time,
-            "interval": "5minute",
+            "interval": interval,
             "bounds": "regular",
             "adjustment_type": "split",
         }
         async with self.session() as session:
             result = await session.call_tool("get_equity_historicals", arguments=arguments)
         return self._structured_payload(result.structuredContent, "get_equity_historicals")
+
+    async def get_scans(self) -> dict[str, Any]:
+        return await self._call_readonly("get_scans", {})
+
+    async def run_scan(self, scan_id: str) -> dict[str, Any]:
+        scan_id = scan_id.strip()
+        if not scan_id:
+            raise ValueError("scan_id is required")
+        return await self._call_readonly("run_scan", {"scan_id": scan_id})
+
+    async def search_instruments(self, query: str, limit: int = 5) -> dict[str, Any]:
+        query = query.strip()
+        if not query:
+            raise ValueError("instrument search query is required")
+        return await self._call_readonly(
+            "search",
+            {"query": query, "asset_type": "instrument", "limit": max(1, min(int(limit), 20))},
+        )
+
+    async def get_equity_fundamentals(self, symbols: list[str]) -> dict[str, Any]:
+        normalized = self._normalize_symbols(symbols, maximum=10, tool_name="get_equity_fundamentals")
+        return await self._call_readonly("get_equity_fundamentals", {"symbols": normalized, "bounds": "regular"})
+
+    async def get_financials(self, symbols: list[str], *, period: str = "quarterly", limit: int = 4) -> dict[str, Any]:
+        normalized = self._normalize_symbols(symbols, maximum=20, tool_name="get_financials")
+        if period not in {"quarterly", "annual"}:
+            raise ValueError("financial period must be quarterly or annual")
+        return await self._call_readonly(
+            "get_financials",
+            {"symbols": normalized, "period": period, "limit": max(1, min(int(limit), 40))},
+        )
+
+    async def get_equity_technical_indicators(
+        self,
+        symbol: str,
+        indicator_type: str,
+        interval: str,
+        start_time: str,
+        end_time: str,
+        *,
+        output: str = "latest",
+        period: int | None = None,
+    ) -> dict[str, Any]:
+        normalized = self._normalize_symbols([symbol], maximum=1, tool_name="get_equity_technical_indicators")[0]
+        arguments: dict[str, Any] = {
+            "symbol": normalized,
+            "type": indicator_type,
+            "interval": interval,
+            "start_time": start_time,
+            "end_time": end_time,
+            "bounds": "regular",
+            "adjustment_type": "split",
+            "output": output,
+        }
+        if period is not None:
+            arguments["period"] = int(period)
+        return await self._call_readonly("get_equity_technical_indicators", arguments)
+
+    async def get_earnings_results(self, symbol: str) -> dict[str, Any]:
+        normalized = self._normalize_symbols([symbol], maximum=1, tool_name="get_earnings_results")[0]
+        return await self._call_readonly("get_earnings_results", {"symbol": normalized})
+
+    async def get_equity_tradability(self, account_number: str, symbols: list[str]) -> dict[str, Any]:
+        """Read tradability only when the caller explicitly supplies an account.
+
+        Discovery does not call this method because a local paper strategy must
+        not infer or persist a live account number.
+        """
+        account_number = account_number.strip()
+        if not account_number:
+            raise ValueError("account_number must be explicitly supplied")
+        normalized = self._normalize_symbols(symbols, maximum=10, tool_name="get_equity_tradability")
+        return await self._call_readonly(
+            "get_equity_tradability",
+            {"account_number": account_number, "symbols": normalized},
+        )
 
     async def get_option_chains(self, underlying_symbol: str) -> dict[str, Any]:
         symbol = underlying_symbol.strip().upper()
@@ -339,6 +438,28 @@ class RobinhoodMcpCapabilityClient:
         async with self.session() as session:
             result = await session.call_tool("get_earnings_calendar", arguments={"start_date": start_date, "days": days})
         return self._structured_payload(result.structuredContent, "get_earnings_calendar")
+
+    async def get_high_market_cap_earnings_calendar(self, start_date: str, days: int = 7) -> dict[str, Any]:
+        if days == 0 or not -31 <= days <= 31:
+            raise ValueError("earnings calendar days must be between -31 and 31 and non-zero")
+        return await self._call_readonly(
+            "get_earnings_calendar",
+            {"start_date": start_date, "days": days, "filter": "high_market_cap"},
+        )
+
+    async def _call_readonly(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if tool_name not in READ_ONLY_DATA_TOOLS:
+            raise RuntimeError(f"Robinhood tool is outside the read-only data allowlist: {tool_name}")
+        async with self.session() as session:
+            result = await session.call_tool(tool_name, arguments=arguments)
+        return self._structured_payload(result.structuredContent, tool_name)
+
+    @staticmethod
+    def _normalize_symbols(symbols: list[str], *, maximum: int, tool_name: str) -> list[str]:
+        normalized = sorted({symbol.strip().upper() for symbol in symbols if symbol.strip()})
+        if not normalized or len(normalized) > maximum:
+            raise ValueError(f"Robinhood {tool_name} requires 1 to {maximum} symbols")
+        return normalized
 
     @staticmethod
     def _structured_payload(payload: Any, tool_name: str) -> dict[str, Any]:

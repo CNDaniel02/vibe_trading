@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from scripts.core.models import utc_now
@@ -28,6 +29,7 @@ class UsageTracker:
     def __init__(self, path: str | Path | None = None) -> None:
         self.path = Path(path) if path else None
         self.records: list[UsageRecord] = []
+        self._lock = RLock()
 
     def record(
         self,
@@ -58,21 +60,24 @@ class UsageTracker:
             retries=retries,
             error=error,
         )
-        self.records.append(record)
-        if self.path:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self.path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(asdict(record), sort_keys=True) + "\n")
+        with self._lock:
+            self.records.append(record)
+            if self.path:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                with self.path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(asdict(record), sort_keys=True) + "\n")
         return record
 
     def summary(self) -> dict[str, Any]:
+        with self._lock:
+            records = list(self.records)
         return {
-            "calls": len(self.records),
-            "input_tokens": sum(item.input_tokens for item in self.records),
-            "output_tokens": sum(item.output_tokens for item in self.records),
-            "latency_ms": round(sum(item.latency_ms for item in self.records), 3),
-            "estimated_cost_usd": round(sum(item.estimated_cost_usd or 0 for item in self.records), 8),
-            "unpriced_calls": sum(1 for item in self.records if item.estimated_cost_usd is None),
-            "errors": sum(1 for item in self.records if item.error),
-            "retries": sum(item.retries for item in self.records),
+            "calls": len(records),
+            "input_tokens": sum(item.input_tokens for item in records),
+            "output_tokens": sum(item.output_tokens for item in records),
+            "latency_ms": round(sum(item.latency_ms for item in records), 3),
+            "estimated_cost_usd": round(sum(item.estimated_cost_usd or 0 for item in records), 8),
+            "unpriced_calls": sum(1 for item in records if item.estimated_cost_usd is None),
+            "errors": sum(1 for item in records if item.error),
+            "retries": sum(item.retries for item in records),
         }

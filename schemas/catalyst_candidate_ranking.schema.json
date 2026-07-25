@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Catalyst Candidate Ranking",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ranked_candidates", "data_gaps"],
+  "properties": {
+    "ranked_candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ticker",
+          "score",
+          "direction",
+          "catalyst_strength",
+          "evidence_quality",
+          "market_confirmation",
+          "instrument_preference",
+          "rationale",
+          "risk_flags"
+        ],
+        "properties": {
+          "ticker": {"type": "string"},
+          "score": {"type": "number", "minimum": 0, "maximum": 1},
+          "direction": {"enum": ["bullish", "bearish", "mixed", "unclear"]},
+          "catalyst_strength": {"type": "number", "minimum": 0, "maximum": 1},
+          "evidence_quality": {"type": "number", "minimum": 0, "maximum": 1},
+          "market_confirmation": {"type": "number", "minimum": 0, "maximum": 1},
+          "instrument_preference": {"enum": ["equity", "call", "put", "none"]},
+          "rationale": {"type": "string"},
+          "risk_flags": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "data_gaps": {"type": "array", "items": {"type": "string"}}
+  }
+}

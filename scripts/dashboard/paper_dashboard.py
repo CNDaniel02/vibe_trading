@@ -68,14 +68,18 @@ def _technical_reasons(decision: dict[str, Any], snapshot: dict[str, Any]) -> li
         reasons.append("outside the regular NYSE session")
     if not technical.get("quote_valid", False):
         reasons.append(str(technical.get("quote_reason", "quote is not valid")))
-    if float(technical.get("relative_strength_20d", 0)) < 0.5:
-        reasons.append("20-day relative strength is below 0.5 percentage points")
-    if float(technical.get("price_change_5d_pct", 0)) <= 0:
-        reasons.append("5-day price change is not positive")
+    thresholds = technical.get("thresholds", {})
+    min_rs = float(thresholds.get("min_relative_strength_20d_pct", 0.25))
+    min_move_5d = float(thresholds.get("min_price_change_5d_pct", 0.5))
+    min_volume = float(thresholds.get("min_volume_ratio", 0.4))
+    if float(technical.get("relative_strength_20d", 0)) < min_rs:
+        reasons.append(f"20-day relative strength is below {min_rs:g} percentage points")
+    if float(technical.get("price_change_5d_pct", 0)) < min_move_5d:
+        reasons.append(f"5-day price change is below {min_move_5d:g}")
     if technical.get("volume_ratio") is None:
         reasons.append("intraday volume confirmation is unavailable")
-    elif float(technical.get("volume_ratio", 0)) < 0.8:
-        reasons.append("volume ratio is below 0.8")
+    elif float(technical.get("volume_ratio", 0)) < min_volume:
+        reasons.append(f"volume ratio is below {min_volume:g}")
     return reasons or ["all deterministic entry conditions passed"]
 
 
@@ -158,6 +162,36 @@ def _safe_shadow_record(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _safe_catalyst_record(record: dict[str, Any]) -> dict[str, Any]:
+    decision = dict(record.get("decision") or {})
+    challenge = dict(record.get("challenge") or {}) if isinstance(record.get("challenge"), dict) else {}
+    bull = dict(record.get("bull_news") or {}) if isinstance(record.get("bull_news"), dict) else {}
+    ranking = dict(record.get("ranking") or {}) if isinstance(record.get("ranking"), dict) else {}
+    return {
+        "asof": record.get("ts"),
+        "ticker": record.get("ticker"),
+        "final_action": record.get("final_action", record.get("action")),
+        "instrument": record.get("instrument"),
+        "risk_approved": bool(record.get("risk_approved", False)),
+        "risk_reason": record.get("risk_reason"),
+        "model_calls": record.get("model_calls", 0),
+        "evidence_snapshot": record.get("evidence_snapshot"),
+        "ranking": {key: ranking.get(key) for key in ("score", "direction", "rationale", "risk_flags")},
+        "decision": {
+            key: decision.get(key)
+            for key in ("thesis", "supporting_evidence", "contrary_evidence", "confidence", "no_trade_reason")
+        },
+        "challenge": {
+            key: challenge.get(key)
+            for key in ("recommendation", "veto_recommended", "objections", "missing_evidence")
+        },
+        "bull_news": {
+            key: bull.get(key)
+            for key in ("catalyst_summary", "direction", "event_time", "source_urls", "data_gaps")
+        },
+    }
+
+
 def build_dashboard_state(root: str | Path) -> dict[str, Any]:
     """Build a bounded, JSON-safe view of existing local state and logs."""
     root_path = Path(root).resolve()
@@ -167,6 +201,8 @@ def build_dashboard_state(root: str | Path) -> dict[str, Any]:
     audit_records = _read_jsonl(logs_dir / "audit.jsonl")
     decision_records = _read_jsonl(logs_dir / "decisions.jsonl")
     shadow_records = _read_jsonl(logs_dir / "shadow_decisions.jsonl", limit=100)
+    catalyst_discovery_records = _read_jsonl(logs_dir / "catalyst_discovery.jsonl", limit=50)
+    catalyst_decision_records = _read_jsonl(logs_dir / "catalyst_decisions.jsonl", limit=100)
     candidates, decisions_by_snapshot = _candidate_rows(decision_records)
     exit_by_symbol = _exit_rows(decision_records)
     option_decisions = _option_decision_rows(decision_records)
@@ -214,6 +250,8 @@ def build_dashboard_state(root: str | Path) -> dict[str, Any]:
         "option_decisions": option_decisions,
         "metrics": calculate_metrics(root_path),
         "last_shadow_decision": last_shadow,
+        "latest_catalyst_discovery": catalyst_discovery_records[-1] if catalyst_discovery_records else None,
+        "catalyst_decisions": [_safe_catalyst_record(record) for record in catalyst_decision_records[-20:]],
         "safety": {
             "allow_options": bool(risk.get("allow_options", False)),
             "allow_fractional_shares": bool(risk.get("allow_fractional_shares", False)),
@@ -246,7 +284,8 @@ function optionLine(d){let pos=d.option_positions||[],orders=d.option_orders||[]
 function candidates(d){let rows=(d.candidates||[]).map(x=>{let t=x.technical||{},r=x.regime||{};return `<tr><td>${esc(x.ticker)}</td><td class="${x.action==='buy'?'ok':'warn'}">${esc(x.action)}</td><td>${esc(r.status)} / ${r.eligible?'可':'否'}</td><td>${pct(t.relative_strength_20d)}</td><td>${pct(t.price_change_5d_pct)}</td><td>${Number(t.volume_ratio??0).toFixed(2)}</td><td>${list(x.reasons)}</td></tr>`}).join('');return `<section class="panel wide"><h2>十标的硬筛选：为什么买 / 为什么不买</h2><table><thead><tr><th>标的</th><th>结果</th><th>市场状态</th><th>20日相对强度</th><th>5日变化</th><th>量比</th><th>可审计原因</th></tr></thead><tbody>${rows||'<tr><td colspan="7">尚无基线决策记录</td></tr>'}</tbody></table></section>`}
 function orders(d){let rows=(d.orders||[]).map(o=>{let b=o.baseline_explanation||{},sh=o.shadow_explanation||{},t=(b.technical||{});let shadow=sh.decision||{};return `<details><summary>${esc(o.symbol)} ${esc(o.side)} ${esc(o.filled_quantity||o.quantity)} 股 · ${esc(o.status)} · ${money(o.average_fill_price||o.limit_price)}</summary><p>订单 ID：<span class="mono">${esc(o.order_id)}</span></p><p>基线策略：${esc(o.thesis)}。当时 RS20 ${pct(t.relative_strength_20d)}，5日 ${pct(t.price_change_5d_pct)}，量比 ${esc(t.volume_ratio??'—')}。</p><p>影子判断：${esc(sh.action||'未运行')}；风控：${esc(sh.risk_reason||'—')}；模型调用 ${esc(sh.model_calls??'—')}。</p><p>结构化投资论点：${esc(shadow.thesis||'—')}</p><p>支持证据：${list(shadow.supporting_evidence)} 反证：${list(shadow.contrary_evidence)}</p><p>质询：${list((sh.challenge||{}).objections)}；保护动作：${list(sh.guardrail_actions)}</p></details>`}).join('');return `<section class="panel wide"><h2>订单与可解释链路</h2>${rows||'<p>尚无纸面订单。</p>'}</section>`}
 function shadow(d){let x=d.last_shadow_decision;if(!x)return '<section class="panel wide"><h2>最近影子研究</h2><p>尚无影子决策。</p></section>';let z=x.decision||{};return `<section class="panel wide"><h2>最近影子研究（结构化理由，不显示原始私有 CoT）</h2><p>${esc(x.ticker)}：<b>${esc(x.action)}</b> · 风控 ${esc(x.risk_reason)} · ${x.fail_closed?'失败关闭':'正常完成'}</p><p>论点：${esc(z.thesis)}；置信度：${esc(z.confidence)}</p><p>支持：${list(z.supporting_evidence)} 反证：${list(z.contrary_evidence)}</p><p>质询：${list((x.challenge||{}).objections)}；缺失证据：${list((x.challenge||{}).missing_evidence)}</p></section>`}
-function render(d){document.getElementById('updated').textContent='刷新 '+new Date().toLocaleTimeString();let h=d.heartbeat||{};document.getElementById('app').innerHTML=`<div class="grid"><div class="panel"><h2>运行状态</h2><div class="metric ${h.status==='ok'?'ok':'warn'}">${esc(h.status||'未知')}</div><p>${esc(h.last_heartbeat_at||'没有心跳')}</p><p>${esc((h.payload||{}).event||'—')}</p></div>${portfolio(d)}${safety(d)}${cycle(d)}</div><div class="grid">${candidates(d)}${optionLine(d)}${orders(d)}${shadow(d)}</div>`}
+function catalyst(d){let rows=(d.catalyst_decisions||[]).slice().reverse().map(x=>{let z=x.decision||{},b=x.bull_news||{},r=x.ranking||{};return `<tr><td>${esc(x.asof||'—')}</td><td>${esc(x.ticker)}</td><td>${esc(x.instrument)}</td><td class="${x.risk_approved?'ok':'warn'}">${esc(x.final_action)}</td><td>${Number(r.score??0).toFixed(3)}</td><td>${esc(z.thesis||b.catalyst_summary||'—')}</td><td>${esc(x.risk_reason||'—')}</td></tr>`}).join('');let latest=d.latest_catalyst_discovery||{};return `<section class="panel wide"><h2>Exa + DeepSeek 独立催化发现</h2><p>影子策略 · 候选 ${esc(latest.candidate_count??0)} · 深度决策 ${esc((latest.decisions||[]).length)} · 创建订单 ${esc(latest.paper_orders_created??0)}</p><table><thead><tr><th>时间</th><th>标的</th><th>工具</th><th>最终动作</th><th>排名</th><th>论点</th><th>风控结论</th></tr></thead><tbody>${rows||'<tr><td colspan="7">尚无催化策略决策</td></tr>'}</tbody></table></section>`}
+function render(d){document.getElementById('updated').textContent='刷新 '+new Date().toLocaleTimeString();let h=d.heartbeat||{};document.getElementById('app').innerHTML=`<div class="grid"><div class="panel"><h2>运行状态</h2><div class="metric ${h.status==='ok'?'ok':'warn'}">${esc(h.status||'未知')}</div><p>${esc(h.last_heartbeat_at||'没有心跳')}</p><p>${esc((h.payload||{}).event||'—')}</p></div>${portfolio(d)}${safety(d)}${cycle(d)}</div><div class="grid">${catalyst(d)}${candidates(d)}${optionLine(d)}${orders(d)}${shadow(d)}</div>`}
 async function refresh(){try{render(await fetch('/api/state',{cache:'no-store'}).then(r=>r.json()))}catch(e){document.getElementById('app').textContent='读取本地状态失败：'+e}}refresh();setInterval(refresh,5000);
 </script></body></html>"""
 
@@ -263,6 +302,10 @@ def make_handler(root: Path) -> type[BaseHTTPRequestHandler]:
                 body = _PAGE.encode("utf-8")
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
+            elif path == "/favicon.ico":
+                body = b""
+                self.send_response(HTTPStatus.NO_CONTENT)
+                self.send_header("Content-Type", "image/x-icon")
             else:
                 body = b"Not found"
                 self.send_response(HTTPStatus.NOT_FOUND)

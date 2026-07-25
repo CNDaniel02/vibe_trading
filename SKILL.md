@@ -16,21 +16,24 @@ Use real market data only as observations. Route equity orders through `scripts/
 1. Load `config/paper_mode.yaml`, `paper_risk_limits.yaml`, `equity_universe.yaml`, and `execution_costs.yaml`.
 2. Collect read-only Robinhood MCP or Alpaca bid/ask snapshots and Vibe OHLCV. Reject missing, stale, future-dated, or abnormal data.
 3. Run deterministic regime and relative-strength screening without model calls.
-4. For screened candidates only, run provider-neutral News, Challenge, and Decision agents with strict JSON Schema outputs.
-5. Keep `relative_strength_v1` as the active paper strategy and `multi_agent_relative_strength_v2_candidate` as shadow-only.
-6. Run deterministic risk checks after model synthesis; risk retains final veto authority.
-7. Submit baseline paper orders only and let the fill model decide `open`, `filled`, `rejected`, `expired`, or `cancelled`.
-8. Persist account, positions, orders, counters, decisions, fills, model usage, and audit events.
-9. Monitor positions and evaluate exits, including an end-of-day flatten rule before market close.
-10. Compare baseline and shadow decisions before any strategy promotion.
-11. Require the forward-evaluation thresholds in `config/evaluation.yaml`; do not promote from replay or Vibe backtest evidence alone.
-12. For options, permit only buy-to-open long calls/puts and sell-to-close. Reject sell-to-open, short contracts, spreads, margin, 0DTE, exercise, and assignment.
+4. For baseline-screened candidates, run provider-neutral News, Challenge, and Decision agents with strict JSON Schema outputs.
+5. Independently run `exa_deepseek_catalyst_v1`: read-only market discovery, Exa evidence, low-cost ranking, thinking Bull/News, Challenge, Decision, and deterministic risk veto.
+6. Keep `relative_strength_v1` and `long_directional_options_v1` unchanged as deterministic baselines; keep both AI strategies shadow-only.
+7. Run deterministic risk checks after model synthesis; risk retains final veto authority.
+8. Submit baseline paper orders only and let the fill model decide `open`, `filled`, `rejected`, `expired`, or `cancelled`.
+9. Persist account, positions, orders, counters, decisions, fills, model usage, evidence snapshots, and audit events.
+10. Monitor positions and evaluate exits, including an end-of-day flatten rule before market close.
+11. Compare baseline and shadow decisions before any strategy promotion.
+12. Require the forward-evaluation thresholds in `config/evaluation.yaml`; do not promote from replay or Vibe backtest evidence alone.
+13. For options, permit only buy-to-open long calls/puts and sell-to-close. Reject sell-to-open, short contracts, spreads, margin, 0DTE, exercise, and assignment.
 
 ## Key Scripts
 
 - `scripts/orchestrator/run_paper_cycle.py`: one historical-replay or forward-paper cycle.
 - `scripts/agents/investment_team.py`: preserved deterministic v1 audit baseline.
 - `scripts/agents/api_investment_team.py`: v2 gated API-driven shadow pipeline.
+- `scripts/agents/catalyst_investment_team.py`: independent catalyst extraction, ranking, Bull/News, Challenge, and Decision stages.
+- `scripts/discovery/`: immutable evidence snapshots, event/ticker cooldowns, and independent discovery orchestration.
 - `scripts/llm/`: provider abstraction, strict schemas, prompts, and usage tracking.
 - `scripts/orchestrator/run_shadow_cycle.py`: one v2 shadow decision; never submits an order.
 - `scripts/evaluation/evaluate_agents.py`: fixed-snapshot agent eval and strategy comparison.
@@ -64,7 +67,7 @@ Keep these invariants true when editing:
 - No all-in orders; max position size defaults to 25% of virtual equity.
 - Daily trade count and duplicate/idempotency guards are enforced before fill.
 - Audit logs are append-only JSONL records.
-- LLMs cannot create orders, alter risk configuration, expand the universe, or access broker tools.
+- LLMs cannot create orders, alter risk configuration, or access broker tools. Catalyst ticker extraction is permitted only inside its bounded discovery lane and every output must resolve to an exact eligible US-listed instrument before analysis.
 - API keys are read only from the configured environment-variable name; Robinhood OAuth material is read only from the current-user DPAPI-encrypted file under `state/`.
 
 ## References
@@ -79,3 +82,4 @@ Read only what is needed:
 - `references/data_sources.md` for plugin/data-source decisions.
 - `references/reused_components.md` for upstream projects and reuse notes.
 - `references/vibe_integration.md` for the exact Vibe isolation boundary.
+- `references/catalyst_strategy_policy.md` for discovery limits, evidence deduplication, cooldowns, and promotion boundaries.

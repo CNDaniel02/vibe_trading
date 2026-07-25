@@ -24,6 +24,16 @@ class MockProvider(LLMProvider):
             data = self._challenge(request.input_payload)
         elif request.agent_name == "decision_manager":
             data = self._decision(request.input_payload)
+        elif request.agent_name == "catalyst_candidate_extractor":
+            data = self._catalyst_candidates(request.input_payload)
+        elif request.agent_name == "catalyst_ranker":
+            data = self._catalyst_ranking(request.input_payload)
+        elif request.agent_name == "catalyst_bull_news_agent":
+            data = self._catalyst_bull_news(request.input_payload)
+        elif request.agent_name == "catalyst_challenge_agent":
+            data = self._catalyst_challenge(request.input_payload)
+        elif request.agent_name == "catalyst_decision_manager":
+            data = self._catalyst_decision(request.input_payload)
         else:
             raise ValueError(f"unknown mock agent: {request.agent_name}")
         validate_schema(data, request.output_schema)
@@ -187,4 +197,134 @@ class MockProvider(LLMProvider):
             "confidence": round(confidence, 3),
             "max_holding_period": "5 trading days",
             "no_trade_reason": no_trade_reason,
+        }
+
+    @staticmethod
+    def _catalyst_candidates(payload: dict[str, Any]) -> dict[str, Any]:
+        candidates: list[dict[str, Any]] = []
+        for index, seed in enumerate(payload.get("seed_candidates", [])[:20]):
+            ticker = str(seed.get("ticker", "")).upper()
+            if not ticker:
+                continue
+            candidates.append(
+                {
+                    "ticker": ticker,
+                    "company_name": seed.get("company_name"),
+                    "event_indices": [],
+                    "discovery_score": round(max(0.1, 0.9 - index * 0.02), 3),
+                    "reason": "deterministic seed candidate",
+                }
+            )
+        return {"candidates": candidates, "data_gaps": [] if candidates else ["No seed candidate was available."]}
+
+    @staticmethod
+    def _catalyst_ranking(payload: dict[str, Any]) -> dict[str, Any]:
+        ranked: list[dict[str, Any]] = []
+        candidates = [item for item in payload.get("candidates", []) if item.get("eligible", False)]
+        candidates.sort(key=lambda item: float(item.get("pre_score", 0)), reverse=True)
+        for item in candidates[:8]:
+            technical = item.get("market_context", {}).get("technical_signals", {})
+            move = float(technical.get("price_change_1d_pct") or 0)
+            direction = "bullish" if move >= 0 else "bearish"
+            preference = "equity" if direction == "bullish" else "put"
+            score = max(0.0, min(1.0, float(item.get("pre_score", 0.5))))
+            ranked.append(
+                {
+                    "ticker": str(item["ticker"]),
+                    "score": round(score, 3),
+                    "direction": direction,
+                    "catalyst_strength": round(score, 3),
+                    "evidence_quality": 0.7,
+                    "market_confirmation": round(min(1.0, abs(move) / 5), 3),
+                    "instrument_preference": preference,
+                    "rationale": "deterministic mock ranking",
+                    "risk_flags": [],
+                }
+            )
+        return {"ranked_candidates": ranked, "data_gaps": [] if ranked else ["No eligible candidate was available."]}
+
+    @staticmethod
+    def _catalyst_bull_news(payload: dict[str, Any]) -> dict[str, Any]:
+        ticker = str(payload["ticker"])
+        events = list(payload.get("available_news", []))
+        primary = events[0] if events else {}
+        explicit_event_time = primary.get("event_at")
+        direction = str(primary.get("direction", "unclear"))
+        if direction == "neutral":
+            direction = "unclear"
+        urls = [str(item.get("url")) for item in events if item.get("url")]
+        return {
+            "ticker": ticker,
+            "catalyst_summary": str(primary.get("headline") or "No grounded catalyst."),
+            "direction": direction if direction in {"positive", "negative", "mixed", "unclear"} else "unclear",
+            "materiality": 0.8 if events else 0.0,
+            "event_time": explicit_event_time,
+            "event_time_basis": "source_explicit" if explicit_event_time else "unknown",
+            "bull_case": "Grounded event may create a repricing opportunity." if events else "No bull case.",
+            "supporting_facts": [str(item.get("headline")) for item in events if item.get("headline")],
+            "source_urls": urls,
+            "assumptions": [],
+            "data_gaps": [] if events else ["No event evidence."],
+            "already_priced_in": bool(primary.get("already_priced_in", False)),
+            "confidence": 0.8 if events else 0.0,
+            "instrument_preference": "equity" if direction == "positive" else ("put" if direction == "negative" else "none"),
+        }
+
+    @staticmethod
+    def _catalyst_challenge(payload: dict[str, Any]) -> dict[str, Any]:
+        bull = payload.get("agent_context", {}).get("bull_news", {})
+        objections: list[str] = []
+        missing = list(bull.get("data_gaps", []))
+        if bull.get("direction") in {"mixed", "unclear"}:
+            objections.append("Catalyst direction is not clear.")
+        if bull.get("already_priced_in"):
+            objections.append("Catalyst may already be priced in.")
+        veto = bool(objections or missing or float(bull.get("confidence", 0)) < 0.55)
+        return {
+            "objections": objections,
+            "contradictions": [],
+            "missing_evidence": missing,
+            "stale_evidence": [],
+            "chase_risk": "low",
+            "event_risk": "low",
+            "recommendation": "no_trade" if veto else "proceed",
+            "confidence_adjustment": -0.35 if veto else 0.0,
+            "veto_recommended": veto,
+        }
+
+    @staticmethod
+    def _catalyst_decision(payload: dict[str, Any]) -> dict[str, Any]:
+        context = payload.get("agent_context", {})
+        bull = context.get("bull_news", {})
+        challenge = context.get("challenge", {})
+        ticker = str(payload["ticker"])
+        veto = bool(challenge.get("veto_recommended", False))
+        preference = str(bull.get("instrument_preference", "none"))
+        if veto or preference == "none":
+            action = "no_trade"
+            instrument = "none"
+        elif preference == "equity":
+            action = "buy"
+            instrument = "equity"
+        else:
+            action = "buy_to_open"
+            instrument = preference
+        confidence = max(
+            0.0,
+            min(1.0, float(bull.get("confidence", 0)) + float(challenge.get("confidence_adjustment", 0))),
+        )
+        return {
+            "action": action,
+            "instrument": instrument,
+            "ticker": ticker,
+            "thesis": str(bull.get("catalyst_summary", "No actionable catalyst.")),
+            "supporting_evidence": list(bull.get("supporting_facts", [])),
+            "contrary_evidence": list(challenge.get("objections", [])),
+            "entry_condition": "Fresh quote and deterministic risk approval.",
+            "invalidation_condition": "Catalyst is contradicted or market confirmation reverses.",
+            "exit_condition": "Configured stop, target, time stop, invalidation, or pre-close exit.",
+            "confidence": round(confidence, 3),
+            "max_holding_period": "5 trading days",
+            "option_preference": {"target_dte": 30, "target_abs_delta": 0.45} if instrument in {"call", "put"} else None,
+            "no_trade_reason": "Challenge veto or insufficient evidence." if action == "no_trade" else None,
         }

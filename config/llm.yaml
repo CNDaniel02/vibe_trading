@@ -22,6 +22,16 @@ api:
         type: enabled
       decision_manager:
         type: enabled
+      catalyst_candidate_extractor:
+        type: disabled
+      catalyst_ranker:
+        type: disabled
+      catalyst_bull_news_agent:
+        type: enabled
+      catalyst_challenge_agent:
+        type: enabled
+      catalyst_decision_manager:
+        type: enabled
   input_cost_per_million_usd: 0.435
   output_cost_per_million_usd: 0.87
 

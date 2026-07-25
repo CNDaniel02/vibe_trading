@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from scripts.core.config import assert_paper_mode, load_runtime_config
@@ -38,6 +39,15 @@ def run_healthcheck(root: str | Path, require_heartbeat: bool = False) -> dict:
     robinhood_mcp = RobinhoodMcpMarketDataAdapter(integrations.get("robinhood_mcp", {}), root=root).readiness()
     option_data = RobinhoodOptionMarketDataAdapter(integrations.get("robinhood_mcp", {}), config, root).readiness()
     exa = ExaNewsAdapter(forward.get("exa", {})).readiness()
+    llm_provider = str(config.get("llm", {}).get("provider", "mock"))
+    llm_key_env = str(config.get("llm", {}).get("api", {}).get("api_key_env", "OPENAI_API_KEY"))
+    llm_ready = llm_provider == "mock" or bool(os.getenv(llm_key_env))
+    catalyst_enabled = bool(
+        config.get("strategies", {})
+        .get("exa_deepseek_catalyst_v1", {})
+        .get("discovery", {})
+        .get("enabled", False)
+    )
     quote_provider = str(forward.get("quote_provider", "alpaca"))
     quote_data = {"alpaca": alpaca, "robinhood_mcp": robinhood_mcp}.get(quote_provider)
     if quote_data is None:
@@ -58,6 +68,12 @@ def run_healthcheck(root: str | Path, require_heartbeat: bool = False) -> dict:
         "quote_provider": quote_provider,
         "quote_data": quote_data,
         "forward_ready": bool(vibe["ready"] and quote_data["ready"]),
+        "catalyst_discovery": {
+            "enabled": catalyst_enabled,
+            "ready": bool(catalyst_enabled and robinhood_mcp["ready"] and exa["ready"] and llm_ready),
+            "llm_provider": llm_provider,
+            "llm_ready": llm_ready,
+        },
     }
 
 

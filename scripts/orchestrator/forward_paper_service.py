@@ -5,6 +5,7 @@ import json
 import time
 import os
 import signal
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +21,8 @@ from scripts.adapters.vibe_research_swarm_adapter import VibeResearchSwarmAdapte
 from scripts.agents.api_investment_team import ApiInvestmentTeam
 from scripts.core.audit import append_jsonl
 from scripts.core.config import assert_paper_mode, load_runtime_config
-from scripts.core.models import Quote, utc_now
+from scripts.core.models import Quote, parse_ts, utc_now
+from scripts.discovery.catalyst_pipeline import CatalystDiscoveryPipeline
 from scripts.exit.evaluate_exit import evaluate_position_exit
 from scripts.journal.write_trade_journal import write_order_journal
 from scripts.llm import build_provider
@@ -63,6 +65,14 @@ class ForwardPaperService:
         self.option_data = RobinhoodOptionMarketDataAdapter(integrations.get("robinhood_mcp", {}), self.config, self.root)
         provider, tracker = build_provider(self.config["llm"], self.root)
         self.shadow_team = ApiInvestmentTeam(self.root, self.config, provider, tracker)
+        self.catalyst_pipeline = CatalystDiscoveryPipeline(
+            self.root,
+            self.config,
+            provider,
+            tracker,
+            news_adapter=self.news_adapter,
+            option_data=self.option_data,
+        )
         self.tracker = tracker
 
     def readiness(self) -> dict[str, Any]:
@@ -86,6 +96,7 @@ class ForwardPaperService:
             "llm_ready": llm_ready,
             "ready_for_forward_quotes": vibe_status["ready"] and quote_provider["ready"],
             "ready_for_news_shadow": exa["ready"] and llm_ready,
+            "ready_for_catalyst_discovery": quote_provider["ready"] and exa["ready"] and llm_ready,
             "ready_for_full_forward_evaluation": vibe_status["ready"] and quote_provider["ready"] and option_data["ready"] and exa["ready"] and llm_ready,
         }
 
@@ -247,6 +258,23 @@ class ForwardPaperService:
         append_jsonl(self.root, "audit.jsonl", {"event": "vibe_research_complete", "research_only": True, "result": result})
         return result
 
+    def run_catalyst_discovery(self, now: str | None = None) -> dict[str, Any]:
+        result = self.catalyst_pipeline.run(now)
+        append_jsonl(
+            self.root,
+            "audit.jsonl",
+            {
+                "event": result.get("event"),
+                "strategy": "exa_deepseek_catalyst_v1",
+                "cycle_id": result.get("cycle_id"),
+                "candidate_count": result.get("candidate_count", 0),
+                "decision_count": len(result.get("decisions", [])),
+                "paper_orders_created": result.get("paper_orders_created", 0),
+                "live_order_tools_called": False,
+            },
+        )
+        return result
+
     def _attach_news(self, snapshot: dict[str, Any]) -> dict[str, Any]:
         enriched = dict(snapshot)
         try:
@@ -256,6 +284,20 @@ class ForwardPaperService:
             metadata = [{"source": "exa", "source_tier": 4, "error": str(exc)}]
         enriched["available_news"] = news
         enriched["source_metadata"] = [*snapshot["source_metadata"], *metadata]
+        observed_times = [snapshot["decision_time"]]
+        observed_times.extend(
+            str(item.get("retrieved_at") or item.get("first_seen_at"))
+            for item in news
+            if item.get("retrieved_at") or item.get("first_seen_at")
+        )
+        observed_times.extend(
+            str(item.get("retrieved_at"))
+            for item in metadata
+            if item.get("retrieved_at")
+        )
+        refreshed_cutoff = max(parse_ts(value) for value in observed_times).isoformat()
+        enriched["decision_time"] = refreshed_cutoff
+        enriched["data_cutoff_time"] = refreshed_cutoff
         return enriched
 
     def _submit_baseline_entry(self, snapshot: dict[str, Any], quote: Quote) -> dict[str, Any] | None:
@@ -544,9 +586,35 @@ def serve(root: str | Path) -> None:
         result = service.run_hourly_research()
         _emit_runtime_event({"event": result.get("event"), "reason": result.get("reason")})
 
+    def run_catalyst_cycle() -> None:
+        result = service.run_catalyst_discovery()
+        _emit_runtime_event(
+            {
+                "event": result.get("event"),
+                "strategy": result.get("strategy", "exa_deepseek_catalyst_v1"),
+                "candidate_count": result.get("candidate_count", 0),
+                "ranked_candidates": len(result.get("ranked_candidates", [])),
+                "decisions": len(result.get("decisions", [])),
+                "paper_orders_created": result.get("paper_orders_created", 0),
+                "reason": result.get("reason"),
+            }
+        )
+
     scheduler.add_job(run_forward_cycle, "interval", seconds=int(runtime.get("forward_cycle_seconds", 300)), id="forward-paper-cycle", max_instances=1, coalesce=True)
     if service.swarm.config.get("enabled", False):
         scheduler.add_job(run_research_cycle, "interval", seconds=int(runtime.get("research_cycle_seconds", 3600)), id="vibe-hourly-research", max_instances=1, coalesce=True)
+    catalyst_profile = getattr(service, "config", {}).get("strategies", {}).get("exa_deepseek_catalyst_v1", {})
+    catalyst_discovery = catalyst_profile.get("discovery", {})
+    if catalyst_discovery.get("enabled", False):
+        scheduler.add_job(
+            run_catalyst_cycle,
+            "interval",
+            seconds=int(catalyst_discovery.get("cycle_seconds", 3600)),
+            id="exa-deepseek-catalyst-discovery",
+            max_instances=1,
+            coalesce=True,
+            next_run_time=datetime.now(timezone.utc),
+        )
     lock = ProcessLock(Path(root) / "state" / "forward_service.lock")
     if not lock.acquire():
         raise RuntimeError("forward paper service is already running")
@@ -589,11 +657,14 @@ def main() -> None:
     parser.add_argument("--root", default=str(Path(__file__).resolve().parents[2]))
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--readiness", action="store_true")
+    parser.add_argument("--catalyst-once", action="store_true")
     parser.add_argument("--now")
     args = parser.parse_args()
     service = ForwardPaperService(args.root)
     if args.readiness:
         result = service.readiness()
+    elif args.catalyst_once:
+        result = service.run_catalyst_discovery(args.now)
     elif args.once:
         result = service.run_once(args.now)
     else:
