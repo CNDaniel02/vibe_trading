@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "quantity", "average_price", "opened_at", "updated_at", "realized_pnl"],
+  "properties": {
+    "contract": {"$ref": "option_contract.schema.json"},
+    "quantity": {"type": "integer", "minimum": 1},
+    "average_price": {"type": "number", "minimum": 0},
+    "opened_at": {"type": "string", "format": "date-time"},
+    "updated_at": {"type": "string", "format": "date-time"},
+    "realized_pnl": {"type": "number"}
+  }
+}

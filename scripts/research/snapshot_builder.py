@@ -17,6 +17,7 @@ def build_snapshot(
     available_news: list[dict[str, Any]] | None = None,
     source_metadata: list[dict[str, Any]] | None = None,
     positions: dict[str, Position] | None = None,
+    benchmark_quote: Quote | None = None,
 ) -> dict[str, Any]:
     ticker = ticker.upper()
     decision_time = clock.asof
@@ -33,9 +34,14 @@ def build_snapshot(
         expected_volume = average_volume * max(0.1, clock.session_progress)
         volume_ratio = quote.session_volume / expected_volume if expected_volume > 0 else 0.0
     else:
-        volume_ratio = 1.0
+        volume_ratio = None
     chase_score = max(0.0, min(1.0, max(price_1d / 8.0, price_5d / 15.0)))
-    benchmark_change = _pct_change(quote.last, quote.previous_close) if ticker == "SPY" else _benchmark_change(bars, cutoff)
+    if ticker == "SPY":
+        benchmark_change = _pct_change(quote.last, quote.previous_close)
+    elif benchmark_quote is not None:
+        benchmark_change = _pct_change(benchmark_quote.last, benchmark_quote.previous_close)
+    else:
+        benchmark_change = _benchmark_change(bars, cutoff)
     snapshot_key = f"{ticker}|{clock.asof[:16]}|{quote.asof}|{quote.bid:.4f}|{quote.ask:.4f}"
     snapshot_id = f"fwd_{hashlib.sha256(snapshot_key.encode('utf-8')).hexdigest()[:20]}"
     metadata = [
@@ -62,7 +68,8 @@ def build_snapshot(
             "relative_strength_20d": round(relative_strength, 4),
             "price_change_1d_pct": round(price_1d, 4),
             "price_change_5d_pct": round(price_5d, 4),
-            "volume_ratio": round(volume_ratio, 4),
+            "volume_ratio": round(volume_ratio, 4) if volume_ratio is not None else None,
+            "volume_data_available": volume_ratio is not None,
             "chase_score": round(chase_score, 4),
         },
         "available_news": list(available_news or []),

@@ -9,9 +9,32 @@ def generate_report(root: str | Path) -> Path:
     metrics = calculate_metrics(root)
     path = Path(root) / "logs" / "performance_report.md"
     path.parent.mkdir(parents=True, exist_ok=True)
-    lines = ["# Paper Trading Performance Report", ""]
-    for key, value in metrics.items():
-        lines.append(f"- {key}: {value}")
+    lines = [
+        "# Paper Trading Performance Report",
+        "",
+        "## Shared Account",
+        f"- Initial cash: ${metrics['initial_cash']:.2f}",
+        f"- Ending equity: ${metrics['ending_equity']:.2f}",
+        f"- Net return: {metrics['net_return_pct']:.4f}%",
+        f"- Maximum drawdown: {metrics['max_drawdown_pct']:.4f}%",
+        f"- Rule violations: {metrics['rule_violations']}",
+    ]
+    for line_name, line_metrics in metrics["lines"].items():
+        lines.extend(
+            [
+                "",
+                f"## {line_name.title()} Line",
+                f"- Net PnL: ${line_metrics['net_pnl']:.2f}",
+                f"- Closed trades: {line_metrics['closed_trade_count']}",
+                f"- Win rate: {line_metrics['win_rate']:.4f}",
+                f"- Profit factor: {line_metrics['profit_factor']}",
+                f"- Fill rate: {line_metrics['fill_rate']:.4f}",
+                f"- Unfilled rate: {line_metrics['unfilled_rate']:.4f}",
+                f"- Evidence sufficient: {line_metrics['evidence_sufficient']}",
+                f"- Promotion eligible: {line_metrics['promotion_eligible']}",
+                f"- Profitability label: {line_metrics['profitability']}",
+            ]
+        )
     lines.extend([
         "",
         "## Decision",

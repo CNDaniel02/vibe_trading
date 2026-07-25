@@ -131,12 +131,52 @@ class ApiInvestmentTeam:
                 agent_name=name,
                 prompt_version=self.prompt_version,
                 system_prompt=prompt,
-                input_payload=payload,
+                input_payload=self._compact_provider_payload(payload),
                 output_schema=schema,
                 schema_name=f"{name}_{self.prompt_version}",
             )
         )
         return response.data
+
+    @staticmethod
+    def _compact_provider_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        """Keep primary news facts but bound variable-length Exa excerpts.
+
+        The immutable, full snapshot continues to be saved to the decision log.
+        This only reduces the request transmitted to the LLM, avoiding slow or
+        incomplete structured responses caused by unbounded search highlights.
+        """
+        result = dict(payload)
+        news_items = payload.get("available_news")
+        if not isinstance(news_items, list):
+            return result
+
+        allowed_fields = (
+            "headline",
+            "published_at",
+            "first_seen_at",
+            "source",
+            "source_tier",
+            "ticker_relevance",
+            "direction",
+            "novelty",
+            "already_priced_in",
+            "confidence",
+            "url",
+        )
+        compacted: list[dict[str, Any]] = []
+        for item in news_items[:6]:
+            if not isinstance(item, dict):
+                continue
+            compact = {field: item[field] for field in allowed_fields if field in item}
+            highlights = item.get("highlights")
+            if isinstance(highlights, list):
+                compact["highlights"] = [str(value)[:600] for value in highlights[:2]]
+            elif isinstance(highlights, str):
+                compact["highlights"] = highlights[:600]
+            compacted.append(compact)
+        result["available_news"] = compacted
+        return result
 
     @staticmethod
     def _with_context(snapshot: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:

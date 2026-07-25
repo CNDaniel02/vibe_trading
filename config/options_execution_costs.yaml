@@ -1,0 +1,9 @@
+commission_per_contract_usd: 0
+regulatory_fee_per_order_usd: 0
+slippage_bps: 20
+minimum_slippage_usd_per_contract: 0.01
+spread_cost_enabled: true
+contract_multiplier: 100
+price_tick_usd: 0.01
+open_order_expiry_seconds: 120
+quote_stale_after_seconds: 30

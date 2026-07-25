@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["option_id", "chain_id", "underlying", "option_type", "strike_price", "expiration_date", "multiplier"],
+  "properties": {
+    "option_id": {"type": "string", "minLength": 1},
+    "chain_id": {"type": "string", "minLength": 1},
+    "underlying": {"type": "string", "pattern": "^[A-Z][A-Z0-9.-]{0,9}$"},
+    "option_type": {"enum": ["call", "put"]},
+    "strike_price": {"type": "number", "exclusiveMinimum": 0},
+    "expiration_date": {"type": "string", "format": "date"},
+    "multiplier": {"const": 100},
+    "exercise_style": {"const": "american"},
+    "settlement_type": {"const": "physical"},
+    "sellout_datetime": {"type": ["string", "null"], "format": "date-time"},
+    "below_tick": {"type": "number", "exclusiveMinimum": 0},
+    "above_tick": {"type": "number", "exclusiveMinimum": 0},
+    "tick_cutoff_price": {"type": "number", "minimum": 0}
+  }
+}

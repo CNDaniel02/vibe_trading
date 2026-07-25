@@ -1,15 +1,29 @@
-provider: mock
-prompt_version: v1
+provider: api
+prompt_version: v2-calibrated
 
 api:
-  base_url: https://api.openai.com/v1
+  base_url: https://api.deepseek.com
+  base_url_env: OPENAI_BASE_URL
   endpoint: /chat/completions
-  model: gpt-4.1-mini
+  model: deepseek-v4-pro
   api_key_env: OPENAI_API_KEY
   timeout_seconds: 45
   max_retries: 2
-  input_cost_per_million_usd: null
-  output_cost_per_million_usd: null
+  max_tokens: 4096
+  response_format: json_object
+  # Keep fact extraction fast, but retain DeepSeek thinking for the two stages
+  # that weigh contrary evidence and make the shadow investment conclusion.
+  # The dashboard presents their structured rationale, not private raw CoT.
+  thinking:
+    default:
+      type: disabled
+    agents:
+      challenge_agent:
+        type: enabled
+      decision_manager:
+        type: enabled
+  input_cost_per_million_usd: 0.435
+  output_cost_per_million_usd: 0.87
 
 local:
   enabled: false

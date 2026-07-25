@@ -8,6 +8,7 @@ from scripts.core.models import Order, Position, Quote
 from scripts.core.state import JsonStateStore
 from scripts.exit.evaluate_exit import should_exit_before_close
 from scripts.orchestrator.run_paper_cycle import run_cycle
+from scripts.risk.position_sizing import calculate_entry_quantity
 from scripts.simulation.paper_broker import PaperBroker
 
 NOW = "2026-07-04T14:00:30+00:00"
@@ -64,6 +65,15 @@ def test_paper_cash_is_separate_from_robinhood_cash(paper_root):
     pb = broker(paper_root)
     assert pb.store.account().cash == 2000
     assert fake_robinhood_cash != pb.store.account().cash
+
+
+def test_fractional_position_size_rounds_down_to_configured_increment(paper_root):
+    config = load_runtime_config(paper_root)
+    pb = broker(paper_root)
+    q = quote(bid=327.7, ask=327.8)
+    quantity = calculate_entry_quantity(pb.store.account(), {}, q, config["risk"], notional_buffer_pct=0.96)
+    assert quantity == 1.464
+    assert quantity * q.ask <= 2000 * 0.25 * 0.96
 
 
 def test_order_does_not_fill_when_limit_not_reached(paper_root):
