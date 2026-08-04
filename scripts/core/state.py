@@ -21,7 +21,21 @@ class JsonStateStore:
         self._ensure_file("paper_account.json", Account(cash=self.initial_cash, initial_cash=self.initial_cash).to_dict())
         self._ensure_file("paper_positions.json", {})
         self._ensure_file("paper_orders.json", {})
-        self._ensure_file("daily_counters.json", {"date": utc_now()[:10], "trades": 0, "daily_realized_pnl": 0.0})
+        self._ensure_file("paper_option_positions.json", {})
+        self._ensure_file("paper_option_orders.json", {})
+        self._ensure_file("daily_counters.json", self._empty_counters(utc_now()[:10]))
+
+    @staticmethod
+    def _empty_counters(day: str) -> dict[str, Any]:
+        return {
+            "date": day,
+            "trades": 0,
+            "equity_trades": 0,
+            "option_trades": 0,
+            "daily_realized_pnl": 0.0,
+            "equity_realized_pnl": 0.0,
+            "option_realized_pnl": 0.0,
+        }
 
     def _ensure_file(self, name: str, default: Any) -> None:
         path = self.path(name)
@@ -70,21 +84,26 @@ class JsonStateStore:
     def daily_counters(self, asof: str | None = None) -> dict[str, Any]:
         self.ensure()
         today = parse_ts(asof).date().isoformat() if asof else utc_now()[:10]
-        counters = self.read_json("daily_counters.json", {"date": today, "trades": 0, "daily_realized_pnl": 0.0})
+        counters = self.read_json("daily_counters.json", self._empty_counters(today))
         if counters.get("date") != today:
-            counters = {"date": today, "trades": 0, "daily_realized_pnl": 0.0}
+            counters = self._empty_counters(today)
             self.write_json("daily_counters.json", counters)
-        counters.setdefault("daily_realized_pnl", 0.0)
+        for key, value in self._empty_counters(today).items():
+            counters.setdefault(key, value)
         return counters
 
-    def increment_trades(self, asof: str | None = None) -> int:
+    def increment_trades(self, asof: str | None = None, line: str = "equity") -> int:
         counters = self.daily_counters(asof)
         counters["trades"] = int(counters.get("trades", 0)) + 1
+        line_key = "option_trades" if line == "options" else "equity_trades"
+        counters[line_key] = int(counters.get(line_key, 0)) + 1
         self.write_json("daily_counters.json", counters)
         return counters["trades"]
 
-    def add_daily_realized_pnl(self, amount: float, asof: str | None = None) -> float:
+    def add_daily_realized_pnl(self, amount: float, asof: str | None = None, line: str = "equity") -> float:
         counters = self.daily_counters(asof)
         counters["daily_realized_pnl"] = round(float(counters.get("daily_realized_pnl", 0)) + float(amount), 8)
+        line_key = "option_realized_pnl" if line == "options" else "equity_realized_pnl"
+        counters[line_key] = round(float(counters.get(line_key, 0)) + float(amount), 8)
         self.write_json("daily_counters.json", counters)
         return float(counters["daily_realized_pnl"])

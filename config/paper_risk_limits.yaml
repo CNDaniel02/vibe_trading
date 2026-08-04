@@ -5,7 +5,7 @@ max_open_positions: 5
 allow_average_down: false
 allow_add_to_position: false
 allow_short: false
-allow_options: false
+allow_options: true
 allow_margin: false
 reject_duplicate_open_order: true
 reject_missing_quote: true
@@ -15,3 +15,8 @@ max_daily_loss_pct_of_initial_equity: 0.03
 stop_loss_pct: 0.03
 take_profit_pct: 0.06
 max_holding_calendar_days: 5
+# Simulated fractional shares are allowed in the local paper broker only.
+# The fraction is always rounded down before the existing notional/position
+# caps run; no live broker order is ever created from this setting.
+allow_fractional_shares: true
+fractional_share_increment: 0.001

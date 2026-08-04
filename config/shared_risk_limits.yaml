@@ -1,0 +1,7 @@
+enabled: true
+max_total_deployed_pct_of_equity: 0.60
+max_equity_deployed_pct_of_equity: 0.50
+max_options_deployed_pct_of_equity: 0.20
+max_total_daily_entry_trades: 4
+reserve_open_orders: true
+fail_closed_on_missing_position_quote: true

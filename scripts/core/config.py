@@ -32,6 +32,10 @@ def load_runtime_config(root: str | Path | None = None) -> dict[str, Any]:
     strategies_path = base / "config" / "strategy_profiles.yaml"
     integrations_path = base / "config" / "integrations.yaml"
     evaluation_path = base / "config" / "evaluation.yaml"
+    options_universe_path = base / "config" / "options_universe.yaml"
+    options_risk_path = base / "config" / "options_risk_limits.yaml"
+    options_costs_path = base / "config" / "options_execution_costs.yaml"
+    shared_risk_path = base / "config" / "shared_risk_limits.yaml"
     return {
         "paper": paper,
         "universe": universe,
@@ -41,6 +45,10 @@ def load_runtime_config(root: str | Path | None = None) -> dict[str, Any]:
         "strategies": load_yaml(strategies_path) if strategies_path.exists() else {},
         "integrations": load_yaml(integrations_path) if integrations_path.exists() else {},
         "evaluation": load_yaml(evaluation_path) if evaluation_path.exists() else {},
+        "options_universe": load_yaml(options_universe_path) if options_universe_path.exists() else {"enabled": False},
+        "options_risk": load_yaml(options_risk_path) if options_risk_path.exists() else {"enabled": False},
+        "options_costs": load_yaml(options_costs_path) if options_costs_path.exists() else {},
+        "shared_risk": load_yaml(shared_risk_path) if shared_risk_path.exists() else {"enabled": False},
         "root": str(base),
     }
 

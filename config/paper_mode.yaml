@@ -3,6 +3,10 @@ mode:
   live_readonly: false
   live_trading: false
 
+strategy_lines:
+  equity: true
+  options: true
+
 paper_initial_cash_usd: 2000
 base_currency: USD
 quote_stale_after_seconds: 60

@@ -28,9 +28,9 @@ vibe:
       - read_url
 
 forward_data:
-  quote_provider: alpaca
+  quote_provider: robinhood_mcp
   alpaca:
-    enabled: false
+    enabled: true
     base_url: https://data.alpaca.markets
     key_id_env: ALPACA_API_KEY_ID
     secret_key_env: ALPACA_API_SECRET_KEY
@@ -50,11 +50,20 @@ forward_data:
     include_domains: []
     exclude_domains: []
 
+robinhood_mcp:
+  enabled: true
+  endpoint: https://agent.robinhood.com/mcp/trading
+  credential_store_path: state/robinhood_mcp_oauth.dpapi
+  redirect_uri: http://127.0.0.1:8765/callback
+  client_name: auto-trading-skill read-only capability audit
+  expected_tool_count: 50
+
 runtime:
   forward_cycle_seconds: 300
   research_cycle_seconds: 3600
   watchdog_max_age_seconds: 900
   max_candidates_per_cycle: 3
+  max_option_candidates_per_cycle: 3
   order_notional_buffer_pct: 0.96
   fail_if_history_unavailable: true
 

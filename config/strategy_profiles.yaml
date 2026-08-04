@@ -5,6 +5,50 @@ shadow_strategies:
 relative_strength_v1:
   execution: paper_broker
   allow_model_calls: false
+  min_relative_strength_20d_pct: 0.25
+  min_price_change_1d_pct: -999
+  min_price_change_5d_pct: 0.5
+  min_volume_ratio: 0.4
+  require_intraday_volume_confirmation: true
+  max_chase_score: 0.75
+
+long_directional_options_v1:
+  execution: options_paper_broker
+  allow_model_calls: false
+  min_volume_ratio: 0.4
+  bullish_min_relative_strength_20d_pct: 0.5
+  bullish_min_price_change_5d_pct: 0.5
+  bullish_min_price_change_1d_pct: -1.0
+  bearish_max_relative_strength_20d_pct: -0.25
+  bearish_max_price_change_5d_pct: -1.0
+  bearish_max_price_change_1d_pct: 0.0
+  max_chase_score: 0.75
+
+exa_deepseek_catalyst_v1:
+  execution: shadow_only
+  allow_model_calls: true
+  may_replace_active_strategy: false
+  share_account_state_with_baseline: false
+  share_order_state_with_baseline: false
+  discovery:
+    enabled: true
+    cycle_seconds: 3600
+    lookback_hours: 48
+    ticker_cooldown_minutes: 120
+    event_cooldown_hours: 24
+    max_saved_scans: 3
+    max_earnings_candidates: 12
+    max_market_exa_searches: 2
+    max_candidates_before_ranking: 30
+    max_ranked_candidates: 8
+    max_deep_research_candidates: 3
+    max_ticker_exa_searches: 3
+    minimum_market_cap_usd: 1000000000
+    minimum_average_daily_volume_usd: 20000000
+    maximum_spread_bps: 50
+    market_queries:
+      - US public company material announcement SEC FDA merger acquisition guidance earnings regulatory action
+      - NYSE Nasdaq company unusual price move high volume major corporate news
 
 multi_agent_relative_strength_v2_candidate:
   execution: shadow_only

@@ -156,6 +156,157 @@ def test_api_provider_sends_strict_schema_and_tracks_usage(monkeypatch):
     assert tracker.summary()["estimated_cost_usd"] == pytest.approx(0.00018)
 
 
+def test_api_provider_supports_deepseek_json_mode_and_base_url_override(monkeypatch):
+    monkeypatch.setenv("TEST_LLM_API_KEY", "not-a-real-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://deepseek.example")
+    snapshot = agent_input(load_snapshots(DEFAULT_FIXTURES)[0])
+    request = ProviderRequest("news_agent", "v1", "test", snapshot, NEWS_OUTPUT_SCHEMA, "news_v1")
+    structured = MockProvider(UsageTracker()).generate(request).data
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "id": "fake-response",
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {"content": f"```json\\n{json.dumps(structured)}\\n```"},
+                        }
+                    ],
+                }
+            ).encode("utf-8")
+
+    def fake_urlopen(http_request, timeout):
+        captured["url"] = http_request.full_url
+        captured["body"] = json.loads(http_request.data.decode("utf-8"))
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    provider = ApiProvider(
+        {
+            "base_url": "https://ignored.example",
+            "base_url_env": "OPENAI_BASE_URL",
+            "endpoint": "/chat/completions",
+            "model": "deepseek-v4-pro",
+            "api_key_env": "TEST_LLM_API_KEY",
+            "response_format": "json_object",
+            "max_tokens": 4096,
+            "thinking": {"type": "disabled"},
+        },
+        UsageTracker(),
+    )
+    assert provider.generate(request).data == structured
+    assert captured["url"] == "https://deepseek.example/chat/completions"
+    assert captured["body"]["response_format"] == {"type": "json_object"}
+    assert captured["body"]["max_tokens"] == 4096
+    assert captured["body"]["thinking"] == {"type": "disabled"}
+    assert "JSON Schema" in captured["body"]["messages"][0]["content"]
+
+
+def test_api_provider_empty_structured_content_is_diagnostic_but_safe(monkeypatch):
+    monkeypatch.setenv("TEST_LLM_API_KEY", "not-a-real-key")
+    snapshot = agent_input(load_snapshots(DEFAULT_FIXTURES)[0])
+    request = ProviderRequest("news_agent", "v1", "test", snapshot, NEWS_OUTPUT_SCHEMA, "news_v1")
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "choices": [
+                        {
+                            "finish_reason": "length",
+                            "message": {"content": "", "reasoning_content": "internal reasoning"},
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: FakeResponse())
+    tracker = UsageTracker()
+    provider = ApiProvider(
+        {"base_url": "https://example.invalid", "model": "test", "api_key_env": "TEST_LLM_API_KEY", "max_retries": 0},
+        tracker,
+    )
+    with pytest.raises(ProviderError, match="empty assistant content .*finish_reason=length"):
+        provider.generate(request)
+    assert "internal reasoning" not in str(tracker.records[-1].error)
+
+
+def test_api_provider_selects_thinking_mode_by_agent(monkeypatch):
+    monkeypatch.setenv("TEST_LLM_API_KEY", "not-a-real-key")
+    snapshot = agent_input(load_snapshots(DEFAULT_FIXTURES)[0])
+    structured = MockProvider(UsageTracker()).generate(
+        ProviderRequest("news_agent", "v1", "test", snapshot, NEWS_OUTPUT_SCHEMA, "news_v1")
+    ).data
+    captured = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": json.dumps(structured)}}]}).encode("utf-8")
+
+    def fake_urlopen(http_request, timeout):
+        assert timeout > 0
+        captured.append(json.loads(http_request.data.decode("utf-8")))
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    provider = ApiProvider(
+        {
+            "base_url": "https://example.invalid",
+            "model": "test",
+            "api_key_env": "TEST_LLM_API_KEY",
+            "thinking": {
+                "default": {"type": "disabled"},
+                "agents": {"challenge_agent": {"type": "enabled"}},
+            },
+        },
+        UsageTracker(),
+    )
+    assert provider.generate(ProviderRequest("news_agent", "v1", "test", snapshot, NEWS_OUTPUT_SCHEMA, "news_v1")).data == structured
+    assert provider.generate(ProviderRequest("challenge_agent", "v1", "test", snapshot, NEWS_OUTPUT_SCHEMA, "challenge_v1")).data == structured
+    assert captured[0]["thinking"] == {"type": "disabled"}
+    assert captured[1]["thinking"] == {"type": "enabled"}
+
+
+def test_team_compacts_only_llm_news_excerpts(paper_root):
+    team, _ = make_team(paper_root)
+    payload = {
+        "snapshot_id": "compact-test",
+        "available_news": [
+            {
+                "headline": "Headline",
+                "published_at": "2026-07-01T00:00:00Z",
+                "highlights": ["a" * 1000, "b" * 1000, "c" * 1000],
+                "irrelevant": "drop",
+            }
+        ],
+    }
+    compacted = team._compact_provider_payload(payload)
+    assert payload["available_news"][0]["highlights"][0] == "a" * 1000
+    assert "irrelevant" not in compacted["available_news"][0]
+    assert compacted["available_news"][0]["highlights"] == ["a" * 600, "b" * 600]
+
+
 def test_strategy_comparison_is_same_snapshot_and_shadow_only(paper_root):
     report = evaluate(paper_root, DEFAULT_FIXTURES, "mock")
     assert report["comparison"]["baseline"]["strategy"] == "relative_strength_v1"

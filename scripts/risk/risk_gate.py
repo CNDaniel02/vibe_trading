@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from scripts.core.models import Account, Order, Position, Quote, parse_ts
+from scripts.risk.shared_portfolio_risk import check_shared_entry
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,8 @@ def check_order(
     counters: dict,
     config: dict,
     now: str,
+    option_positions: dict | None = None,
+    option_orders: dict | None = None,
 ) -> RiskDecision:
     risk = config["risk"]
     universe = config["universe"]
@@ -110,6 +113,20 @@ def check_order(
             return RiskDecision(False, "adding to an existing position is blocked")
         if len(positions) >= int(risk.get("max_open_positions", 999)) and current_position is None:
             return RiskDecision(False, "max open positions reached")
+
+        shared = check_shared_entry(
+            line="equity",
+            new_risk_usd=notional,
+            account=account,
+            equity_positions=positions,
+            option_positions=option_positions or {},
+            equity_orders=open_orders,
+            option_orders=option_orders or {},
+            counters=counters,
+            shared_config=config.get("shared_risk", {}),
+        )
+        if not shared.approved:
+            return RiskDecision(False, shared.reason)
 
     if order.side == "sell" and current_position and order.quantity > current_position.quantity + 1e-9:
         return RiskDecision(False, "sell quantity exceeds position")

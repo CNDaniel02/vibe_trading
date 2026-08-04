@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from scripts.adapters.vibe_market_data_adapter import MarketBar
 from scripts.core.models import Quote
 from scripts.evaluation.calculate_metrics import calculate_metrics
@@ -92,6 +94,15 @@ def run_dry_run(project_root: str | Path) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="auto-trading-dry-run-") as temp:
         root = Path(temp)
         shutil.copytree(project_root / "config", root / "config")
+        paper_path = root / "config" / "paper_mode.yaml"
+        paper_config = yaml.safe_load(paper_path.read_text(encoding="utf-8"))
+        paper_config.setdefault("strategy_lines", {})["options"] = False
+        paper_path.write_text(yaml.safe_dump(paper_config, sort_keys=False), encoding="utf-8")
+        llm_path = root / "config" / "llm.yaml"
+        llm_config = yaml.safe_load(llm_path.read_text(encoding="utf-8"))
+        llm_config["provider"] = "mock"
+        llm_config["usage_log"] = "logs/evals/dry_run_usage.jsonl"
+        llm_path.write_text(yaml.safe_dump(llm_config, sort_keys=False), encoding="utf-8")
         (root / "state").mkdir()
         (root / "logs").mkdir()
         service = ForwardPaperService(root)

@@ -17,7 +17,7 @@
       "market_regime": "neutral",
       "benchmark_change_1d_pct": 0.2,
       "volatility_change_pct": -1.0,
-      "binary_event_within_days": 30,
+      "binary_event_within_days": 99,
       "has_position": false
     },
     "technical_signals": {

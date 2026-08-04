@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Catalyst Evidence Snapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["snapshot_type", "decision_time", "retrieved_at", "payload", "snapshot_hash"],
+  "properties": {
+    "snapshot_type": {"type": "string"},
+    "decision_time": {"type": "string", "format": "date-time"},
+    "retrieved_at": {"type": "string", "format": "date-time"},
+    "payload": {"type": "object"},
+    "snapshot_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}

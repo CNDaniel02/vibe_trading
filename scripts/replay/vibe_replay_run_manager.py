@@ -75,12 +75,15 @@ class VibeReplayRunManager:
         order_count = 0
         exit_count = 0
         last_quotes: dict[str, Quote] = {}
+        session_volumes: dict[str, float] = defaultdict(float)
         for timestamp in timestamps:
             decision_time = (parse_ts(timestamp) + timedelta(seconds=int(self.replay_config.get("quote_delay_seconds", 1)))).isoformat()
             clock = self.clock.status(decision_time)
             if not clock.is_regular:
                 continue
-            quotes = self._quotes_for_timestamp(timeline[timestamp], daily, timestamp)
+            for symbol, bar in timeline[timestamp].items():
+                session_volumes[symbol] += max(0, bar.volume)
+            quotes = self._quotes_for_timestamp(timeline[timestamp], daily, timestamp, session_volumes)
             last_quotes.update(quotes)
             self.broker.process_open_orders(last_quotes, decision_time)
             exit_count += self._process_exits(last_quotes, clock)
@@ -93,7 +96,7 @@ class VibeReplayRunManager:
                 quote = quotes.get(symbol)
                 if quote is None:
                     continue
-                snapshot = build_snapshot(symbol, quote, daily, clock, positions=positions)
+                snapshot = build_snapshot(symbol, quote, daily, clock, positions=positions, benchmark_quote=quotes.get("SPY"))
                 decision = decide_snapshot(snapshot, self.config)
                 append_jsonl(self.run_root, "decisions.jsonl", {"event": "baseline_decision", "mode": "vibe_replay", "decision": decision, "snapshot": snapshot})
                 decision_count += 1
@@ -145,7 +148,13 @@ class VibeReplayRunManager:
         append_jsonl(self.run_root, "audit.jsonl", result)
         return result
 
-    def _quotes_for_timestamp(self, bars: dict[str, MarketBar], daily: dict[str, list[MarketBar]], timestamp: str) -> dict[str, Quote]:
+    def _quotes_for_timestamp(
+        self,
+        bars: dict[str, MarketBar],
+        daily: dict[str, list[MarketBar]],
+        timestamp: str,
+        session_volumes: dict[str, float],
+    ) -> dict[str, Quote]:
         spread_bps = float(self.replay_config.get("synthetic_spread_bps", 10))
         quotes: dict[str, Quote] = {}
         for symbol, bar in bars.items():
@@ -161,6 +170,7 @@ class VibeReplayRunManager:
                 source=f"{bar.source}:synthetic_top_of_book",
                 avg_daily_volume_usd=adv,
                 asset_class="us_etf" if symbol in {"SPY", "QQQ", "XLK", "XLF"} else "us_equity",
+                session_volume=session_volumes.get(symbol),
                 previous_close=previous[-1].close if previous else None,
             )
         return quotes

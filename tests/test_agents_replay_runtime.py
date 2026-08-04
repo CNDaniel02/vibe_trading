@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from scripts.agents.investment_team import run_investment_team
@@ -88,8 +89,24 @@ def test_process_lock_blocks_second_acquire(paper_root):
         first.release()
 
 
+def test_process_lock_recovers_confirmed_stale_owner(paper_root):
+    lock_path = paper_root / "state" / "runner.lock"
+    lock_path.write_text("999999999", encoding="ascii")
+    lock = ProcessLock(lock_path)
+    try:
+        assert lock.acquire()
+        assert lock_path.read_text(encoding="ascii") == str(os.getpid())
+    finally:
+        lock.release()
+
+
 def test_healthcheck_and_scheduler_wrapper(paper_root):
-    assert run_healthcheck(paper_root)["ok"]
+    health = run_healthcheck(paper_root)
+    assert health["ok"]
+    assert health["quote_provider"] in {"alpaca", "robinhood_mcp"}
+    assert health["forward_ready"] == bool(
+        health["integrations"]["vibe"]["ready"] and health["quote_data"]["ready"]
+    )
     scheduler = PaperScheduler(paper_root)
     config = load_runtime_config(paper_root)
     scheduler.add_interval_job("noop", 60, lambda: config["paper"]["mode"]["paper"])

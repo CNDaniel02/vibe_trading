@@ -9,6 +9,8 @@ venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.playwright-cli/
+.tmp/
 .mypy_cache/
 .ruff_cache/
 .coverage
@@ -22,6 +24,7 @@ dist/
 logs/
 state/
 graphify-out/
+references/TradingAgents/
 *.log
 *.pid
 *.sqlite

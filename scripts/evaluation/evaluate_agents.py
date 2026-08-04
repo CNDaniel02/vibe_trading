@@ -123,6 +123,7 @@ def evaluate(
     assert_paper_mode(config)
     config["llm"] = deepcopy(config.get("llm", {}))
     config["llm"]["provider"] = provider_name
+    config["llm"]["usage_log"] = f"logs/evals/{provider_name}_usage.jsonl"
     provider, tracker = build_provider(config["llm"], root)
     team = ApiInvestmentTeam(root, config, provider, tracker)
     snapshots = load_snapshots(fixtures)
@@ -187,7 +188,7 @@ def evaluate(
         if result.model_calls > 3:
             rule_violations += 1
 
-    second_provider, second_tracker = build_provider({**config["llm"], "provider": "mock", "usage_log": "logs/eval_consistency_usage.jsonl"}, root)
+    second_provider, second_tracker = build_provider({**config["llm"], "provider": "mock", "usage_log": "logs/evals/mock_consistency_usage.jsonl"}, root)
     second_team = ApiInvestmentTeam(root, config, second_provider, second_tracker)
     consistent = 0
     if provider_name == "mock":

@@ -6,18 +6,22 @@ from pathlib import Path
 
 import pytest
 
+import scripts.orchestrator.forward_paper_service as forward_service_module
 from scripts.adapters.alpaca_market_data_adapter import AlpacaMarketDataAdapter
 from scripts.adapters.exa_news_adapter import ExaNewsAdapter
+from scripts.adapters.robinhood_mcp_market_data_adapter import RobinhoodMcpMarketDataAdapter
 from scripts.adapters.vibe_market_data_adapter import MarketBar
 from scripts.adapters.vibe_research_swarm_adapter import VibeResearchSwarmAdapter
 from scripts.adapters.vibe_runtime import VibeRuntime
 from scripts.core.config import load_runtime_config
 from scripts.core.models import Position, Quote, parse_ts
 from scripts.exit.evaluate_exit import evaluate_position_exit
-from scripts.orchestrator.dry_run_forward_pipeline import run_dry_run
+from scripts.orchestrator.dry_run_forward_pipeline import _SyntheticNews, _SyntheticQuotes, _SyntheticVibe, run_dry_run
+from scripts.orchestrator.forward_paper_service import ForwardPaperService, _cycle_summary
 from scripts.replay.vibe_replay_run_manager import VibeReplayRunManager
 from scripts.runtime.market_clock import UsEquityMarketClock
 from scripts.simulation.paper_broker import PaperBroker
+from scripts.strategies.relative_strength_v1 import decide_snapshot
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,6 +49,7 @@ def test_external_adapters_expose_no_order_methods() -> None:
     adapters = [
         AlpacaMarketDataAdapter(config["forward_data"]["alpaca"]),
         ExaNewsAdapter(config["forward_data"]["exa"]),
+        RobinhoodMcpMarketDataAdapter(config["robinhood_mcp"]),
         VibeResearchSwarmAdapter(ROOT, config["vibe"]),
     ]
     forbidden = {"place_order", "submit_order", "cancel_order", "create_order"}
@@ -64,6 +69,34 @@ def test_alpaca_snapshot_maps_real_bid_and_ask(monkeypatch: pytest.MonkeyPatch) 
     assert quote.last == 210.12
     assert quote.previous_close == 208.40
     assert quote.session_volume == 12_000_000
+
+
+def test_robinhood_quote_adapter_maps_active_bid_ask_without_broker_actions() -> None:
+    adapter = RobinhoodMcpMarketDataAdapter({"enabled": True})
+    quotes = adapter._parse_quotes(
+        {
+            "data": {
+                "results": [
+                    {
+                        "quote": {
+                            "symbol": "AAPL",
+                            "bid_price": "210.10",
+                            "ask_price": "210.14",
+                            "last_trade_price": "210.12",
+                            "venue_bid_time": "2026-07-21T14:00:00Z",
+                            "state": "active",
+                            "adjusted_previous_close": "208.40",
+                        }
+                    }
+                ]
+            }
+        },
+        {"AAPL": 100_000_000},
+        {"AAPL": "us_equity"},
+    )
+    assert quotes["AAPL"].bid == 210.10
+    assert quotes["AAPL"].ask == 210.14
+    assert quotes["AAPL"].source == "robinhood_mcp:get_equity_quotes"
 
 
 def test_exa_news_filters_future_items_and_keeps_source(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -135,6 +168,17 @@ def test_add_to_existing_position_is_blocked(paper_root: Path) -> None:
     assert broker.submit_order(order, quote, now).reject_reason == "adding to an existing position is blocked"
 
 
+def test_baseline_existing_position_is_not_an_entry_candidate(paper_root: Path) -> None:
+    config = load_runtime_config(paper_root)
+    snapshot = json.loads((ROOT / "fixtures" / "agent_snapshots" / "snapshots.json").read_text(encoding="utf-8"))["defaults"]
+    snapshot["snapshot_id"] = "existing-position-baseline-test"
+    snapshot["market_data"]["has_position"] = True
+    decision = decide_snapshot(snapshot, config)
+    assert decision["action"] == "no_trade"
+    assert decision["technical"]["has_position"] is True
+    assert "existing position" in decision["technical"]["reasons"][-1]
+
+
 def test_open_order_expires_without_becoming_position(paper_root: Path) -> None:
     config = load_runtime_config(paper_root)
     config["paper"]["open_order_expiry_seconds"] = 60
@@ -179,6 +223,97 @@ def test_forward_pipeline_dry_run_closes_loop(paper_root: Path) -> None:
     assert "AAPL" in report["paper_positions"]
     assert report["metrics"]["profitability"] == "insufficient_forward_evidence"
     assert report["metrics"]["promotion_eligible"] is False
+
+
+def test_forward_cycle_refreshes_clock_after_quote_collection(paper_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class LateQuoteAdapter:
+        @staticmethod
+        def fetch_quotes(symbols, **kwargs):
+            quotes = _SyntheticQuotes.fetch_quotes(symbols, **kwargs)
+            return {
+                symbol: Quote(
+                    quote.symbol,
+                    quote.bid,
+                    quote.ask,
+                    quote.last,
+                    "2026-07-13T15:00:08Z",
+                    source=quote.source,
+                    avg_daily_volume_usd=quote.avg_daily_volume_usd,
+                    asset_class=quote.asset_class,
+                    session_volume=quote.session_volume,
+                    previous_close=quote.previous_close,
+                )
+                for symbol, quote in quotes.items()
+            }
+
+    timestamps = iter(["2026-07-13T15:00:00Z", "2026-07-13T15:00:10Z"])
+    monkeypatch.setattr("scripts.orchestrator.forward_paper_service.utc_now", lambda: next(timestamps))
+    service = ForwardPaperService(paper_root)
+    service.vibe = _SyntheticVibe()  # type: ignore[assignment]
+    service.quote_adapter = LateQuoteAdapter()  # type: ignore[assignment]
+    service.news_adapter = _SyntheticNews()  # type: ignore[assignment]
+
+    result = service.run_once()
+
+    assert result["selected_candidates"] == ["AAPL"]
+    assert result["shadow_decisions"][0]["action"] == "buy"
+    summary = _cycle_summary(result)
+    assert summary["event"] == "forward_cycle_complete"
+    assert summary["paper_orders"] == 1
+
+
+def test_forward_service_handles_keyboard_interrupt_and_releases_lock(paper_root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    class FakeService:
+        integration_config = {"runtime": {"forward_cycle_seconds": 300}}
+
+        class swarm:
+            config = {"enabled": False}
+
+    class FakeScheduler:
+        instance = None
+
+        def __init__(self, **kwargs):
+            del kwargs
+            self.running = False
+            self.jobs = []
+            FakeScheduler.instance = self
+
+        def add_job(self, callback, *args, **kwargs):
+            self.jobs.append((callback, args, kwargs))
+
+        def start(self):
+            self.running = True
+            raise KeyboardInterrupt
+
+        def shutdown(self, *, wait):
+            assert wait is False
+            self.running = False
+
+    class FakeLock:
+        instance = None
+
+        def __init__(self, path):
+            self.path = path
+            self.released = False
+            FakeLock.instance = self
+
+        def acquire(self):
+            return True
+
+        def release(self):
+            self.released = True
+
+    monkeypatch.setattr(forward_service_module, "ForwardPaperService", lambda root: FakeService())
+    monkeypatch.setattr(forward_service_module, "BlockingScheduler", FakeScheduler)
+    monkeypatch.setattr(forward_service_module, "ProcessLock", FakeLock)
+    monkeypatch.setattr(forward_service_module.signal, "signal", lambda *_: forward_service_module.signal.SIG_DFL)
+
+    forward_service_module.serve(paper_root)
+
+    events = [json.loads(line)["event"] for line in capsys.readouterr().out.splitlines()]
+    assert events == ["forward_service_started", "forward_service_stop_requested", "forward_service_stopped"]
+    assert FakeScheduler.instance is not None and not FakeScheduler.instance.running
+    assert FakeLock.instance is not None and FakeLock.instance.released
 
 
 class _ReplayFixtureAdapter:

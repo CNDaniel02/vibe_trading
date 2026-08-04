@@ -54,14 +54,36 @@ def run_technical_agent(snapshot: dict[str, Any], runtime_config: dict[str, Any]
     relative_strength = float(signals.get("relative_strength_20d", 0))
     price_change_1d = float(signals.get("price_change_1d_pct", 0))
     price_change_5d = float(signals.get("price_change_5d_pct", 0))
-    volume_ratio = float(signals.get("volume_ratio", 0))
+    raw_volume_ratio = signals.get("volume_ratio")
+    volume_ratio = float(raw_volume_ratio) if raw_volume_ratio is not None else None
     chase_score = float(signals.get("chase_score", 0))
+    profile = runtime_config.get("strategies", {}).get("relative_strength_v1", {})
+    min_relative_strength = float(profile.get("min_relative_strength_20d_pct", 0.5))
+    min_price_change_1d = float(profile.get("min_price_change_1d_pct", -999))
+    min_price_change_5d = float(profile.get("min_price_change_5d_pct", 0))
+    min_volume_ratio = float(profile.get("min_volume_ratio", 0.8))
+    require_volume = bool(profile.get("require_intraday_volume_confirmation", False))
+    volume_confirmed = volume_ratio is not None and volume_ratio >= min_volume_ratio
+    reasons: list[str] = []
+    if not quote_decision.approved:
+        reasons.append(quote_decision.reason)
+    if relative_strength < min_relative_strength:
+        reasons.append(f"20-day relative strength below {min_relative_strength}")
+    if price_change_1d < min_price_change_1d:
+        reasons.append(f"1-day price change below {min_price_change_1d}")
+    if price_change_5d < min_price_change_5d:
+        reasons.append(f"5-day price change below {min_price_change_5d}")
+    if require_volume and volume_ratio is None:
+        reasons.append("intraday volume confirmation unavailable")
+    elif require_volume and not volume_confirmed:
+        reasons.append(f"volume ratio below {min_volume_ratio}")
     candidate = bool(
         quote_decision.approved
         and snapshot["market_session"] == "regular"
-        and relative_strength >= 0.5
-        and price_change_5d > 0
-        and volume_ratio >= 0.8
+        and relative_strength >= min_relative_strength
+        and price_change_1d >= min_price_change_1d
+        and price_change_5d >= min_price_change_5d
+        and (volume_confirmed or not require_volume)
     )
     return {
         "candidate": candidate,
@@ -71,5 +93,13 @@ def run_technical_agent(snapshot: dict[str, Any], runtime_config: dict[str, Any]
         "price_change_1d_pct": price_change_1d,
         "price_change_5d_pct": price_change_5d,
         "volume_ratio": volume_ratio,
+        "volume_data_available": volume_ratio is not None,
         "chase_score": chase_score,
+        "reasons": reasons,
+        "thresholds": {
+            "min_relative_strength_20d_pct": min_relative_strength,
+            "min_price_change_1d_pct": min_price_change_1d,
+            "min_price_change_5d_pct": min_price_change_5d,
+            "min_volume_ratio": min_volume_ratio,
+        },
     }

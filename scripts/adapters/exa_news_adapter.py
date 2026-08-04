@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import os
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from scripts.adapters.errors import AdapterConfigurationError, AdapterDataError
 from scripts.adapters.http_json import request_json
@@ -13,7 +13,15 @@ from scripts.core.models import parse_ts, utc_now
 class ExaNewsAdapter:
     """Read-only Exa search adapter that returns grounded news evidence."""
 
-    TIER_ONE_DOMAINS = {"sec.gov", "investor.gov", "federalreserve.gov", "justice.gov", "ftc.gov"}
+    TIER_ONE_DOMAINS = {
+        "sec.gov",
+        "investor.gov",
+        "federalreserve.gov",
+        "justice.gov",
+        "ftc.gov",
+        "fda.gov",
+        "federalregister.gov",
+    }
     TIER_TWO_DOMAINS = {"reuters.com", "apnews.com", "bloomberg.com", "wsj.com", "ft.com", "cnbc.com"}
 
     def __init__(self, config: dict[str, Any]) -> None:
@@ -25,6 +33,30 @@ class ExaNewsAdapter:
         return {"ready": bool(self.config.get("enabled", False)) and not missing, "enabled": bool(self.config.get("enabled", False)), "missing_env": missing}
 
     def search(self, ticker: str, decision_time: str, company_name: str | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        query_name = company_name.strip() if company_name else ticker.upper()
+        return self.search_query(
+            f"{query_name} {ticker.upper()} stock company latest material news catalyst earnings filing",
+            decision_time,
+            ticker=ticker,
+        )
+
+    def search_market_events(self, decision_time: str, queries: list[str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        max_searches = int(self.config.get("max_market_searches", len(queries)))
+        events: list[dict[str, Any]] = []
+        metadata: list[dict[str, Any]] = []
+        for query in queries[:max_searches]:
+            found, sources = self.search_query(query, decision_time)
+            events.extend(found)
+            metadata.extend(sources)
+        return self._deduplicate(events), self._deduplicate_sources(metadata)
+
+    def search_query(
+        self,
+        query: str,
+        decision_time: str,
+        *,
+        ticker: str | None = None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         readiness = self.readiness()
         if not readiness["enabled"]:
             raise AdapterConfigurationError("Exa news adapter is disabled")
@@ -32,9 +64,8 @@ class ExaNewsAdapter:
             raise AdapterConfigurationError(f"missing Exa environment variable: {self.api_key_env}")
         cutoff = parse_ts(decision_time)
         start = cutoff - timedelta(hours=float(self.config.get("lookback_hours", 48)))
-        query_name = company_name.strip() if company_name else ticker.upper()
         body: dict[str, Any] = {
-            "query": f"{query_name} {ticker.upper()} stock company latest material news catalyst earnings filing",
+            "query": query,
             "type": str(self.config.get("search_type", "fast")),
             "category": "news",
             "numResults": int(self.config.get("num_results", 6)),
@@ -55,7 +86,7 @@ class ExaNewsAdapter:
             timeout_seconds=float(self.config.get("timeout_seconds", 30)),
             max_retries=int(self.config.get("max_retries", 2)),
         )
-        first_seen = min(parse_ts(utc_now()), cutoff).isoformat()
+        retrieved_at = parse_ts(utc_now()).isoformat()
         events: list[dict[str, Any]] = []
         sources: dict[str, dict[str, Any]] = {}
         for item in response.get("results", []):
@@ -67,7 +98,11 @@ class ExaNewsAdapter:
             published = parse_ts(str(published_at))
             if published > cutoff:
                 continue
-            url = str(item.get("url", ""))
+            event_at = self._optional_timestamp(
+                item.get("eventDate") or item.get("event_at") or item.get("eventTime"),
+                cutoff,
+            )
+            url = self._canonical_url(str(item.get("url", "")))
             domain = self._domain(url)
             source_tier = self._source_tier(domain)
             age_hours = max(0.0, (cutoff - published).total_seconds() / 3600)
@@ -78,8 +113,11 @@ class ExaNewsAdapter:
             events.append(
                 {
                     "headline": headline,
+                    "ticker": ticker.upper() if ticker else None,
                     "published_at": published.isoformat(),
-                    "first_seen_at": first_seen,
+                    "event_at": event_at,
+                    "first_seen_at": retrieved_at,
+                    "retrieved_at": retrieved_at,
                     "source": domain or "unknown",
                     "source_tier": source_tier,
                     "ticker_relevance": 0.7,
@@ -91,10 +129,56 @@ class ExaNewsAdapter:
                     "highlights": item.get("highlights", []),
                 }
             )
-            sources[domain or "unknown"] = {"source": domain or "unknown", "source_tier": source_tier, "url": url}
+            sources[url or domain or "unknown"] = {
+                "source": domain or "unknown",
+                "source_tier": source_tier,
+                "url": url,
+                "retrieved_at": retrieved_at,
+            }
         if response.get("results") and not events:
             raise AdapterDataError("Exa results had no publication timestamps usable at the cutoff")
-        return events, list(sources.values())
+        return self._deduplicate(events), list(sources.values())
+
+    @staticmethod
+    def _optional_timestamp(value: Any, cutoff: datetime) -> str | None:
+        if not value:
+            return None
+        try:
+            parsed = parse_ts(str(value))
+        except (TypeError, ValueError):
+            return None
+        return parsed.isoformat() if parsed <= cutoff else None
+
+    @staticmethod
+    def _canonical_url(url: str) -> str:
+        if not url:
+            return ""
+        parts = urlsplit(url.strip())
+        return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"), "", ""))
+
+    @staticmethod
+    def _deduplicate(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        unique: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for event in events:
+            key = (
+                str(event.get("url", "")),
+                str(event.get("published_at", "")),
+                str(event.get("headline", "")).strip().lower(),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(event)
+        return unique
+
+    @staticmethod
+    def _deduplicate_sources(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        unique: dict[str, dict[str, Any]] = {}
+        for source in sources:
+            key = str(source.get("url") or source.get("source") or "unknown")
+            unique[key] = source
+        return list(unique.values())
 
     @staticmethod
     def _domain(url: str) -> str:

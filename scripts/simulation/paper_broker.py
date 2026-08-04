@@ -32,6 +32,7 @@ class PaperBroker:
         quote_seen_at: str,
         thesis: str = "",
         idempotency_key: str | None = None,
+        now: str | None = None,
     ) -> Order:
         order = Order(
             order_id=f"po_{uuid.uuid4().hex}",
@@ -44,6 +45,7 @@ class PaperBroker:
             quote_seen_at=quote_seen_at,
             idempotency_key=idempotency_key or decision_id,
             thesis=thesis,
+            created_at=now or utc_now(),
         )
         orders = self.store.orders()
         orders[order.order_id] = order
@@ -65,7 +67,20 @@ class PaperBroker:
         orders[order.order_id] = order
         self.store.save_orders(orders)
 
-        risk = check_order(order, quote, account, positions, open_orders, counters, self.config, now)
+        option_positions = self.store.read_json("paper_option_positions.json", {})
+        option_orders = self.store.read_json("paper_option_orders.json", {})
+        risk = check_order(
+            order,
+            quote,
+            account,
+            positions,
+            open_orders,
+            counters,
+            self.config,
+            now,
+            option_positions=option_positions,
+            option_orders=option_orders,
+        )
         if not risk.approved:
             order.status = "rejected"
             order.reject_reason = risk.reason
@@ -116,9 +131,9 @@ class PaperBroker:
         self.store.save_account(account, fill.filled_at)
         self.store.save_positions(positions)
         self.store.save_orders(orders)
-        self.store.increment_trades(now)
+        self.store.increment_trades(now, line="equity")
         if fill.side == "sell":
-            self.store.add_daily_realized_pnl(account.realized_pnl - realized_before, now)
+            self.store.add_daily_realized_pnl(account.realized_pnl - realized_before, now, line="equity")
         append_jsonl(self.root, "paper_orders.jsonl", {"event": "filled", "order": order.to_dict(), "quote": quote.to_dict()})
         append_jsonl(self.root, "paper_fills.jsonl", {"fill": fill.to_dict(), "quote": quote.to_dict()})
         self.audit.append("paper_order_filled", {"order": order.to_dict(), "fill": fill.to_dict(), "quote": quote.to_dict()})

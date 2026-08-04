@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["order_id", "decision_id", "contract", "intent", "quantity", "order_type", "status", "created_at"],
+  "properties": {
+    "order_id": {"type": "string", "minLength": 1},
+    "decision_id": {"type": "string", "minLength": 1},
+    "contract": {"$ref": "option_contract.schema.json"},
+    "intent": {"enum": ["buy_to_open", "sell_to_close"]},
+    "quantity": {"type": "integer", "minimum": 1},
+    "order_type": {"enum": ["market", "limit"]},
+    "limit_price": {"type": ["number", "null"], "minimum": 0},
+    "status": {"enum": ["created", "submitted_to_paper_broker", "open", "partially_filled", "filled", "cancelled", "expired", "rejected"]},
+    "filled_quantity": {"type": "integer", "minimum": 0},
+    "average_fill_price": {"type": ["number", "null"], "minimum": 0},
+    "created_at": {"type": "string", "format": "date-time"},
+    "submitted_at": {"type": ["string", "null"], "format": "date-time"},
+    "updated_at": {"type": ["string", "null"], "format": "date-time"},
+    "quote_seen_at": {"type": ["string", "null"], "format": "date-time"},
+    "reject_reason": {"type": ["string", "null"]},
+    "idempotency_key": {"type": ["string", "null"]},
+    "thesis": {"type": "string"}
+  }
+}

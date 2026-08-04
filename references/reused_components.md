@@ -69,3 +69,26 @@ Rejected for v1:
 - Publication/report generation workflow.
 - Direct use of mojibake-heavy report audit regexes.
 - Direct use of momentum backtest scripts because they mix hard-coded fundamentals, print-side effects, and a separate backtest/fill path.
+
+## Options research
+
+Checked in the pinned Vibe-Trading checkout:
+
+- `agent/src/tools/options_pricing_tool.py`
+- `agent/src/tools/options_chain_tool.py`
+- `agent/backtest/engines/options_portfolio.py`
+
+Reused as design input: normalized contracts, Black-Scholes validation, portfolio Greeks, expiry lifecycle, and test cases. Direct copies: none. The portfolio engine was rejected as the forward paper broker because it uses synthetic theoretical prices, defaults the contract multiplier to `1`, and contains simplified exercise heuristics rather than real top-of-book fills.
+
+Checked in claude-trading-skills:
+
+- `skills/options-strategy-advisor/scripts/black_scholes.py`
+- `skills/options-strategy-advisor/scripts/tests/test_black_scholes.py`
+
+Reused as formula/test input for dividend-aware Greeks. Direct copies: none; this project uses a small standard-library European reference and never uses it as a fill price.
+
+External reference checkout: `../references/repos/optopsy` at commit `40bb8b2aa07ef8763caeadf752961faecb494efd`.
+
+Optopsy's DTE/delta filters, entry/exit studies, and metrics are useful for future historical options research. It is AGPL-3.0, so it is not imported, vendored, or copied into this public project without a separate licensing decision.
+
+QuantConnect LEAN and QuantLib remain adapter candidates for independent replay/pricing validation. Neither source tree is copied, and neither is part of the forward broker.
