@@ -26,14 +26,16 @@ class MockProvider(LLMProvider):
             data = self._decision(request.input_payload)
         elif request.agent_name == "catalyst_candidate_extractor":
             data = self._catalyst_candidates(request.input_payload)
-        elif request.agent_name == "catalyst_ranker":
+        elif request.agent_name in {"catalyst_ranker", "ai_gated_ranker"}:
             data = self._catalyst_ranking(request.input_payload)
-        elif request.agent_name == "catalyst_bull_news_agent":
+        elif request.agent_name in {"catalyst_bull_news_agent", "ai_gated_news_agent"}:
             data = self._catalyst_bull_news(request.input_payload)
-        elif request.agent_name == "catalyst_challenge_agent":
+        elif request.agent_name in {"catalyst_challenge_agent", "ai_gated_challenge_agent"}:
             data = self._catalyst_challenge(request.input_payload)
-        elif request.agent_name == "catalyst_decision_manager":
+        elif request.agent_name in {"catalyst_decision_manager", "ai_gated_decision_manager"}:
             data = self._catalyst_decision(request.input_payload)
+        elif request.agent_name == "news_drift_headline_agent":
+            data = self._news_drift_headlines(request.input_payload)
         else:
             raise ValueError(f"unknown mock agent: {request.agent_name}")
         validate_schema(data, request.output_schema)
@@ -328,3 +330,40 @@ class MockProvider(LLMProvider):
             "option_preference": {"target_dte": 30, "target_abs_delta": 0.45} if instrument in {"call", "put"} else None,
             "no_trade_reason": "Challenge veto or insufficient evidence." if action == "no_trade" else None,
         }
+
+    @staticmethod
+    def _news_drift_headlines(payload: dict[str, Any]) -> dict[str, Any]:
+        signals: list[dict[str, Any]] = []
+        recent = list(payload.get("recent_events", []))
+        for index, event in enumerate(payload.get("events", [])):
+            headline = str(event.get("headline", ""))
+            lowered = headline.lower()
+            ticker = event.get("ticker_hint")
+            positive = any(word in lowered for word in ("raises", "beats", "approval", "wins", "acquires"))
+            negative = any(word in lowered for word in ("cuts", "misses", "recall", "probe", "lawsuit", "rejects"))
+            direction = "positive" if positive and not negative else ("negative" if negative and not positive else "unclear")
+            related = next(
+                (
+                    item
+                    for item in recent
+                    if ticker and item.get("ticker") == ticker and str(item.get("headline", "")).lower() == lowered
+                ),
+                None,
+            )
+            signals.append(
+                {
+                    "event_index": index,
+                    "ticker": str(ticker).upper() if ticker else None,
+                    "company_name": event.get("company_name_hint"),
+                    "direction": direction,
+                    "event_type": "guidance" if "guidance" in lowered else ("regulatory" if "probe" in lowered else "other"),
+                    "materiality": 0.8 if direction != "unclear" else 0.3,
+                    "novelty": 0.0 if related else 0.8,
+                    "ambiguity": 0.2 if direction != "unclear" else 0.8,
+                    "relation_type": "duplicate" if related else "new_event",
+                    "related_event_id": str(related["event_id"]) if related else None,
+                    "confidence": 0.8 if ticker and direction != "unclear" else 0.3,
+                    "rationale": "deterministic headline-only mock classification",
+                }
+            )
+        return {"signals": signals, "data_gaps": [] if signals else ["No unseen headline was available."]}

@@ -3,7 +3,9 @@ from __future__ import annotations
 import os
 import sys
 import ctypes
+import time
 from pathlib import Path
+from typing import Any
 
 
 class ProcessLock:
@@ -17,7 +19,7 @@ class ProcessLock:
             try:
                 self.fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                 break
-            except FileExistsError:
+            except (FileExistsError, PermissionError):
                 if not self._remove_stale_lock():
                     return False
         else:
@@ -33,11 +35,11 @@ class ProcessLock:
             # An empty or malformed file can be a lock in the process of being
             # created. Fail closed rather than risking a duplicate runner.
             return False
-        alive = self._process_is_alive(pid)
+        alive = self.process_is_alive(pid)
         return False if alive is not False else self._unlink_stale_lock()
 
     @staticmethod
-    def _process_is_alive(pid: int) -> bool | None:
+    def process_is_alive(pid: int) -> bool | None:
         """Return None when liveness cannot be established safely."""
         if sys.platform == "win32":
             process_query_limited_information = 0x1000
@@ -68,6 +70,33 @@ class ProcessLock:
             return None
         return True
 
+    @classmethod
+    def inspect(cls, path: str | Path) -> dict[str, Any]:
+        lock_path = Path(path)
+        if not lock_path.exists():
+            return {
+                "present": False,
+                "pid": None,
+                "alive": False,
+                "status": "missing",
+            }
+        try:
+            pid = int(lock_path.read_text(encoding="ascii").strip())
+        except (OSError, ValueError):
+            return {
+                "present": True,
+                "pid": None,
+                "alive": None,
+                "status": "malformed",
+            }
+        alive = cls.process_is_alive(pid)
+        return {
+            "present": True,
+            "pid": pid,
+            "alive": alive,
+            "status": "running" if alive is True else ("dead" if alive is False else "unknown"),
+        }
+
     def _unlink_stale_lock(self) -> bool:
         try:
             self.path.unlink()
@@ -79,10 +108,15 @@ class ProcessLock:
         if self.fd is not None:
             os.close(self.fd)
             self.fd = None
-        try:
-            self.path.unlink()
-        except FileNotFoundError:
-            pass
+        for _ in range(100):
+            try:
+                self.path.unlink()
+                return
+            except FileNotFoundError:
+                return
+            except PermissionError:
+                time.sleep(0.005)
+        raise PermissionError(f"could not release process lock: {self.path}")
 
     def __enter__(self) -> "ProcessLock":
         if not self.acquire():

@@ -7,17 +7,25 @@ from pathlib import Path
 from scripts.core.audit import AuditLog, append_jsonl
 from scripts.core.models import Order, Quote, parse_ts, utc_now
 from scripts.core.state import JsonStateStore
+from scripts.journal.trade_lifecycle import TradeLifecycleJournal
 from scripts.risk.risk_gate import check_order
 from scripts.simulation.fill_model import simulate_fill
 from scripts.simulation.virtual_account import apply_fill
 
 
 class PaperBroker:
-    def __init__(self, root: str | Path, config: dict) -> None:
+    def __init__(self, root: str | Path, config: dict, *, namespace: str | None = None) -> None:
         self.root = Path(root)
         self.config = config
-        self.store = JsonStateStore(self.root, float(config["paper"].get("paper_initial_cash_usd", 2000)))
-        self.audit = AuditLog(self.root)
+        self.namespace = namespace
+        self.store = JsonStateStore(
+            self.root,
+            float(config["paper"].get("paper_initial_cash_usd", 2000)),
+            namespace=namespace,
+        )
+        self.log_prefix = f"strategy_sleeves/{namespace}/" if namespace else ""
+        self.audit = AuditLog(self.root, f"{self.log_prefix}audit.jsonl")
+        self.lifecycle = TradeLifecycleJournal(self.root, namespace=namespace)
         self.store.ensure()
 
     def create_order(
@@ -97,7 +105,7 @@ class PaperBroker:
             order.updated_at = now
             orders[order.order_id] = order
             self.store.save_orders(orders)
-            append_jsonl(self.root, "paper_orders.jsonl", {"event": "open", "order": order.to_dict(), "quote": quote.to_dict()})
+            append_jsonl(self.root, f"{self.log_prefix}paper_orders.jsonl", {"event": "open", "order": order.to_dict(), "quote": quote.to_dict()})
             self.audit.append("paper_order_open", {"reason": fill_decision.reason, "order": order.to_dict()})
             return order
         if fill_decision.status == "rejected":
@@ -134,8 +142,9 @@ class PaperBroker:
         self.store.increment_trades(now, line="equity")
         if fill.side == "sell":
             self.store.add_daily_realized_pnl(account.realized_pnl - realized_before, now, line="equity")
-        append_jsonl(self.root, "paper_orders.jsonl", {"event": "filled", "order": order.to_dict(), "quote": quote.to_dict()})
-        append_jsonl(self.root, "paper_fills.jsonl", {"fill": fill.to_dict(), "quote": quote.to_dict()})
+        append_jsonl(self.root, f"{self.log_prefix}paper_orders.jsonl", {"event": "filled", "order": order.to_dict(), "quote": quote.to_dict()})
+        append_jsonl(self.root, f"{self.log_prefix}paper_fills.jsonl", {"fill": fill.to_dict(), "quote": quote.to_dict()})
+        self.lifecycle.record_equity_fill(fill, order.thesis)
         self.audit.append("paper_order_filled", {"order": order.to_dict(), "fill": fill.to_dict(), "quote": quote.to_dict()})
         return order
 

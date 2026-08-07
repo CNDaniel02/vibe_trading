@@ -4,13 +4,22 @@ import json
 from pathlib import Path
 from typing import Any
 
+from scripts.core.file_lock import InterProcessFileLock
 from scripts.core.models import Account, Order, Position, parse_ts, utc_now
 
 
 class JsonStateStore:
-    def __init__(self, root: str | Path, initial_cash: float = 2000.0) -> None:
+    def __init__(
+        self,
+        root: str | Path,
+        initial_cash: float = 2000.0,
+        namespace: str | None = None,
+    ) -> None:
         self.root = Path(root)
+        self.namespace = namespace
         self.state_dir = self.root / "state"
+        if namespace:
+            self.state_dir = self.state_dir / "strategy_sleeves" / namespace
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.initial_cash = initial_cash
 
@@ -51,11 +60,14 @@ class JsonStateStore:
 
     def write_json(self, name: str, data: Any) -> None:
         path = self.path(name)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        with tmp.open("w", encoding="utf-8") as handle:
-            json.dump(data, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-        tmp.replace(path)
+        lock_path = path.with_suffix(path.suffix + ".lock")
+        with InterProcessFileLock(lock_path):
+            tmp = path.with_name(f"{path.name}.{id(self)}.tmp")
+            with tmp.open("w", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+            tmp.replace(path)
 
     def account(self) -> Account:
         self.ensure()

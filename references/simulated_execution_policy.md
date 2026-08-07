@@ -4,13 +4,15 @@ Use bid/ask, not midpoint.
 
 Buy limit:
 
-- If current ask is greater than limit price, keep the order open.
-- Otherwise fill at `max(limit_price, current_ask) + adverse_slippage`.
+- Compute `current_ask + adverse_slippage`.
+- If that adverse price is greater than the limit, keep the order open.
+- Otherwise fill at the adverse price. A buy fill never exceeds its limit.
 
 Sell limit:
 
-- If current bid is lower than limit price, keep the order open.
-- Otherwise fill at `min(limit_price, current_bid) - adverse_slippage`.
+- Compute `current_bid - adverse_slippage`.
+- If that adverse price is lower than the limit, keep the order open.
+- Otherwise fill at the adverse price. A sell fill never falls below its limit.
 
 Market orders:
 

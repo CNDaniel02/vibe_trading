@@ -7,10 +7,32 @@ api:
   endpoint: /chat/completions
   model: deepseek-v4-pro
   api_key_env: OPENAI_API_KEY
-  timeout_seconds: 45
-  max_retries: 2
-  max_tokens: 4096
+  timeout_seconds: 30
+  timeout_seconds_by_agent:
+    news_agent: 45
+    ai_gated_news_agent: 45
+    challenge_agent: 75
+    decision_manager: 60
+    catalyst_challenge_agent: 75
+    catalyst_decision_manager: 60
+    ai_gated_challenge_agent: 75
+    ai_gated_decision_manager: 60
+    news_drift_headline_agent: 45
+  max_retries: 1
+  max_tokens: 3072
+  max_tokens_by_agent:
+    catalyst_candidate_extractor: 700
+    catalyst_ranker: 900
+    catalyst_bull_news_agent: 1200
+    catalyst_challenge_agent: 2200
+    catalyst_decision_manager: 1400
+    ai_gated_ranker: 1600
+    ai_gated_news_agent: 1200
+    ai_gated_challenge_agent: 2200
+    ai_gated_decision_manager: 1600
+    news_drift_headline_agent: 1400
   response_format: json_object
+  structured_retry_max_tokens: 3072
   # Keep fact extraction fast, but retain DeepSeek thinking for the two stages
   # that weigh contrary evidence and make the shadow investment conclusion.
   # The dashboard presents their structured rationale, not private raw CoT.
@@ -27,11 +49,21 @@ api:
       catalyst_ranker:
         type: disabled
       catalyst_bull_news_agent:
-        type: enabled
+        type: disabled
       catalyst_challenge_agent:
         type: enabled
       catalyst_decision_manager:
+        type: disabled
+      ai_gated_ranker:
+        type: disabled
+      ai_gated_news_agent:
+        type: disabled
+      ai_gated_challenge_agent:
         type: enabled
+      ai_gated_decision_manager:
+        type: enabled
+      news_drift_headline_agent:
+        type: disabled
   input_cost_per_million_usd: 0.435
   output_cost_per_million_usd: 0.87
 

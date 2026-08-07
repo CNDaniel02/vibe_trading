@@ -6,6 +6,7 @@ from pathlib import Path
 
 from scripts.core.audit import AuditLog, append_jsonl
 from scripts.core.models import parse_ts, utc_now
+from scripts.journal.trade_lifecycle import TradeLifecycleJournal
 from scripts.options.fill_model import simulate_option_fill
 from scripts.options.models import OptionContract, OptionOrder, OptionQuote
 from scripts.options.risk_gate import check_option_order
@@ -16,11 +17,18 @@ from scripts.options.virtual_account import apply_option_fill
 class OptionPaperBroker:
     """Local long-premium broker. It has no live broker order methods."""
 
-    def __init__(self, root: str | Path, config: dict) -> None:
+    def __init__(self, root: str | Path, config: dict, *, namespace: str | None = None) -> None:
         self.root = Path(root)
         self.config = config
-        self.store = OptionStateStore(self.root, float(config["paper"].get("paper_initial_cash_usd", 2000)))
-        self.audit = AuditLog(self.root)
+        self.namespace = namespace
+        self.store = OptionStateStore(
+            self.root,
+            float(config["paper"].get("paper_initial_cash_usd", 2000)),
+            namespace=namespace,
+        )
+        self.log_prefix = f"strategy_sleeves/{namespace}/" if namespace else ""
+        self.audit = AuditLog(self.root, f"{self.log_prefix}audit.jsonl")
+        self.lifecycle = TradeLifecycleJournal(self.root, namespace=namespace)
 
     def create_order(
         self,
@@ -98,7 +106,7 @@ class OptionPaperBroker:
             order.updated_at = now
             orders[order.order_id] = order
             self.store.save_orders(orders)
-            append_jsonl(self.root, "paper_option_orders.jsonl", {"event": "open", "order": order.to_dict(), "quote": quote.to_dict()})
+            append_jsonl(self.root, f"{self.log_prefix}paper_option_orders.jsonl", {"event": "open", "order": order.to_dict(), "quote": quote.to_dict()})
             return order
         if decision.status == "rejected" or decision.fill is None:
             order.status = "rejected"
@@ -130,8 +138,9 @@ class OptionPaperBroker:
         self.store.base.increment_trades(now, line="options")
         if fill.intent == "sell_to_close":
             self.store.base.add_daily_realized_pnl(account.realized_pnl - realized_before, now, line="options")
-        append_jsonl(self.root, "paper_option_orders.jsonl", {"event": "filled", "order": order.to_dict(), "quote": quote.to_dict()})
-        append_jsonl(self.root, "paper_option_fills.jsonl", {"fill": fill.to_dict(), "contract": order.contract.to_dict(), "quote": quote.to_dict()})
+        append_jsonl(self.root, f"{self.log_prefix}paper_option_orders.jsonl", {"event": "filled", "order": order.to_dict(), "quote": quote.to_dict()})
+        append_jsonl(self.root, f"{self.log_prefix}paper_option_fills.jsonl", {"fill": fill.to_dict(), "contract": order.contract.to_dict(), "quote": quote.to_dict()})
+        self.lifecycle.record_option_fill(fill, order.thesis)
         self.audit.append("paper_option_order_filled", {"order": order.to_dict(), "fill": fill.to_dict(), "quote": quote.to_dict()})
         return order
 

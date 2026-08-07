@@ -6,29 +6,67 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from scripts.adapters.errors import AdapterConfigurationError, AdapterDataError
+from scripts.adapters.errors import AdapterConfigurationError, AdapterDataError, summarize_external_error
 from scripts.broker.robinhood_mcp_audit import RobinhoodMcpCapabilityClient
-from scripts.core.models import parse_ts
+from scripts.core.models import parse_ts, utc_now
 from scripts.options.models import OptionContract, OptionQuote
-from scripts.options.selection import rank_contracts
+from scripts.options.selection import rank_contracts, rank_contracts_with_diagnostics
 
 
 class RobinhoodOptionMarketDataAdapter:
     """Read-only option chain and quote adapter with no order-call surface."""
 
+    REQUIRED_TOOLS = frozenset(
+        {
+            "get_option_chains",
+            "get_option_instruments",
+            "get_option_quotes",
+            "get_earnings_calendar",
+        }
+    )
+
     def __init__(self, config: dict[str, Any], runtime_config: dict[str, Any], root: str | Path) -> None:
         self.config = config
         self.runtime_config = runtime_config
-        self.client = RobinhoodMcpCapabilityClient(config, root=root)
+        self.client = RobinhoodMcpCapabilityClient(config, root=root, interactive_oauth=False)
 
-    def readiness(self) -> dict[str, Any]:
+    def readiness(self, *, live_probe: bool = True) -> dict[str, Any]:
         if not self.config.get("enabled", False):
             return {"ready": False, "reason": "Robinhood MCP disabled"}
         try:
             ready = asyncio.run(self.client.store.get_tokens()) is not None and asyncio.run(self.client.store.get_client_info()) is not None
         except Exception as exc:
             return {"ready": False, "reason": f"credential store unavailable: {type(exc).__name__}"}
-        return {"ready": ready, "reason": "ready" if ready else "Robinhood MCP OAuth is not initialized"}
+        if not ready or not live_probe:
+            return {"ready": ready, "reason": "ready" if ready else "Robinhood MCP OAuth is not initialized"}
+        try:
+            probe = asyncio.run(self.client.probe())
+        except Exception as exc:
+            return {"ready": False, "reason": summarize_external_error(exc), "live_probe": False}
+        available = set(probe.get("tool_names", []))
+        missing = sorted(self.REQUIRED_TOOLS - available)
+        return {
+            "ready": not missing,
+            "reason": "ready" if not missing else "required Robinhood option tools are unavailable",
+            "live_probe": True,
+            "missing_tools": missing,
+        }
+
+    def _require_local_ready(self) -> None:
+        status = self.readiness(live_probe=False)
+        if not status["ready"]:
+            raise AdapterConfigurationError(str(status["reason"]))
+
+    @staticmethod
+    def _run(coro: Any, operation: str) -> dict[str, Any]:
+        try:
+            return asyncio.run(coro)
+        except TimeoutError as exc:
+            raise AdapterDataError(f"Robinhood MCP {operation} timed out") from exc
+        except Exception as exc:
+            raise AdapterDataError(
+                f"Robinhood MCP {operation} failed: {summarize_external_error(exc)}"
+            ) from exc
 
     def fetch_best_contract(
         self,
@@ -39,9 +77,8 @@ class RobinhoodOptionMarketDataAdapter:
         now: str,
         max_premium_usd: float | None = None,
     ) -> tuple[OptionContract, OptionQuote] | None:
-        if not self.readiness()["ready"]:
-            raise AdapterConfigurationError("Robinhood option data adapter is not ready")
-        chain_payload = asyncio.run(self.client.get_option_chains(underlying))
+        self._require_local_ready()
+        chain_payload = self._run(self.client.get_option_chains(underlying), "get_option_chains")
         chain = self._select_chain(chain_payload, underlying)
         expiration = self._select_expiration(chain, now)
         instruments = self._fetch_instruments(chain, expiration, option_type)
@@ -49,9 +86,20 @@ class RobinhoodOptionMarketDataAdapter:
         instruments.sort(key=lambda item: abs(float(item.get("strike_price", 0)) - underlying_price))
         instruments = instruments[: min(cap, 20)]
         contracts = [self._parse_contract(item, chain) for item in instruments]
-        quote_payload = asyncio.run(self.client.get_option_quotes([item.option_id for item in contracts]))
+        quote_payload = self._run(
+            self.client.get_option_quotes([item.option_id for item in contracts]),
+            "get_option_quotes",
+        )
         quotes = self._parse_quotes(quote_payload)
-        ranked = rank_contracts(contracts, quotes, now, self.runtime_config)
+        # The decision time precedes the network request. Validate returned
+        # quotes against the local observation time after the response.
+        quotes_observed_at = utc_now(timespec="microseconds")
+        ranked = rank_contracts(
+            contracts,
+            quotes,
+            quotes_observed_at,
+            self.runtime_config,
+        )
         if max_premium_usd is not None:
             ranked = [
                 item
@@ -61,7 +109,11 @@ class RobinhoodOptionMarketDataAdapter:
         return ranked[0] if ranked else None
 
     def upcoming_earnings(self, symbols: list[str], now: str, days: int = 7) -> dict[str, dict[str, Any]]:
-        payload = asyncio.run(self.client.get_earnings_calendar(parse_ts(now).date().isoformat(), days))
+        self._require_local_ready()
+        payload = self._run(
+            self.client.get_earnings_calendar(parse_ts(now).date().isoformat(), days),
+            "get_earnings_calendar",
+        )
         wanted = {symbol.upper() for symbol in symbols}
         results: dict[str, dict[str, Any]] = {}
         for item in payload.get("data", {}).get("results", []) or []:
@@ -69,10 +121,86 @@ class RobinhoodOptionMarketDataAdapter:
                 results[str(item["symbol"]).upper()] = item
         return results
 
+    def fetch_best_contract_with_diagnostics(
+        self,
+        *,
+        underlying: str,
+        underlying_price: float,
+        option_type: str,
+        now: str,
+        max_premium_usd: float | None = None,
+    ) -> tuple[tuple[OptionContract, OptionQuote] | None, dict[str, Any]]:
+        self._require_local_ready()
+        chain_payload = self._run(self.client.get_option_chains(underlying), "get_option_chains")
+        chain = self._select_chain(chain_payload, underlying)
+        expiration = self._select_expiration(chain, now)
+        instruments = self._fetch_instruments(chain, expiration, option_type)
+        cap = int(self.runtime_config["options_universe"].get("max_contracts_considered_per_side", 20))
+        instruments.sort(key=lambda item: abs(float(item.get("strike_price", 0)) - underlying_price))
+        instruments = instruments[: min(cap, 20)]
+        contracts = [self._parse_contract(item, chain) for item in instruments]
+        quote_payload = self._run(
+            self.client.get_option_quotes([item.option_id for item in contracts]),
+            "get_option_quotes",
+        )
+        quotes = self._parse_quotes(quote_payload)
+        quotes_observed_at = utc_now(timespec="microseconds")
+        ranked, diagnostics = rank_contracts_with_diagnostics(
+            contracts,
+            quotes,
+            quotes_observed_at,
+            self.runtime_config,
+        )
+        diagnostics.update(
+            {
+                "underlying": underlying,
+                "option_type": option_type,
+                "expiration": expiration,
+                "max_premium_usd": max_premium_usd,
+                "selection_started_at": now,
+                "quotes_observed_at": quotes_observed_at,
+            }
+        )
+        cheapest = min(
+            ranked,
+            key=lambda item: item[1].ask * item[0].multiplier,
+            default=None,
+        )
+        if cheapest is not None:
+            contract, quote = cheapest
+            minimum_premium = quote.ask * contract.multiplier
+            diagnostics["minimum_eligible_premium_usd"] = round(minimum_premium, 4)
+            diagnostics["cheapest_eligible_contract"] = {
+                "option_id": contract.option_id,
+                "strike_price": contract.strike_price,
+                "option_type": contract.option_type,
+                "ask": quote.ask,
+                "delta": quote.delta,
+                "volume": quote.volume,
+                "open_interest": quote.open_interest,
+                "spread_pct": round(quote.spread_pct(), 6),
+            }
+            if max_premium_usd is not None:
+                diagnostics["minimum_budget_shortfall_usd"] = round(
+                    max(0.0, minimum_premium - max_premium_usd),
+                    4,
+                )
+        if max_premium_usd is not None:
+            before = len(ranked)
+            ranked = [
+                item
+                for item in ranked
+                if item[1].ask * item[0].multiplier <= max_premium_usd
+            ]
+            diagnostics["rejections"]["premium above deterministic budget"] = before - len(ranked)
+        diagnostics["accepted_after_premium_cap"] = len(ranked)
+        return (ranked[0] if ranked else None), diagnostics
+
     def fetch_quotes(self, option_ids: list[str]) -> dict[str, OptionQuote]:
         if not option_ids:
             return {}
-        return self._parse_quotes(asyncio.run(self.client.get_option_quotes(option_ids)))
+        self._require_local_ready()
+        return self._parse_quotes(self._run(self.client.get_option_quotes(option_ids), "get_option_quotes"))
 
     def _select_chain(self, payload: dict[str, Any], underlying: str) -> dict[str, Any]:
         chains = payload.get("data", {}).get("chains", []) or []
@@ -109,13 +237,14 @@ class RobinhoodOptionMarketDataAdapter:
         instruments: list[dict[str, Any]] = []
         cursor: str | None = None
         for _ in range(5):
-            payload = asyncio.run(
+            payload = self._run(
                 self.client.get_option_instruments(
                     chain_id=str(chain["id"]),
                     expiration_date=expiration,
                     option_type=option_type,
                     cursor=cursor,
-                )
+                ),
+                "get_option_instruments",
             )
             instruments.extend(item for item in payload.get("data", {}).get("instruments", []) or [] if isinstance(item, dict))
             next_url = str(payload.get("data", {}).get("next") or "")

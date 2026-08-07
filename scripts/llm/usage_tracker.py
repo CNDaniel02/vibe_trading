@@ -6,6 +6,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any
 
+from scripts.core.file_lock import durable_append
 from scripts.core.models import utc_now
 
 
@@ -63,9 +64,7 @@ class UsageTracker:
         with self._lock:
             self.records.append(record)
             if self.path:
-                self.path.parent.mkdir(parents=True, exist_ok=True)
-                with self.path.open("a", encoding="utf-8") as handle:
-                    handle.write(json.dumps(asdict(record), sort_keys=True) + "\n")
+                durable_append(self.path, json.dumps(asdict(record), sort_keys=True) + "\n")
         return record
 
     def summary(self) -> dict[str, Any]:

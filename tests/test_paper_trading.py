@@ -11,10 +11,10 @@ from scripts.orchestrator.run_paper_cycle import run_cycle
 from scripts.risk.position_sizing import calculate_entry_quantity
 from scripts.simulation.paper_broker import PaperBroker
 
-NOW = "2026-07-04T14:00:30+00:00"
+NOW = "2026-07-06T14:00:30+00:00"
 
 
-def quote(symbol: str = "SPY", bid: float = 100.0, ask: float = 100.1, asof: str = "2026-07-04T14:00:00+00:00") -> Quote:
+def quote(symbol: str = "SPY", bid: float = 100.0, ask: float = 100.1, asof: str = "2026-07-06T14:00:00+00:00") -> Quote:
     return Quote(
         symbol=symbol,
         bid=bid,
@@ -38,7 +38,7 @@ def make_order(pb: PaperBroker, q: Quote, **overrides) -> Order:
         "side": overrides.pop("side", "buy"),
         "order_type": overrides.pop("order_type", "limit"),
         "quantity": overrides.pop("quantity", 1),
-        "limit_price": overrides.pop("limit_price", q.ask),
+        "limit_price": overrides.pop("limit_price", round(q.ask + 0.10, 4)),
         "quote_seen_at": q.asof,
         "thesis": "test",
         "idempotency_key": overrides.pop("idempotency_key", "d1"),
@@ -117,7 +117,7 @@ def test_slippage_applied_against_agent(paper_root):
 
 def test_no_lookahead_data(paper_root):
     pb = broker(paper_root)
-    q = quote(asof="2026-07-04T14:01:00+00:00")
+    q = quote(asof="2026-07-06T14:01:00+00:00")
     order = make_order(pb, q)
     result = pb.submit_order(order, q, now=NOW)
     assert result.status == "rejected"
@@ -143,7 +143,7 @@ def test_max_position_size(paper_root):
 
 
 def test_max_daily_trades(paper_root):
-    (paper_root / "state" / "daily_counters.json").write_text(json.dumps({"date": "2026-07-04", "trades": 4}), encoding="utf-8")
+    (paper_root / "state" / "daily_counters.json").write_text(json.dumps({"date": "2026-07-06", "trades": 4}), encoding="utf-8")
     pb = broker(paper_root)
     q = quote()
     order = make_order(pb, q)
@@ -179,7 +179,7 @@ def test_duplicate_order_blocked(paper_root):
 
 def test_stale_quote_rejected(paper_root):
     pb = broker(paper_root)
-    q = quote(asof="2026-07-04T13:00:00+00:00")
+    q = quote(asof="2026-07-06T13:00:00+00:00")
     order = make_order(pb, q)
     result = pb.submit_order(order, q, now=NOW)
     assert result.status == "rejected"
@@ -195,6 +195,31 @@ def test_missing_quote_fail_closed(paper_root):
     assert result.reject_reason == "missing quote"
 
 
+def test_entries_are_blocked_outside_session_and_before_close(paper_root):
+    pb = broker(paper_root)
+    premarket_quote = quote(asof="2026-07-06T13:00:00+00:00")
+    premarket = pb.submit_order(
+        make_order(pb, premarket_quote),
+        premarket_quote,
+        now="2026-07-06T13:00:30+00:00",
+    )
+    near_close_quote = quote(asof="2026-07-06T19:54:59+00:00")
+    near_close = pb.submit_order(
+        make_order(
+            pb,
+            near_close_quote,
+            decision_id="near-close",
+            idempotency_key="near-close",
+        ),
+        near_close_quote,
+        now="2026-07-06T19:55:00+00:00",
+    )
+    assert premarket.status == "rejected"
+    assert "outside regular market session" in str(premarket.reject_reason)
+    assert near_close.status == "rejected"
+    assert near_close.reject_reason == "new entries blocked before market close"
+
+
 def test_state_recovery_after_restart(paper_root):
     pb = broker(paper_root)
     q = quote()
@@ -207,8 +232,8 @@ def test_state_recovery_after_restart(paper_root):
 
 
 def test_exit_before_market_close():
-    assert should_exit_before_close("2026-07-04T19:55:00+00:00")
-    assert not should_exit_before_close("2026-07-04T15:00:00+00:00")
+    assert should_exit_before_close("2026-07-06T19:55:00+00:00")
+    assert not should_exit_before_close("2026-07-06T15:00:00+00:00")
 
 
 def test_audit_log_is_append_only(paper_root):

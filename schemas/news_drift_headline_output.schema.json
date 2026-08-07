@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "data_gaps": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "signals": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "ambiguity": {
+            "maximum": 1,
+            "minimum": 0,
+            "type": "number"
+          },
+          "company_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "confidence": {
+            "maximum": 1,
+            "minimum": 0,
+            "type": "number"
+          },
+          "direction": {
+            "enum": [
+              "positive",
+              "negative",
+              "neutral",
+              "mixed",
+              "unclear"
+            ]
+          },
+          "event_index": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "event_type": {
+            "enum": [
+              "earnings",
+              "guidance",
+              "merger_acquisition",
+              "regulatory",
+              "legal",
+              "fda",
+              "product",
+              "management",
+              "capital_allocation",
+              "financing",
+              "analyst_opinion",
+              "other"
+            ]
+          },
+          "materiality": {
+            "maximum": 1,
+            "minimum": 0,
+            "type": "number"
+          },
+          "novelty": {
+            "maximum": 1,
+            "minimum": 0,
+            "type": "number"
+          },
+          "rationale": {
+            "maxLength": 500,
+            "type": "string"
+          },
+          "related_event_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "relation_type": {
+            "enum": [
+              "new_event",
+              "duplicate",
+              "clarification",
+              "material_update",
+              "contradiction",
+              "follow_up"
+            ]
+          },
+          "ticker": {
+            "pattern": "^[A-Z][A-Z0-9.-]{0,9}$",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "event_index",
+          "ticker",
+          "company_name",
+          "direction",
+          "event_type",
+          "materiality",
+          "novelty",
+          "ambiguity",
+          "relation_type",
+          "related_event_id",
+          "confidence",
+          "rationale"
+        ],
+        "type": "object"
+      },
+      "maxItems": 20,
+      "type": "array"
+    }
+  },
+  "required": [
+    "signals",
+    "data_gaps"
+  ],
+  "type": "object"
+}

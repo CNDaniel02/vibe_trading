@@ -18,6 +18,8 @@ def build_snapshot(
     source_metadata: list[dict[str, Any]] | None = None,
     positions: dict[str, Position] | None = None,
     benchmark_quote: Quote | None = None,
+    expected_completed_session: str | None = None,
+    binary_event_within_days: int = 99,
 ) -> dict[str, Any]:
     ticker = ticker.upper()
     decision_time = clock.asof
@@ -49,6 +51,14 @@ def build_snapshot(
         {"source": symbol_bars[-1].source if symbol_bars else "missing", "kind": "completed_ohlcv", "asof": symbol_bars[-1].timestamp if symbol_bars else None},
     ]
     metadata.extend(source_metadata or [])
+    latest_completed_session = symbol_bars[-1].timestamp[:10] if symbol_bars else None
+    history_fresh = bool(
+        latest_completed_session
+        and (
+            expected_completed_session is None
+            or latest_completed_session >= expected_completed_session
+        )
+    )
     return {
         "snapshot_id": snapshot_id,
         "decision_time": decision_time,
@@ -60,7 +70,10 @@ def build_snapshot(
             "market_regime": "risk_off" if benchmark_change <= -1.5 else ("risk_on" if benchmark_change >= 0.5 else "neutral"),
             "benchmark_change_1d_pct": round(benchmark_change, 4),
             "volatility_change_pct": 0.0,
-            "binary_event_within_days": 99,
+            "binary_event_within_days": int(binary_event_within_days),
+            "history_fresh": history_fresh,
+            "latest_completed_session": latest_completed_session,
+            "expected_completed_session": expected_completed_session,
             "has_position": bool((positions or {}).get(ticker)),
             "shadow_account": {"initial_cash": 2000, "cash": 2000},
         },

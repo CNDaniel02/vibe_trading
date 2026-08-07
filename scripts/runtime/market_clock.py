@@ -62,3 +62,7 @@ class UsEquityMarketClock:
             minutes_to_close,
             progress,
         )
+
+    def previous_session_date(self, session: str) -> str:
+        current = self.calendar.date_to_session(pd.Timestamp(session), direction="none")
+        return self.calendar.previous_session(current).date().isoformat()

@@ -39,30 +39,35 @@ def simulate_option_fill(order: OptionOrder, quote: OptionQuote, costs: dict, fi
     slip = max(reference * bps / 10000, minimum)
 
     if order.intent == "buy_to_open":
+        tick_reference = quote.ask + slip
+        tick = (
+            order.contract.above_tick
+            if tick_reference > order.contract.tick_cutoff_price
+            else order.contract.below_tick
+        )
+        tick = tick or float(costs.get("price_tick_usd", 0.01))
+        adverse_price = _round_up_to_tick(tick_reference, tick)
         if order.order_type == "limit":
             if order.limit_price is None:
                 return OptionFillDecision("rejected", reason="limit buy missing limit_price")
-            if quote.ask > order.limit_price:
-                return OptionFillDecision("open", reason="option ask above buy limit")
-            base = max(order.limit_price, quote.ask)
-        else:
-            base = quote.ask
-        tick = order.contract.above_tick if base + slip > order.contract.tick_cutoff_price else order.contract.below_tick
-        tick = tick or float(costs.get("price_tick_usd", 0.01))
-        price = _round_up_to_tick(base + slip, tick)
+            if adverse_price > order.limit_price:
+                return OptionFillDecision("open", reason="adverse option buy fill would exceed limit")
+        price = adverse_price
     elif order.intent == "sell_to_close":
+        raw_price = max(0.0, quote.bid - slip)
+        tick = (
+            order.contract.above_tick
+            if raw_price > order.contract.tick_cutoff_price
+            else order.contract.below_tick
+        )
+        tick = tick or float(costs.get("price_tick_usd", 0.01))
+        adverse_price = max(0.0, _round_down_to_tick(raw_price, tick))
         if order.order_type == "limit":
             if order.limit_price is None:
                 return OptionFillDecision("rejected", reason="limit sell missing limit_price")
-            if quote.bid < order.limit_price:
-                return OptionFillDecision("open", reason="option bid below sell limit")
-            base = min(order.limit_price, quote.bid)
-        else:
-            base = quote.bid
-        raw_price = max(0.0, base - slip)
-        tick = order.contract.above_tick if raw_price > order.contract.tick_cutoff_price else order.contract.below_tick
-        tick = tick or float(costs.get("price_tick_usd", 0.01))
-        price = max(0.0, _round_down_to_tick(raw_price, tick))
+            if adverse_price < order.limit_price:
+                return OptionFillDecision("open", reason="adverse option sell fill would fall below limit")
+        price = adverse_price
     else:
         return OptionFillDecision("rejected", reason="unsupported option intent")
 

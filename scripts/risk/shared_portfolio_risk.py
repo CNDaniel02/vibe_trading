@@ -82,6 +82,47 @@ def shared_deployment(
     }
 
 
+def shared_entry_capacity(
+    *,
+    line: str,
+    account: Account,
+    equity_positions: dict[str, Position],
+    option_positions: dict[str, Any],
+    equity_orders: dict[str, Order],
+    option_orders: dict[str, Any],
+    shared_config: dict[str, Any],
+) -> float:
+    """Return the remaining cash-backed entry capacity for one strategy line."""
+    deployment = shared_deployment(
+        account,
+        equity_positions,
+        option_positions,
+        equity_orders,
+        option_orders,
+        reserve_open_orders=bool(shared_config.get("reserve_open_orders", True)),
+    )
+    if not shared_config.get("enabled", True):
+        return max(0.0, float(account.cash))
+    account_equity = deployment["account_equity_at_cost"]
+    if account_equity <= 0:
+        return 0.0
+    line_name = "options_deployed" if line == "options" else "equity_deployed"
+    line_cap_name = (
+        "max_options_deployed_pct_of_equity"
+        if line == "options"
+        else "max_equity_deployed_pct_of_equity"
+    )
+    total_remaining = (
+        account_equity * float(shared_config.get("max_total_deployed_pct_of_equity", 1))
+        - deployment["total_deployed"]
+    )
+    line_remaining = (
+        account_equity * float(shared_config.get(line_cap_name, 1))
+        - deployment[line_name]
+    )
+    return max(0.0, min(float(account.cash), total_remaining, line_remaining))
+
+
 def check_shared_entry(
     *,
     line: str,

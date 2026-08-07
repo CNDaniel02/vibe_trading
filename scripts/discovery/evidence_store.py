@@ -14,10 +14,12 @@ from scripts.core.models import parse_ts, utc_now
 class EvidenceSnapshotStore:
     """Immutable evidence snapshots plus small mutable cooldown indexes."""
 
-    def __init__(self, root: str | Path) -> None:
+    def __init__(self, root: str | Path, namespace: str = "catalyst") -> None:
         self.root = Path(root)
-        self.snapshot_dir = self.root / "logs" / "catalyst_snapshots"
-        self.cooldown_path = self.root / "state" / "catalyst_cooldowns.json"
+        if not re.fullmatch(r"[a-z0-9_]+", namespace):
+            raise ValueError("evidence namespace must contain only lowercase letters, digits, and underscores")
+        self.snapshot_dir = self.root / "logs" / f"{namespace}_snapshots"
+        self.cooldown_path = self.root / "state" / f"{namespace}_cooldowns.json"
 
     def normalize_events(self, events: list[dict[str, Any]], ticker: str | None = None) -> list[dict[str, Any]]:
         normalized: list[dict[str, Any]] = []
@@ -173,6 +175,18 @@ class EvidenceSnapshotStore:
                 sent[fingerprint] = decision_time
         state["updated_at"] = utc_now()
         self._write_cooldowns(state)
+
+    def claim_search_window(self, scope: str, decision_time: str, interval_seconds: int) -> bool:
+        state = self._read_cooldowns()
+        now = parse_ts(decision_time)
+        searches = state.setdefault("searches", {})
+        last_search = searches.get(scope)
+        if last_search and now - parse_ts(str(last_search)) < timedelta(seconds=interval_seconds):
+            return False
+        searches[scope] = decision_time
+        state["updated_at"] = utc_now()
+        self._write_cooldowns(state)
+        return True
 
     def _read_cooldowns(self) -> dict[str, Any]:
         if not self.cooldown_path.exists():

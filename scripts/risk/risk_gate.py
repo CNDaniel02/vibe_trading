@@ -1,16 +1,34 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 from scripts.core.models import Account, Order, Position, Quote, parse_ts
 from scripts.risk.shared_portfolio_risk import check_shared_entry
+from scripts.runtime.market_clock import UsEquityMarketClock
+
+
+_MARKET_CLOCK = UsEquityMarketClock()
 
 
 @dataclass(frozen=True)
 class RiskDecision:
     approved: bool
     reason: str
+
+
+def validate_order_session(now: str, config: dict, *, is_entry: bool) -> RiskDecision:
+    clock = _MARKET_CLOCK.status(now)
+    if not clock.is_regular:
+        return RiskDecision(False, f"outside regular market session: {clock.market_session}")
+    if (
+        is_entry
+        and clock.minutes_to_close is not None
+        and clock.minutes_to_close
+        <= int(config.get("paper", {}).get("exit_before_close_minutes", 10))
+    ):
+        return RiskDecision(False, "new entries blocked before market close")
+    return RiskDecision(True, "market session ok")
 
 
 def validate_quote(quote: Quote | None, now: str, max_age_seconds: int, universe: dict) -> RiskDecision:
@@ -70,6 +88,13 @@ def check_order(
 
     if order.side not in ("buy", "sell"):
         return RiskDecision(False, "unsupported side")
+    session_decision = validate_order_session(
+        now,
+        config,
+        is_entry=order.side == "buy",
+    )
+    if not session_decision.approved:
+        return session_decision
     if order.side == "sell" and float(positions.get(order.symbol, Position(order.symbol, 0, 0, now, now)).quantity) <= 0:
         return RiskDecision(False, "sell without position")
     if order.side == "buy" and not universe.get("allow_long_only", True):
@@ -135,6 +160,4 @@ def check_order(
 
 
 def is_regular_session(now: str) -> bool:
-    dt = parse_ts(now).astimezone(timezone(timedelta(hours=-4)))
-    minutes = dt.hour * 60 + dt.minute
-    return 9 * 60 + 30 <= minutes < 16 * 60
+    return _MARKET_CLOCK.status(now).is_regular

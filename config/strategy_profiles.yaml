@@ -1,5 +1,8 @@
-active_strategy: relative_strength_v1
+active_strategy: weighted_relative_strength_v2
+active_options_strategy: long_directional_options_v2_weighted
 shadow_strategies:
+  - relative_strength_v1
+  - long_directional_options_v1
   - multi_agent_relative_strength_v2_candidate
 
 relative_strength_v1:
@@ -11,6 +14,29 @@ relative_strength_v1:
   min_volume_ratio: 0.4
   require_intraday_volume_confirmation: true
   max_chase_score: 0.75
+
+weighted_relative_strength_v2:
+  execution: paper_broker
+  allow_model_calls: false
+  minimum_entry_score: 0.68
+  hard_max_chase_score: 0.95
+  reject_binary_event_within_days: 1
+  outcome_horizon_minutes: 60
+  outcome_sampling_minutes: 60
+  max_outcome_label_delay_minutes: 15
+  weight_state_file: strategy_weights_v2.json
+  fixed_weights:
+    relative_strength: 0.30
+    momentum_1d: 0.15
+    momentum_5d: 0.20
+    volume_confirmation: 0.15
+    market_regime: 0.10
+    chase_quality: 0.10
+  adaptive_weights:
+    enabled: true
+    learning_rate: 1.5
+    minimum_labeled_samples: 100
+    weight_floor: 0.05
 
 long_directional_options_v1:
   execution: options_paper_broker
@@ -24,6 +50,23 @@ long_directional_options_v1:
   bearish_max_price_change_1d_pct: 0.0
   max_chase_score: 0.75
 
+long_directional_options_v2_weighted:
+  execution: options_paper_broker
+  allow_model_calls: false
+  minimum_entry_score: 0.54
+  hard_max_chase_score: 0.95
+  reject_binary_event_within_days: 7
+  event_weight: 0.30
+  minimum_company_negative_event_score: 0.50
+  minimum_downside_technical_score: 0.56
+  technical_weights:
+    relative_strength: 0.30
+    momentum_1d: 0.15
+    momentum_5d: 0.20
+    volume_confirmation: 0.15
+    market_regime: 0.10
+    chase_quality: 0.10
+
 exa_deepseek_catalyst_v1:
   execution: shadow_only
   allow_model_calls: true
@@ -33,6 +76,8 @@ exa_deepseek_catalyst_v1:
   discovery:
     enabled: true
     cycle_seconds: 3600
+    allow_premarket_research: true
+    premarket_research_window_minutes: 90
     lookback_hours: 48
     ticker_cooldown_minutes: 120
     event_cooldown_hours: 24
@@ -43,6 +88,7 @@ exa_deepseek_catalyst_v1:
     max_ranked_candidates: 8
     max_deep_research_candidates: 3
     max_ticker_exa_searches: 3
+    minimum_minutes_to_close_for_research: 30
     minimum_market_cap_usd: 1000000000
     minimum_average_daily_volume_usd: 20000000
     maximum_spread_bps: 50
@@ -57,3 +103,67 @@ multi_agent_relative_strength_v2_candidate:
   may_replace_active_strategy: false
   share_account_state_with_baseline: false
   share_order_state_with_baseline: false
+
+ai_gated_technical_v1:
+  execution: isolated_paper_sleeve
+  allow_model_calls: true
+  may_replace_active_strategy: false
+  state_namespace: ai_gated_technical_v1
+  paper_initial_cash_usd: 2000
+  cycle_seconds: 3600
+  top_technical_candidates: 6
+  minimum_candidates_per_direction: 2
+  reported_earnings_priority_candidates: 2
+  top_deep_research_candidates: 2
+  allow_premarket_research: true
+  premarket_research_window_minutes: 90
+  minimum_minutes_to_close_for_research: 30
+  max_parallel_exa_searches: 3
+  minimum_technical_prefilter_score: 0.48
+  minimum_model_rank_score: 0.55
+  minimum_decision_confidence: 0.58
+  ticker_cooldown_minutes: 120
+  event_cooldown_hours: 24
+  allow_equity: true
+  allow_long_call: true
+  allow_long_put: true
+  enabled: true
+
+llm_news_drift_v1:
+  enabled: true
+  execution: shadow_only
+  allow_model_calls: true
+  may_replace_active_strategy: false
+  share_account_state_with_baseline: false
+  share_order_state_with_baseline: false
+  cycle_seconds: 60
+  discovery_interval_seconds: 900
+  allowed_market_sessions:
+    - pre_market
+    - regular
+    - after_hours
+  premarket_window_minutes: 120
+  after_hours_window_minutes: 120
+  lookback_hours: 24
+  max_searches_per_cycle: 1
+  max_events_per_cycle: 12
+  event_cooldown_hours: 24
+  minimum_signal_materiality: 0.55
+  minimum_signal_confidence: 0.60
+  maximum_signal_ambiguity: 0.50
+  maximum_signal_latency_seconds: 900
+  maximum_event_age_seconds: 7200
+  maximum_quote_age_seconds: 90
+  minimum_market_cap_usd: 1000000000
+  minimum_average_daily_volume_usd: 20000000
+  maximum_spread_bps: 50
+  maximum_initial_reaction_bps: 500
+  shadow_initial_cash_usd: 2000
+  max_shadow_position_pct: 0.25
+  label_delay_tolerance_seconds: 90
+  minimum_event_labels_for_evaluation: 100
+  minimum_portfolio_days_for_evaluation: 20
+  market_queries:
+    - US listed company material breaking news earnings guidance merger FDA SEC DOJ regulator product management
+    - NYSE Nasdaq company press release filing major contract recall lawsuit investigation acquisition
+    - US public company raises cuts guidance beats misses estimates material corporate announcement

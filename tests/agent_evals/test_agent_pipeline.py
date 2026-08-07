@@ -11,7 +11,7 @@ from scripts.evaluation.evaluate_agents import DEFAULT_FIXTURES, agent_input, ev
 from scripts.llm.api_provider import ApiProvider
 from scripts.llm.base_provider import ProviderError, ProviderRequest
 from scripts.llm.mock_provider import MockProvider
-from scripts.llm.schemas import NEWS_OUTPUT_SCHEMA
+from scripts.llm.schemas import CHALLENGE_OUTPUT_SCHEMA, NEWS_OUTPUT_SCHEMA
 from scripts.llm.usage_tracker import UsageTracker
 
 
@@ -246,6 +246,87 @@ def test_api_provider_empty_structured_content_is_diagnostic_but_safe(monkeypatc
     assert "internal reasoning" not in str(tracker.records[-1].error)
 
 
+def test_api_provider_retries_truncated_json_with_more_output_budget(monkeypatch):
+    monkeypatch.setenv("TEST_LLM_API_KEY", "not-a-real-key")
+    snapshot = agent_input(load_snapshots(DEFAULT_FIXTURES)[0])
+    request = ProviderRequest(
+        "news_agent",
+        "v1",
+        "test",
+        snapshot,
+        NEWS_OUTPUT_SCHEMA,
+        "news_v1",
+    )
+    structured = MockProvider(UsageTracker()).generate(request).data
+    responses = [
+        {
+            "choices": [
+                {
+                    "finish_reason": "length",
+                    "message": {"content": '{"events": ['},
+                }
+            ],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 300},
+        },
+        {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {"content": json.dumps(structured)},
+                }
+            ],
+            "usage": {"prompt_tokens": 110, "completion_tokens": 40},
+        },
+    ]
+    bodies = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+    def fake_urlopen(http_request, timeout):
+        assert timeout > 0
+        bodies.append(json.loads(http_request.data.decode("utf-8")))
+        return FakeResponse(responses.pop(0))
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    tracker = UsageTracker()
+    provider = ApiProvider(
+        {
+            "base_url": "https://example.invalid",
+            "model": "test",
+            "api_key_env": "TEST_LLM_API_KEY",
+            "response_format": "json_object",
+            "max_tokens": 600,
+            "max_retries": 1,
+            "thinking": {"type": "enabled"},
+            "input_cost_per_million_usd": 1,
+            "output_cost_per_million_usd": 2,
+        },
+        tracker,
+    )
+    response = provider.generate(request)
+    assert response.data == structured
+    assert bodies[0]["max_tokens"] == 600
+    assert bodies[0]["thinking"] == {"type": "enabled"}
+    assert bodies[1]["max_tokens"] == 1200
+    assert bodies[1]["thinking"] == {"type": "disabled"}
+    assert len(bodies[1]["messages"]) == 3
+    assert response.usage.input_tokens == 210
+    assert response.usage.output_tokens == 340
+    assert response.usage.retries == 1
+    assert tracker.summary()["estimated_cost_usd"] == pytest.approx(0.00089)
+
+
 def test_api_provider_selects_thinking_mode_by_agent(monkeypatch):
     monkeypatch.setenv("TEST_LLM_API_KEY", "not-a-real-key")
     snapshot = agent_input(load_snapshots(DEFAULT_FIXTURES)[0])
@@ -286,6 +367,52 @@ def test_api_provider_selects_thinking_mode_by_agent(monkeypatch):
     assert provider.generate(ProviderRequest("challenge_agent", "v1", "test", snapshot, NEWS_OUTPUT_SCHEMA, "challenge_v1")).data == structured
     assert captured[0]["thinking"] == {"type": "disabled"}
     assert captured[1]["thinking"] == {"type": "enabled"}
+
+
+def test_api_provider_selects_timeout_by_agent(monkeypatch):
+    monkeypatch.setenv("TEST_LLM_API_KEY", "not-a-real-key")
+    snapshot = agent_input(load_snapshots(DEFAULT_FIXTURES)[0])
+    request = ProviderRequest(
+        "challenge_agent",
+        "v1",
+        "test",
+        snapshot,
+        CHALLENGE_OUTPUT_SCHEMA,
+        "challenge_v1",
+    )
+    structured = MockProvider(UsageTracker()).generate(request).data
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {"choices": [{"message": {"content": json.dumps(structured)}}]}
+            ).encode("utf-8")
+
+    def fake_urlopen(http_request, timeout):
+        del http_request
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    provider = ApiProvider(
+        {
+            "base_url": "https://example.invalid",
+            "model": "test",
+            "api_key_env": "TEST_LLM_API_KEY",
+            "timeout_seconds": 30,
+            "timeout_seconds_by_agent": {"challenge_agent": 75},
+        },
+        UsageTracker(),
+    )
+    assert provider.generate(request).data == structured
+    assert captured["timeout"] == 75
 
 
 def test_team_compacts_only_llm_news_excerpts(paper_root):

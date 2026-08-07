@@ -29,6 +29,7 @@ vibe:
 
 forward_data:
   quote_provider: robinhood_mcp
+  fallback_quote_provider: alpaca
   alpaca:
     enabled: true
     base_url: https://data.alpaca.markets
@@ -45,14 +46,18 @@ forward_data:
     timeout_seconds: 30
     max_retries: 2
     search_type: fast
+    primary_search_type: auto
+    max_content_age_hours: 24
     lookback_hours: 48
     num_results: 6
+    primary_verification_num_results: 4
     include_domains: []
     exclude_domains: []
 
 robinhood_mcp:
   enabled: true
   endpoint: https://agent.robinhood.com/mcp/trading
+  request_timeout_seconds: 20
   credential_store_path: state/robinhood_mcp_oauth.dpapi
   redirect_uri: http://127.0.0.1:8765/callback
   client_name: auto-trading-skill read-only capability audit
@@ -61,10 +66,26 @@ robinhood_mcp:
 runtime:
   forward_cycle_seconds: 300
   research_cycle_seconds: 3600
+  heartbeat_seconds: 30
+  eod_guard_seconds: 60
+  evaluation_cycle_seconds: 1800
+  forward_worker_timeout_seconds: 300
+  eod_worker_timeout_seconds: 90
+  catalyst_worker_timeout_seconds: 600
+  ai_gated_worker_timeout_seconds: 600
+  catalyst_start_offset_seconds: 1210
+  ai_gated_start_offset_seconds: 10
+  ai_monitor_cycle_seconds: 300
+  ai_monitor_worker_timeout_seconds: 90
+  news_drift_worker_timeout_seconds: 120
+  news_drift_start_offset_seconds: 20
+  evaluation_worker_timeout_seconds: 120
   watchdog_max_age_seconds: 900
   max_candidates_per_cycle: 3
+  max_shadow_candidates_per_cycle: 1
   max_option_candidates_per_cycle: 3
   order_notional_buffer_pct: 0.96
+  aggressive_limit_buffer_bps: 8
   fail_if_history_unavailable: true
 
 historical_replay:

@@ -3,7 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from scripts.llm.schemas import AGENT_INPUT_SCHEMA, CHALLENGE_OUTPUT_SCHEMA, DECISION_OUTPUT_SCHEMA, NEWS_OUTPUT_SCHEMA
+from scripts.llm.schemas import (
+    AGENT_INPUT_SCHEMA,
+    CHALLENGE_OUTPUT_SCHEMA,
+    DECISION_OUTPUT_SCHEMA,
+    NEWS_DRIFT_HEADLINE_OUTPUT_SCHEMA,
+    NEWS_OUTPUT_SCHEMA,
+)
 
 
 def export(root: str | Path) -> list[Path]:
@@ -14,6 +20,7 @@ def export(root: str | Path) -> list[Path]:
         "news_agent_output.schema.json": NEWS_OUTPUT_SCHEMA,
         "challenge_agent_output.schema.json": CHALLENGE_OUTPUT_SCHEMA,
         "decision_manager_output.schema.json": DECISION_OUTPUT_SCHEMA,
+        "news_drift_headline_output.schema.json": NEWS_DRIFT_HEADLINE_OUTPUT_SCHEMA,
     }
     paths = []
     for name, schema in schemas.items():

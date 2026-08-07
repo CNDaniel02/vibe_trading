@@ -12,10 +12,10 @@ from scripts.options.greeks import black_scholes_estimate
 from scripts.options.models import OptionContract, OptionOrder, OptionPosition, OptionQuote
 from scripts.options.paper_broker import OptionPaperBroker
 from scripts.options.portfolio import aggregate_portfolio_greeks
-from scripts.options.risk_gate import check_option_order
+from scripts.options.risk_gate import check_option_order, validate_option_quote
 from scripts.options.strategy import decide_option_direction
 from scripts.orchestrator.dry_run_options_pipeline import run_options_dry_run
-from scripts.risk.shared_portfolio_risk import check_shared_entry
+from scripts.risk.shared_portfolio_risk import check_shared_entry, shared_entry_capacity
 
 
 NOW = "2026-07-06T15:00:00+00:00"
@@ -52,7 +52,7 @@ def quote(option_type: str = "call", *, bid: float = 0.95, ask: float = 1.0, aso
     )
 
 
-def order(option_type: str = "call", *, intent: str = "buy_to_open", limit_price: float | None = 1.0) -> OptionOrder:
+def order(option_type: str = "call", *, intent: str = "buy_to_open", limit_price: float | None = 1.01) -> OptionOrder:
     return OptionOrder(
         order_id="option-test",
         decision_id="decision-test",
@@ -110,6 +110,37 @@ def test_stale_or_missing_option_quote_fails_closed(paper_root):
     assert not stale.approved and stale.reason == "stale option quote"
 
 
+def test_true_future_option_quote_still_fails_closed(paper_root):
+    config = load_runtime_config(paper_root)
+    future = validate_option_quote(
+        quote(asof="2026-07-06T15:00:05+00:00"),
+        NOW,
+        config,
+    )
+
+    assert not future.approved
+    assert future.reason == "future option quote would create lookahead"
+
+
+def test_option_entries_are_blocked_before_market_close(paper_root):
+    config = load_runtime_config(paper_root)
+    near_close = "2026-07-06T19:55:00+00:00"
+    decision = check_option_order(
+        order(),
+        quote(asof=near_close),
+        Account(2000, 2000),
+        {},
+        {},
+        {},
+        {},
+        {"trades": 0},
+        config,
+        near_close,
+    )
+    assert not decision.approved
+    assert decision.reason == "new entries blocked before market close"
+
+
 def test_wide_option_spread_and_excess_premium_are_rejected(paper_root):
     config = load_runtime_config(paper_root)
     wide = check_option_order(order(), quote(bid=0.50, ask=1.0), Account(2000, 2000), {}, {}, {}, {}, {"trades": 0}, config, NOW)
@@ -158,7 +189,7 @@ def test_option_broker_uses_shared_cash_and_independent_state(paper_root):
             intent="buy_to_open",
             order_type="limit",
             quantity=1,
-            limit_price=1.0,
+                limit_price=1.01,
             quote_seen_at=NOW,
             now=NOW,
         ),
@@ -208,6 +239,22 @@ def test_shared_total_risk_cap_blocks_two_lines_using_account(paper_root):
     )
     assert not decision.approved
     assert decision.reason == "shared total deployed risk cap exceeded"
+
+
+def test_shared_entry_capacity_reports_remaining_line_and_total_room(paper_root):
+    config = load_runtime_config(paper_root)
+    account = Account(cash=1000, initial_cash=2000)
+    equities = {"MSFT": Position("MSFT", 10, 100, NOW, NOW)}
+    capacity = shared_entry_capacity(
+        line="options",
+        account=account,
+        equity_positions=equities,
+        option_positions={},
+        equity_orders={},
+        option_orders={},
+        shared_config=config["shared_risk"],
+    )
+    assert capacity == 200
 
 
 def test_option_expiry_and_sellout_policy_forces_close():
@@ -274,7 +321,7 @@ def test_lower_option_thresholds_preserve_risk_off_put_direction(paper_root):
     assert decision["option_type"] == "put"
 
 
-def test_robinhood_option_selection_uses_caller_decision_time(paper_root):
+def test_robinhood_option_selection_uses_post_fetch_observation_time(paper_root):
     config = load_runtime_config(paper_root)
     adapter = RobinhoodOptionMarketDataAdapter(
         {"enabled": True},
@@ -306,15 +353,93 @@ def test_robinhood_option_selection_uses_caller_decision_time(paper_root):
             "get_option_quotes",
             return_value={"data": {"results": [{"quote": {**quote().to_dict(), "instrument_id": "option-id", "bid_price": 0.95, "ask_price": 1.0, "mark_price": 0.975}}]}},
         ),
-        patch("scripts.adapters.robinhood_option_market_data_adapter.rank_contracts", return_value=[]) as rank,
-    ):
+            patch(
+                "scripts.adapters.robinhood_option_market_data_adapter.utc_now",
+                return_value="2026-07-13T15:00:03+00:00",
+            ) as observed_at,
+            patch("scripts.adapters.robinhood_option_market_data_adapter.rank_contracts", return_value=[]) as rank,
+        ):
         adapter.fetch_best_contract(
             underlying="AAPL",
             underlying_price=100,
             option_type="call",
             now=NOW,
         )
-    assert rank.call_args.args[2] == NOW
+    observed_at.assert_called_once_with(timespec="microseconds")
+    assert rank.call_args.args[2] == "2026-07-13T15:00:03+00:00"
+
+
+def test_option_selection_diagnostics_explain_budget_shortfall(paper_root):
+    config = load_runtime_config(paper_root)
+    adapter = RobinhoodOptionMarketDataAdapter({"enabled": True}, config, paper_root)
+    chain = {
+        "id": "chain",
+        "symbol": "AAPL",
+        "can_open_position": True,
+        "trade_value_multiplier": "100",
+        "underlying_instruments": ["equity-id"],
+        "expiration_dates": ["2026-08-07"],
+    }
+    raw_contract = {
+        "id": "option-id",
+        "chain_id": "chain",
+        "chain_symbol": "AAPL",
+        "type": "call",
+        "strike_price": "100",
+        "expiration_date": "2026-08-07",
+    }
+    with (
+        patch.object(adapter, "readiness", return_value={"ready": True}),
+        patch.object(adapter.client, "get_option_chains", return_value={"data": {"chains": [chain]}}),
+        patch.object(adapter.client, "get_option_instruments", return_value={"data": {"instruments": [raw_contract], "next": None}}),
+        patch.object(adapter.client, "get_option_quotes", return_value={"data": {"results": []}}),
+        patch("scripts.adapters.robinhood_option_market_data_adapter.utc_now", return_value=NOW),
+        patch(
+            "scripts.adapters.robinhood_option_market_data_adapter.rank_contracts_with_diagnostics",
+            return_value=([(contract(), quote())], {"rejections": {}, "accepted_before_premium_cap": 1}),
+        ),
+    ):
+        selected, diagnostics = adapter.fetch_best_contract_with_diagnostics(
+            underlying="AAPL",
+            underlying_price=100,
+            option_type="call",
+            now=NOW,
+            max_premium_usd=80,
+        )
+    assert selected is None
+    assert diagnostics["minimum_eligible_premium_usd"] == 100
+    assert diagnostics["minimum_budget_shortfall_usd"] == 20
+    assert diagnostics["cheapest_eligible_contract"]["option_id"] == contract().option_id
+
+
+def test_option_readiness_requires_all_used_readonly_tools(
+    paper_root,
+    monkeypatch,
+):
+    config = load_runtime_config(paper_root)
+    adapter = RobinhoodOptionMarketDataAdapter(
+        {"enabled": True},
+        config,
+        paper_root,
+    )
+
+    async def present():
+        return object()
+
+    async def incomplete_probe():
+        return {
+            "tool_names": sorted(
+                RobinhoodOptionMarketDataAdapter.REQUIRED_TOOLS
+                - {"get_option_quotes"}
+            )
+        }
+
+    monkeypatch.setattr(adapter.client.store, "get_tokens", present)
+    monkeypatch.setattr(adapter.client.store, "get_client_info", present)
+    monkeypatch.setattr(adapter.client, "probe", incomplete_probe)
+    status = adapter.readiness()
+    assert status["ready"] is False
+    assert status["missing_tools"] == ["get_option_quotes"]
 
 
 def test_option_paper_broker_has_no_live_broker_methods(paper_root):

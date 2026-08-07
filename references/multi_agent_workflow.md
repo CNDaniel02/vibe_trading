@@ -4,9 +4,11 @@ This project reuses ai-berkshire workflow ideas as policy, not as a live-trading
 
 ## Strategy Isolation
 
-- `relative_strength_v1` remains the active paper strategy and may reach the existing paper broker.
+- `weighted_relative_strength_v2` is the active deterministic paper strategy.
+- `relative_strength_v1` remains unchanged as a same-snapshot shadow baseline.
 - `multi_agent_relative_strength_v2_candidate` is shadow-only and cannot create orders.
-- The strategies receive the same immutable snapshot but do not share account or order state.
+- `ai_gated_technical_v1` starts from a bounded technical top set and may execute
+  only in its isolated paper sleeve after deterministic risk approval.
 
 ## v2 Pipeline
 

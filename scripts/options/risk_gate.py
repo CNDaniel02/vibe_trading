@@ -5,7 +5,7 @@ from datetime import timedelta
 from scripts.core.models import Account, Order, Position, parse_ts
 from scripts.options.fill_model import simulate_option_fill
 from scripts.options.models import OptionOrder, OptionPosition, OptionQuote
-from scripts.risk.risk_gate import RiskDecision
+from scripts.risk.risk_gate import RiskDecision, validate_order_session
 from scripts.risk.shared_portfolio_risk import check_shared_entry
 
 
@@ -65,6 +65,13 @@ def check_option_order(
     contract = order.contract
     if order.intent not in {"buy_to_open", "sell_to_close"}:
         return RiskDecision(False, "unsupported option intent")
+    session_decision = validate_order_session(
+        now,
+        config,
+        is_entry=order.intent == "buy_to_open",
+    )
+    if not session_decision.approved:
+        return session_decision
     if order.quantity <= 0 or int(order.quantity) != order.quantity:
         return RiskDecision(False, "option quantity must be a positive whole number")
     if order.quantity > int(risk.get("max_contracts_per_order", 1)):

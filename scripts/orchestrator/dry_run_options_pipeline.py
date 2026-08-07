@@ -54,7 +54,7 @@ def run_options_dry_run(project_root: str | Path) -> dict[str, Any]:
             intent="buy_to_open",
             order_type="limit",
             quantity=1,
-            limit_price=entry_quote.ask,
+            limit_price=1.01,
             quote_seen_at=entry_quote.updated_at,
             thesis="offline long-put fixture",
             now=DRY_RUN_TIME,

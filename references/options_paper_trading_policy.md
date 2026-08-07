@@ -1,12 +1,14 @@
 # Options Paper Trading Policy
 
-## Permitted v1 scope
+## Permitted paper scope
 
 - US equity and ordinary ETF options observed from Robinhood MCP.
 - Buy-to-open one long call or one long put; sell-to-close only.
 - 21-45 calendar DTE at entry, target absolute delta 0.45.
 - Contract multiplier must be exactly 100.
 - Real option bid/ask, quote timestamp, IV, delta, gamma, theta, vega, volume, open interest, expiration, and broker sellout time are persisted with the decision.
+- Direction is weighted. A company-specific negative event or strong individual
+  relative weakness may support a long put without requiring SPY to be risk-off.
 
 ## Prohibited
 
@@ -17,7 +19,11 @@
 
 ## Risk
 
-Maximum loss for a permitted entry is premium plus configured costs. Default limits are one contract, 10% of account equity per option entry, 20% options-line deployment, 60% total equity/options deployment, and one open option position. Equity and options debit the same local cash account.
+Maximum loss for a permitted entry is premium plus configured costs. Default
+limits are one contract, 10% of account equity per option entry, 20%
+options-line deployment, 60% total equity/options deployment, and one open
+option position. Equity and options debit the same local cash account inside
+each strategy account; the AI-gated sleeve is separate from the active account.
 
 ## Pricing and Greeks
 

@@ -18,8 +18,8 @@ OrderSide = Literal["buy", "sell"]
 OrderType = Literal["market", "limit"]
 
 
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+def utc_now(*, timespec: str = "seconds") -> str:
+    return datetime.now(timezone.utc).isoformat(timespec=timespec)
 
 
 def parse_ts(value: str) -> datetime:

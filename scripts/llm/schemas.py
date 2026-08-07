@@ -308,6 +308,76 @@ CATALYST_DECISION_OUTPUT_SCHEMA: dict[str, Any] = {
     },
 }
 
+NEWS_DRIFT_HEADLINE_OUTPUT_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["signals", "data_gaps"],
+    "properties": {
+        "signals": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "event_index",
+                    "ticker",
+                    "company_name",
+                    "direction",
+                    "event_type",
+                    "materiality",
+                    "novelty",
+                    "ambiguity",
+                    "relation_type",
+                    "related_event_id",
+                    "confidence",
+                    "rationale",
+                ],
+                "properties": {
+                    "event_index": {"type": "integer", "minimum": 0},
+                    "ticker": {"type": ["string", "null"], "pattern": "^[A-Z][A-Z0-9.-]{0,9}$"},
+                    "company_name": {"type": ["string", "null"]},
+                    "direction": {"enum": ["positive", "negative", "neutral", "mixed", "unclear"]},
+                    "event_type": {
+                        "enum": [
+                            "earnings",
+                            "guidance",
+                            "merger_acquisition",
+                            "regulatory",
+                            "legal",
+                            "fda",
+                            "product",
+                            "management",
+                            "capital_allocation",
+                            "financing",
+                            "analyst_opinion",
+                            "other",
+                        ]
+                    },
+                    "materiality": {"type": "number", "minimum": 0, "maximum": 1},
+                    "novelty": {"type": "number", "minimum": 0, "maximum": 1},
+                    "ambiguity": {"type": "number", "minimum": 0, "maximum": 1},
+                    "relation_type": {
+                        "enum": [
+                            "new_event",
+                            "duplicate",
+                            "clarification",
+                            "material_update",
+                            "contradiction",
+                            "follow_up",
+                        ]
+                    },
+                    "related_event_id": {"type": ["string", "null"]},
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    "rationale": {"type": "string", "maxLength": 500},
+                },
+            },
+        },
+        "data_gaps": STRING_ARRAY,
+    },
+}
+
 OUTPUT_SCHEMAS = {
     "news_agent": NEWS_OUTPUT_SCHEMA,
     "challenge_agent": CHALLENGE_OUTPUT_SCHEMA,
@@ -317,6 +387,7 @@ OUTPUT_SCHEMAS = {
     "catalyst_bull_news_agent": CATALYST_RESEARCH_OUTPUT_SCHEMA,
     "catalyst_challenge_agent": CHALLENGE_OUTPUT_SCHEMA,
     "catalyst_decision_manager": CATALYST_DECISION_OUTPUT_SCHEMA,
+    "news_drift_headline_agent": NEWS_DRIFT_HEADLINE_OUTPUT_SCHEMA,
 }
 
 

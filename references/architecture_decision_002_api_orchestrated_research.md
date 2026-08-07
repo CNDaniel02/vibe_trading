@@ -20,7 +20,11 @@ Select option 2 as the only architecture eligible for promotion beyond shadow re
 - The local service owns schedules, retries, market-session checks, idempotency, risk limits, exits, audit records, performance evaluation, and any future broker boundary.
 - LLMs receive an immutable evidence snapshot and may return only schema-validated research or a trade proposal.  They may not invoke broker tools, modify configuration, select an unbounded universe, or override risk.
 - Codex CLI/TUI and Vibe may be used as on-demand or scheduled **read-only research sidecars**.  Their outputs must be normalized into the same snapshot/evidence contract before they can affect a shadow decision.
-- The existing `relative_strength_v1` remains the active paper strategy.  The API-driven multi-agent strategy remains shadow-only until it passes the project's forward-evidence gate.
+- `weighted_relative_strength_v2` is the active deterministic paper strategy;
+  `relative_strength_v1` remains an unchanged same-snapshot shadow baseline.
+- The broad catalyst strategy remains shadow-only. `ai_gated_technical_v1` may
+  execute only in a separate namespaced paper sleeve so it can accumulate
+  forward evidence without replacing or contaminating the active account.
 - Any future Robinhood integration must remain a narrow adapter after a separate, explicit live-trading milestone.  It must never expose arbitrary MCP tool access to an LLM or a general-purpose agent.
 
 ## Rationale
