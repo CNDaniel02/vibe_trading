@@ -839,16 +839,53 @@ def test_ai_gated_pipeline_skips_model_research_near_close(
     assert tracker.records == []
 
 
+def test_ai_gated_pipeline_skips_research_when_all_entry_lines_are_daily_blocked(
+    paper_root: Path,
+) -> None:
+    config = load_runtime_config(paper_root)
+    config["paper"]["strategy_lines"]["options"] = True
+    tracker = UsageTracker()
+    pipeline = AiGatedPaperPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=_Discovery(),
+        news_adapter=_News(),
+        option_data=_OptionData(),
+    )
+    pipeline.broker.store.write_json(
+        "daily_counters.json",
+        {
+            "date": "2026-07-13",
+            "trades": 4,
+            "equity_trades": 3,
+            "option_trades": 1,
+            "daily_realized_pnl": 0,
+        },
+    )
+
+    result = pipeline.run(NOW)
+
+    assert result["event"] == "ai_gated_cycle_skipped"
+    assert result["reason"] == "shared max daily trades reached"
+    assert result["model_calls"] == 0
+    assert tracker.records == []
+
+
 def test_eod_guard_recovers_overnight_equity_position(
     paper_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = ForwardPaperService(paper_root)
     service.broker.store.save_positions(
-        {"AAPL": Position("AAPL", 1, 100, "2026-07-10T15:00:00+00:00", "2026-07-10T15:00:00+00:00")}
+        {
+            "AAPL": Position("AAPL", 1, 100, "2026-07-10T15:00:00+00:00", "2026-07-10T15:00:00+00:00"),
+            "MSFT": Position("MSFT", 1, 100, NOW, NOW),
+        }
     )
     account = service.broker.store.account()
-    account.cash = 1900
+    account.cash = 1800
     service.broker.store.save_account(account, "2026-07-10T15:00:00+00:00")
     quote = Quote("AAPL", 101.0, 101.05, 101.02, NOW, avg_daily_volume_usd=100_000_000)
     monkeypatch.setattr(service, "_fetch_eod_equity_quotes", lambda positions: {"AAPL": quote})
@@ -860,4 +897,33 @@ def test_eod_guard_recovers_overnight_equity_position(
     result = service.run_eod_guard(NOW)
     assert result["reason"] == "overnight recovery flatten"
     assert result["equity_exits"][0]["status"] == "filled"
-    assert service.broker.store.positions() == {}
+    assert set(service.broker.store.positions()) == {"MSFT"}
+
+
+def test_ai_monitor_recovers_only_overnight_positions(paper_root: Path) -> None:
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    pipeline = AiGatedPaperPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=_Discovery(),
+        news_adapter=_News(),
+        option_data=_OptionData(),
+    )
+    pipeline.broker.store.save_positions(
+        {
+            "AAPL": Position("AAPL", 1, 100, "2026-07-10T15:00:00+00:00", "2026-07-10T15:00:00+00:00"),
+            "MSFT": Position("MSFT", 1, 100, NOW, NOW),
+        }
+    )
+    account = pipeline.broker.store.account()
+    account.cash = 1800
+    pipeline.broker.store.save_account(account, NOW)
+
+    result = pipeline.monitor_only(NOW)
+
+    assert set(pipeline.broker.store.positions()) == {"MSFT"}
+    assert len(result["exits"]) == 1
+    assert result["exits"][0]["reason"] == "AI sleeve overnight recovery flatten"

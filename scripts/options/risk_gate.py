@@ -6,7 +6,7 @@ from scripts.core.models import Account, Order, Position, parse_ts
 from scripts.options.fill_model import simulate_option_fill
 from scripts.options.models import OptionOrder, OptionPosition, OptionQuote
 from scripts.risk.risk_gate import RiskDecision, validate_order_session
-from scripts.risk.shared_portfolio_risk import check_shared_entry
+from scripts.risk.shared_portfolio_risk import check_shared_entry, daily_entry_limit_reason
 
 
 _OPEN_STATUSES = {"created", "submitted_to_paper_broker", "open", "partially_filled"}
@@ -100,8 +100,9 @@ def check_option_order(
         return RiskDecision(False, "adding to an existing option position is blocked")
     if len(option_positions) >= int(risk.get("max_open_positions", 1)):
         return RiskDecision(False, "max open option positions reached")
-    if int(counters.get("option_trades", 0)) >= int(risk.get("max_daily_entry_trades", 0)):
-        return RiskDecision(False, "max daily option trades reached")
+    limit_reason = daily_entry_limit_reason("options", counters, config)
+    if limit_reason:
+        return RiskDecision(False, limit_reason)
     for current in option_orders.values():
         if current.status not in _OPEN_STATUSES:
             continue

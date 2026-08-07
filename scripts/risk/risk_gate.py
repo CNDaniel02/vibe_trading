@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from scripts.core.models import Account, Order, Position, Quote, parse_ts
-from scripts.risk.shared_portfolio_risk import check_shared_entry
+from scripts.risk.shared_portfolio_risk import check_shared_entry, daily_entry_limit_reason
 from scripts.runtime.market_clock import UsEquityMarketClock
 
 
@@ -31,7 +31,14 @@ def validate_order_session(now: str, config: dict, *, is_entry: bool) -> RiskDec
     return RiskDecision(True, "market session ok")
 
 
-def validate_quote(quote: Quote | None, now: str, max_age_seconds: int, universe: dict) -> RiskDecision:
+def validate_quote(
+    quote: Quote | None,
+    now: str,
+    max_age_seconds: int,
+    universe: dict,
+    *,
+    enforce_entry_liquidity: bool = True,
+) -> RiskDecision:
     if quote is None:
         return RiskDecision(False, "missing quote")
     if quote.bid <= 0 or quote.ask <= 0 or quote.ask < quote.bid:
@@ -44,6 +51,8 @@ def validate_quote(quote: Quote | None, now: str, max_age_seconds: int, universe
         return RiskDecision(False, "stale quote")
     if quote.halted:
         return RiskDecision(False, "halted symbol")
+    if not enforce_entry_liquidity:
+        return RiskDecision(True, "exit quote ok")
     if quote.is_otc and not universe.get("allow_otc", False):
         return RiskDecision(False, "OTC not allowed")
     if quote.is_leveraged_etf and not universe.get("allow_leveraged_etf", False):
@@ -81,6 +90,7 @@ def check_order(
         now,
         int(config["paper"].get("quote_stale_after_seconds", 60)),
         universe,
+        enforce_entry_liquidity=order.side == "buy",
     )
     if not quote_decision.approved:
         return quote_decision
@@ -102,8 +112,10 @@ def check_order(
     if order.quantity <= 0:
         return RiskDecision(False, "quantity must be positive")
 
-    if order.side == "buy" and int(counters.get("trades", 0)) >= int(risk.get("max_daily_trades", 0)):
-        return RiskDecision(False, "max daily trades reached")
+    if order.side == "buy":
+        limit_reason = daily_entry_limit_reason("equity", counters, config)
+        if limit_reason:
+            return RiskDecision(False, limit_reason)
 
     daily_loss_limit = account.initial_cash * float(risk.get("max_daily_loss_pct_of_initial_equity", 1))
     if order.side == "buy" and float(counters.get("daily_realized_pnl", 0)) <= -daily_loss_limit:

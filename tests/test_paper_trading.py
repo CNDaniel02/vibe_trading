@@ -107,6 +107,37 @@ def test_sell_fill_uses_bid_not_midpoint(paper_root):
     assert result.average_fill_price < q.mid
 
 
+def test_exit_ignores_entry_liquidity_rules_and_does_not_consume_trade_limit(paper_root):
+    pb = broker(paper_root)
+    entry_quote = quote(bid=100.0, ask=100.1)
+    entry = make_order(pb, entry_quote, order_type="market", limit_price=None)
+    assert pb.submit_order(entry, entry_quote, now=NOW).status == "filled"
+
+    exit_quote = Quote(
+        symbol="SPY",
+        bid=99.0,
+        ask=120.0,
+        last=100.0,
+        asof=NOW,
+        source="test",
+        avg_daily_volume_usd=1,
+        asset_class="us_etf",
+    )
+    exit_order = make_order(
+        pb,
+        exit_quote,
+        decision_id="exit",
+        idempotency_key="exit",
+        side="sell",
+        order_type="market",
+        limit_price=None,
+    )
+    assert pb.submit_order(exit_order, exit_quote, now=NOW).status == "filled"
+    counters = pb.store.daily_counters(NOW)
+    assert counters["trades"] == 1
+    assert counters["equity_trades"] == 1
+
+
 def test_slippage_applied_against_agent(paper_root):
     pb = broker(paper_root)
     q = quote(bid=100, ask=100)
@@ -143,7 +174,10 @@ def test_max_position_size(paper_root):
 
 
 def test_max_daily_trades(paper_root):
-    (paper_root / "state" / "daily_counters.json").write_text(json.dumps({"date": "2026-07-06", "trades": 4}), encoding="utf-8")
+    (paper_root / "state" / "daily_counters.json").write_text(
+        json.dumps({"date": "2026-07-06", "trades": 4, "equity_trades": 4}),
+        encoding="utf-8",
+    )
     pb = broker(paper_root)
     q = quote()
     order = make_order(pb, q)

@@ -516,6 +516,7 @@ class NewsDriftPipeline:
         payload = {
             "strategy": self.STRATEGY,
             "execution": "shadow_only",
+            "label_policy_version": "executable_preclose_v1",
             "quantity": quantity,
             "notional_usd": round(quantity * entry, 4),
             "entry_bid": quote.bid,
@@ -554,13 +555,20 @@ class NewsDriftPipeline:
         }
         day = pd.Timestamp(decision.astimezone(self.clock.new_york).date())
         session = self.clock.calendar.date_to_session(day, direction="next")
-        close = self.clock.calendar.session_close(session)
-        if decision < close.to_pydatetime():
+        preclose = timedelta(
+            minutes=int(self.config.get("paper", {}).get("exit_before_close_minutes", 10))
+        )
+        close = self.clock.calendar.session_close(session).to_pydatetime() - preclose
+        if decision < close:
             targets["same_day_close"] = close.isoformat()
         next_session = self.clock.calendar.next_session(session)
-        targets["next_close"] = self.clock.calendar.session_close(next_session).isoformat()
+        targets["next_close"] = (
+            self.clock.calendar.session_close(next_session).to_pydatetime() - preclose
+        ).isoformat()
         second_session = self.clock.calendar.next_session(next_session)
-        targets["second_close"] = self.clock.calendar.session_close(second_session).isoformat()
+        targets["second_close"] = (
+            self.clock.calendar.session_close(second_session).to_pydatetime() - preclose
+        ).isoformat()
         return targets
 
     def resolve_due_labels(self, now: str | None = None) -> dict[str, Any]:
@@ -624,6 +632,9 @@ class NewsDriftPipeline:
                             },
                         )
                     recorded += 1
+                    continue
+                if quote.spread_bps() > float(self.profile.get("maximum_spread_bps", 50)):
+                    deferred += 1
                     continue
                 entry = float(item["entry_price"])
                 exit_slip = adverse_slippage(

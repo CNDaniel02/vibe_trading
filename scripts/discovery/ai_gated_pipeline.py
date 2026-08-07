@@ -22,6 +22,7 @@ from scripts.llm.usage_tracker import UsageTracker
 from scripts.options.paper_broker import OptionPaperBroker
 from scripts.options.exit_policy import evaluate_option_exit
 from scripts.risk.position_sizing import calculate_entry_quantity
+from scripts.risk.shared_portfolio_risk import daily_entry_limit_reason
 from scripts.runtime.market_clock import UsEquityMarketClock
 from scripts.simulation.paper_broker import PaperBroker
 from scripts.strategies.technical_scoring import directional_feature_scores, weighted_score, DEFAULT_WEIGHTS
@@ -108,6 +109,34 @@ class AiGatedPaperPipeline:
                 "paper_sleeve": self.namespace,
                 "live_order_tools_called": False,
             }
+        if not research_only:
+            entry_lines = []
+            if self.profile.get("allow_equity", True):
+                entry_lines.append("equity")
+            if self.config.get("paper", {}).get("strategy_lines", {}).get("options", False) and (
+                self.profile.get("allow_long_call", False)
+                or self.profile.get("allow_long_put", False)
+            ):
+                entry_lines.append("options")
+            entry_blocks = {
+                line: self._entry_block_reason(line, decision_time)
+                for line in entry_lines
+            }
+            if entry_blocks and all(entry_blocks.values()):
+                reasons = sorted(set(str(reason) for reason in entry_blocks.values()))
+                reason = reasons[0] if len(reasons) == 1 else "; ".join(reasons)
+                return {
+                    "event": "ai_gated_cycle_skipped",
+                    "cycle_id": cycle_id,
+                    "reason": reason,
+                    "entry_blocks": entry_blocks,
+                    "clock": clock.to_dict(),
+                    "monitor": monitor,
+                    "model_calls": 0,
+                    "paper_orders_created": 0,
+                    "paper_sleeve": self.namespace,
+                    "live_order_tools_called": False,
+                }
         try:
             seeds = self.discovery.collect_seed_candidates(
                 decision_time,
@@ -332,14 +361,7 @@ class AiGatedPaperPipeline:
             clock.minutes_to_close is not None
             and clock.minutes_to_close <= int(self.config["paper"].get("exit_before_close_minutes", 10))
         )
-        overnight = any(
-            parse_ts(position.opened_at).date() < parse_ts(clock.open_time or decision_time).date()
-            for position in positions.values()
-        ) or any(
-            parse_ts(position.opened_at).date() < parse_ts(clock.open_time or decision_time).date()
-            for position in option_positions.values()
-        )
-        mandatory_flatten = force_flatten or preclose or overnight
+        session_date = parse_ts(clock.open_time or decision_time).date()
         exits: list[dict[str, Any]] = []
         for symbol, position in list(self.broker.store.positions().items()):
             quote = quotes.get(symbol)
@@ -351,8 +373,14 @@ class AiGatedPaperPipeline:
                 minutes_to_close=clock.minutes_to_close,
                 exit_before_close_minutes=int(self.config["paper"].get("exit_before_close_minutes", 10)),
             )
+            overnight = parse_ts(position.opened_at).date() < session_date
+            mandatory_flatten = force_flatten or preclose or overnight
             should_exit = mandatory_flatten or decision.should_exit
-            reason = "AI sleeve mandatory flatten" if mandatory_flatten else decision.reason
+            reason = (
+                "AI sleeve mandatory flatten"
+                if force_flatten or preclose
+                else ("AI sleeve overnight recovery flatten" if overnight else decision.reason)
+            )
             if not should_exit or quote is None:
                 continue
             execution_now = max(parse_ts(decision_time), parse_ts(quote.asof)).isoformat()
@@ -381,8 +409,14 @@ class AiGatedPaperPipeline:
         for option_id, position in list(self.option_broker.store.positions().items()):
             quote = option_quotes.get(option_id)
             decision = evaluate_option_exit(position, quote, decision_time, self.config["options_risk"])
+            overnight = parse_ts(position.opened_at).date() < session_date
+            mandatory_flatten = force_flatten or preclose or overnight
             should_exit = mandatory_flatten or decision.should_exit
-            reason = "AI sleeve mandatory flatten" if mandatory_flatten else decision.reason
+            reason = (
+                "AI sleeve mandatory flatten"
+                if force_flatten or preclose
+                else ("AI sleeve overnight recovery flatten" if overnight else decision.reason)
+            )
             if not should_exit or quote is None:
                 continue
             execution_now = max(parse_ts(decision_time), parse_ts(quote.updated_at)).isoformat()
@@ -706,6 +740,10 @@ class AiGatedPaperPipeline:
                 "order": None,
                 "live_order_tools_called": False,
             }
+        entry_line = "equity" if decision["instrument"] == "equity" else "options"
+        block_reason = self._entry_block_reason(entry_line, snapshot["decision_time"])
+        if block_reason:
+            return {"status": "no_trade", "reason": block_reason, "order": None}
         ticker = snapshot["ticker"]
         observed = Quote(**item["market_context"]["quote"])
         try:
@@ -799,6 +837,20 @@ class AiGatedPaperPipeline:
             "order": submitted.to_dict(),
             "live_order_tools_called": False,
         }
+
+    def _entry_block_reason(self, line: str, now: str) -> str | None:
+        session_date = parse_ts(self.clock.status(now).open_time or now).date()
+        positions = [
+            *self.broker.store.positions().values(),
+            *self.option_broker.store.positions().values(),
+        ]
+        if any(parse_ts(position.opened_at).date() < session_date for position in positions):
+            return "overnight recovery in progress"
+        return daily_entry_limit_reason(
+            line,
+            self.broker.store.daily_counters(now),
+            self.config,
+        )
 
     def _equity_buy_limit(self, ask: float) -> float:
         costs = self.config.get("costs", {})

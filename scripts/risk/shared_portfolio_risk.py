@@ -15,6 +15,30 @@ class SharedRiskDecision:
     line_deployed_after: float
 
 
+def daily_entry_limit_reason(
+    line: str,
+    counters: dict[str, Any],
+    config: dict[str, Any],
+) -> str | None:
+    risk = config.get("risk", {})
+    options_risk = config.get("options_risk", {})
+    shared_risk = config.get("shared_risk", {})
+    if line == "options":
+        if "max_daily_entry_trades" in options_risk and int(
+            counters.get("option_trades", 0)
+        ) >= int(options_risk["max_daily_entry_trades"]):
+            return "max daily option trades reached"
+    elif "max_daily_trades" in risk and int(counters.get("equity_trades", 0)) >= int(
+        risk["max_daily_trades"]
+    ):
+        return "max daily trades reached"
+    if "max_total_daily_entry_trades" in shared_risk and int(
+        counters.get("trades", 0)
+    ) >= int(shared_risk["max_total_daily_entry_trades"]):
+        return "shared max daily trades reached"
+    return None
+
+
 _OPEN_STATUSES = {"created", "submitted_to_paper_broker", "open", "partially_filled"}
 
 

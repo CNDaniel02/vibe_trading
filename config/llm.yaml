@@ -22,7 +22,7 @@ api:
   max_tokens: 3072
   max_tokens_by_agent:
     catalyst_candidate_extractor: 700
-    catalyst_ranker: 900
+    catalyst_ranker: 1600
     catalyst_bull_news_agent: 1200
     catalyst_challenge_agent: 2200
     catalyst_decision_manager: 1400

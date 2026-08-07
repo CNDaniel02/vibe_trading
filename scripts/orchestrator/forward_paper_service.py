@@ -40,7 +40,7 @@ from scripts.llm import build_provider
 from scripts.news_drift.pipeline import NewsDriftPipeline
 from scripts.research.snapshot_builder import build_snapshot
 from scripts.risk.position_sizing import calculate_entry_quantity
-from scripts.risk.shared_portfolio_risk import shared_entry_capacity
+from scripts.risk.shared_portfolio_risk import daily_entry_limit_reason, shared_entry_capacity
 from scripts.runtime.heartbeat import write_heartbeat
 from scripts.runtime.market_clock import UsEquityMarketClock
 from scripts.runtime.process_lock import ProcessLock
@@ -392,7 +392,11 @@ class ForwardPaperService:
             for symbol, snapshot in snapshots.items()
             if symbol in option_symbols
         }
-        option_entries, option_decisions = self._process_option_entries(option_snapshots, quotes)
+        option_entries, option_decisions = self._process_option_entries(
+            option_snapshots,
+            quotes,
+            decision_now,
+        )
 
         max_shadow_candidates = int(
             self.integration_config.get("runtime", {}).get(
@@ -609,37 +613,43 @@ class ForwardPaperService:
                 "reason": f"market session is {clock.market_session}",
                 "clock": clock.to_dict(),
             }
-        overnight = any(
-            parse_ts(position.opened_at).date() < parse_ts(clock.open_time or decision_time).date()
-            for position in equity_positions.values()
-        ) or any(
-            parse_ts(position.opened_at).date() < parse_ts(clock.open_time or decision_time).date()
-            for position in option_positions.values()
-        ) or any(
-            parse_ts(position.opened_at).date() < parse_ts(clock.open_time or decision_time).date()
-            for position in ai_equity_positions.values()
-        ) or any(
-            parse_ts(position.opened_at).date() < parse_ts(clock.open_time or decision_time).date()
-            for position in ai_option_positions.values()
-        )
         preclose = (
             clock.minutes_to_close is not None
             and clock.minutes_to_close <= int(self.config["paper"].get("exit_before_close_minutes", 10))
         )
-        if not overnight and not preclose:
+        session_open = clock.open_time or decision_time
+        overnight_equity = self._overnight_position_ids(equity_positions, session_open)
+        overnight_options = self._overnight_position_ids(option_positions, session_open)
+        overnight_ai_equity = self._overnight_position_ids(ai_equity_positions, session_open)
+        overnight_ai_options = self._overnight_position_ids(ai_option_positions, session_open)
+        if not preclose and not any(
+            (overnight_equity, overnight_options, overnight_ai_equity, overnight_ai_options)
+        ):
             return {"event": "eod_guard_idle", "reason": "outside flatten window", "clock": clock.to_dict()}
 
-        reason = "overnight recovery flatten" if overnight else "mandatory pre-close flatten"
+        reason = "mandatory pre-close flatten" if preclose else "overnight recovery flatten"
+        equity_targets = equity_positions if preclose else {
+            symbol: equity_positions[symbol] for symbol in overnight_equity
+        }
+        option_targets = option_positions if preclose else {
+            option_id: option_positions[option_id] for option_id in overnight_options
+        }
         for order in list(self.broker.store.orders().values()):
-            if order.status in {"created", "submitted_to_paper_broker", "open", "partially_filled"}:
+            if (
+                order.status in {"created", "submitted_to_paper_broker", "open", "partially_filled"}
+                and (preclose or order.symbol in equity_targets)
+            ):
                 self.broker.cancel_order(order.order_id, reason)
         for order in list(self.option_broker.store.orders().values()):
-            if order.status in {"created", "submitted_to_paper_broker", "open", "partially_filled"}:
+            if (
+                order.status in {"created", "submitted_to_paper_broker", "open", "partially_filled"}
+                and (preclose or order.contract.option_id in option_targets)
+            ):
                 self.option_broker.cancel_order(order.order_id, reason)
 
-        quotes = self._fetch_eod_equity_quotes(equity_positions)
+        quotes = self._fetch_eod_equity_quotes(equity_targets)
         equity_exits: list[dict[str, Any]] = []
-        for symbol, position in list(equity_positions.items()):
+        for symbol, position in list(equity_targets.items()):
             quote = quotes.get(symbol)
             if quote is None:
                 equity_exits.append({"symbol": symbol, "status": "failed_closed", "reason": "missing EOD quote"})
@@ -663,7 +673,7 @@ class ForwardPaperService:
 
         option_exits: list[dict[str, Any]] = []
         try:
-            option_quotes = self.option_data.fetch_quotes(list(option_positions))
+            option_quotes = self.option_data.fetch_quotes(list(option_targets))
         except Exception as exc:
             option_quotes = {}
             append_jsonl(
@@ -671,7 +681,7 @@ class ForwardPaperService:
                 "audit.jsonl",
                 {"event": "eod_option_quote_failed_closed", "reason": f"{type(exc).__name__}: {exc}"},
             )
-        for option_id, position in list(option_positions.items()):
+        for option_id, position in list(option_targets.items()):
             quote = option_quotes.get(option_id)
             if quote is None:
                 option_exits.append({"option_id": option_id, "status": "failed_closed", "reason": "missing EOD option quote"})
@@ -691,7 +701,7 @@ class ForwardPaperService:
             )
             submitted = self.option_broker.submit_order(order, quote, execution_now)
             option_exits.append({"option_id": option_id, "status": submitted.status, "order": submitted.to_dict()})
-        ai_gated = self.ai_gated_pipeline.monitor_only(decision_time, force_flatten=True)
+        ai_gated = self.ai_gated_pipeline.monitor_only(decision_time, force_flatten=preclose)
         current_account = self.broker.store.account()
         remaining_equity_positions = self.broker.store.positions()
         remaining_option_positions = self.option_broker.store.positions()
@@ -727,6 +737,7 @@ class ForwardPaperService:
         symbols = list(positions)
         if not symbols:
             return {}
+
         liquidity = {symbol: None for symbol in symbols}
         etf_symbols = {
             str(symbol).upper()
@@ -756,6 +767,28 @@ class ForwardPaperService:
                 {"event": "eod_equity_quote_failed_closed", "reason": f"{type(exc).__name__}: {exc}"},
             )
             return {}
+
+    @staticmethod
+    def _overnight_position_ids(positions: dict[str, Any], session_open: str) -> set[str]:
+        session_date = parse_ts(session_open).date()
+        return {
+            position_id
+            for position_id, position in positions.items()
+            if parse_ts(position.opened_at).date() < session_date
+        }
+
+    def _entry_block_reason(self, line: str, now: str) -> str | None:
+        clock = self.clock.status(now)
+        session_open = clock.open_time or now
+        if self._overnight_position_ids(self.broker.store.positions(), session_open) or self._overnight_position_ids(
+            self.option_broker.store.positions(), session_open
+        ):
+            return "overnight recovery in progress"
+        return daily_entry_limit_reason(
+            line,
+            self.broker.store.daily_counters(now),
+            self.config,
+        )
 
     def _attach_news(self, snapshot: dict[str, Any]) -> dict[str, Any]:
         enriched = dict(snapshot)
@@ -796,6 +829,18 @@ class ForwardPaperService:
         account = self.broker.store.account()
         positions = self.broker.store.positions()
         if snapshot["ticker"] in positions:
+            return None
+        block_reason = self._entry_block_reason("equity", snapshot["decision_time"])
+        if block_reason:
+            append_jsonl(
+                self.root,
+                "decisions.jsonl",
+                {
+                    "event": "weighted_order_skipped",
+                    "ticker": snapshot["ticker"],
+                    "reason": block_reason,
+                },
+            )
             return None
         adapter = quote_adapter or self.quote_adapter
         provider = quote_provider or self.quote_provider
@@ -988,7 +1033,12 @@ class ForwardPaperService:
             exits.append({"decision": decision.to_dict(), "order": submitted.to_dict()})
         return exits
 
-    def _process_option_entries(self, snapshots: dict[str, dict[str, Any]], quotes: dict[str, Quote]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    def _process_option_entries(
+        self,
+        snapshots: dict[str, dict[str, Any]],
+        quotes: dict[str, Quote],
+        now: str | None = None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         if not self.config["paper"].get("strategy_lines", {}).get("options", False):
             return [], []
         baseline_decisions = [decide_option_direction(snapshot, self.config) for snapshot in snapshots.values()]
@@ -1010,6 +1060,13 @@ class ForwardPaperService:
                 candidate["action"] = "no_trade"
                 candidate["reasons"].append("open option order already pending")
             candidates = []
+        elif candidates:
+            block_reason = self._entry_block_reason("options", now or utc_now())
+            if block_reason:
+                for candidate in candidates:
+                    candidate["action"] = "no_trade"
+                    candidate["reasons"].append(block_reason)
+                candidates = []
         if candidates:
             try:
                 earnings = self.option_data.upcoming_earnings([item["ticker"] for item in candidates], utc_now(), days=7)

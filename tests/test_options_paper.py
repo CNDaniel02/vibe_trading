@@ -204,6 +204,55 @@ def test_option_broker_uses_shared_cash_and_independent_state(paper_root):
     assert contract("put").option_id in recovered.store.positions()
 
 
+def test_option_close_ignores_entry_liquidity_rules_and_does_not_consume_trade_limit(paper_root):
+    config = load_runtime_config(paper_root)
+    broker = OptionPaperBroker(paper_root, config)
+    opened = broker.submit_order(
+        broker.create_order(
+            decision_id="option-entry",
+            contract=contract(),
+            intent="buy_to_open",
+            order_type="limit",
+            quantity=1,
+            limit_price=1.01,
+            quote_seen_at=NOW,
+            now=NOW,
+        ),
+        quote(),
+        NOW,
+    )
+    assert opened.status == "filled"
+
+    illiquid_exit_quote = OptionQuote(
+        option_id=contract().option_id,
+        bid=0.80,
+        ask=1.50,
+        mark=1.15,
+        updated_at=NOW,
+        source="fixture",
+        volume=0,
+        open_interest=0,
+    )
+    closed = broker.submit_order(
+        broker.create_order(
+            decision_id="option-exit",
+            contract=contract(),
+            intent="sell_to_close",
+            order_type="market",
+            quantity=1,
+            limit_price=None,
+            quote_seen_at=NOW,
+            now=NOW,
+        ),
+        illiquid_exit_quote,
+        NOW,
+    )
+    assert closed.status == "filled"
+    counters = broker.store.base.daily_counters(NOW)
+    assert counters["trades"] == 1
+    assert counters["option_trades"] == 1
+
+
 def test_created_or_open_option_order_is_not_a_position(paper_root):
     config = load_runtime_config(paper_root)
     broker = OptionPaperBroker(paper_root, config)

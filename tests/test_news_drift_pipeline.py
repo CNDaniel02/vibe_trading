@@ -279,6 +279,38 @@ def test_due_label_applies_bid_and_adverse_slippage(tmp_path):
     assert discovery.quote_calls == 1
 
 
+def test_close_labels_target_executable_preclose_time(tmp_path):
+    pipeline, _, _ = _pipeline(tmp_path)
+
+    proposal = pipeline.run(NOW)["proposals"][0]
+
+    assert proposal["label_policy_version"] == "executable_preclose_v1"
+    assert proposal["label_targets"]["same_day_close"] == "2026-08-04T19:50:00+00:00"
+    assert proposal["label_targets"]["next_close"].endswith("T19:50:00+00:00")
+
+
+def test_wide_spread_quote_is_not_used_as_outcome_label(tmp_path):
+    pipeline, _, discovery = _pipeline(tmp_path)
+    proposal = pipeline.run(NOW)["proposals"][0]
+    target = proposal["label_targets"]["plus_1m"]
+    discovery.fetch_current_quote = lambda symbol, **_kwargs: Quote(
+        symbol=symbol,
+        bid=90.0,
+        ask=110.0,
+        last=100.0,
+        asof=target,
+        source="fixture",
+        avg_daily_volume_usd=50_000_000,
+        previous_close=100.0,
+    )
+
+    labels = pipeline.resolve_due_labels(target)
+
+    assert labels == {"due": 1, "recorded": 0, "deferred": 1}
+    with NewsEventStore(tmp_path / "state" / "news_events.sqlite") as store:
+        assert store.connection.execute("SELECT COUNT(*) FROM outcome_labels").fetchone()[0] == 0
+
+
 def test_label_does_not_use_quote_observed_before_target(tmp_path):
     pipeline, _, discovery = _pipeline(tmp_path)
     proposal = pipeline.run(NOW)["proposals"][0]

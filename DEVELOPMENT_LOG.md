@@ -4,6 +4,36 @@
 
 每条记录至少包含：变更原因和运行证据、修改内容、安全影响、验证结果、是否需要重启。纯格式调整可以合并记录，但不能省略会影响交易决策或绩效统计的变化。
 
+## 2026-08-06 (America/Los_Angeles) - Overnight recovery and entry accounting repair
+
+### Runtime evidence
+
+- The August 5 pre-close guard could not obtain Robinhood or Alpaca quotes during a DNS outage, so AVGO, JPM, TLT put, and the isolated AI XLV position remained overnight.
+- On August 6 the global overnight flag closed a newly opened MSFT position after one minute. Five entry and exit fills then exhausted the shared daily limit, causing 167 equity and 73 option entry rejections.
+
+### Changes
+
+- Overnight recovery now targets only positions opened before the current session. Current-session positions and pending orders are left alone.
+- Both the main and AI paper lanes block new entries while their own overnight recovery is incomplete.
+- Daily counters now count only equity buys and option buy-to-open fills. Exits still update realized PnL but do not consume entry capacity.
+- Equity exits bypass entry-only spread, price-floor, liquidity, and universe filters while retaining fresh, valid, non-halted quote checks.
+- Strategy pipelines short-circuit before quote refresh, option-chain selection, or order creation when daily entry limits are already exhausted.
+- News-drift close labels target the configured pre-close liquidation time and defer abnormal-spread observations; old immutable labels remain unchanged.
+- The existing Catalyst ranker output budget increased from 900 to 1600 tokens so its structured retry can use the existing 3072-token ceiling.
+
+### Safety and deployment
+
+- Paper-only and live-trading-disabled boundaries are unchanged. No broker write tool was added.
+- The AI isolated sleeve skips Exa and LLM research when every permitted entry line is already blocked by recovery or daily limits; one remaining eligible line still permits research.
+- The service was stopped before this repair. A restart is required so the supervisor loads the corrected scheduler and recovery code.
+
+### Validation
+
+- Focused broker, options, orchestrator, AI-sleeve, and news-drift tests passed.
+- Full suite: `166 passed`; only four third-party `exchange_calendars` deprecation warnings remain.
+- `compileall` passed; runtime mode remains `paper=true`, `live_readonly=false`, `live_trading=false`.
+- `graphify update .` rebuilt the local code graph without an API call.
+
 ## 2026-08-05 (America/Los_Angeles) - 连续运行检修与新闻/期权时间修复
 
 ### 运行证据

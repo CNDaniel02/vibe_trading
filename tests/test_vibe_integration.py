@@ -544,6 +544,39 @@ def test_forward_equity_preflight_does_not_persist_known_capacity_rejection(pape
     assert decision["reason"] == "shared paper account has insufficient entry capacity"
 
 
+def test_forward_equity_daily_limit_blocks_before_quote_refresh(paper_root: Path) -> None:
+    service = ForwardPaperService(paper_root)
+    now = "2026-07-13T15:00:00Z"
+    service.broker.store.write_json(
+        "daily_counters.json",
+        {
+            "date": "2026-07-13",
+            "trades": 4,
+            "equity_trades": 4,
+            "option_trades": 0,
+            "daily_realized_pnl": 0,
+        },
+    )
+    quote = Quote("MSFT", 100, 100.05, 100.02, now, avg_daily_volume_usd=100_000_000)
+
+    class QuoteAdapter:
+        @staticmethod
+        def fetch_quotes(*_args, **_kwargs):
+            raise AssertionError("quote refresh must not run after a known daily-limit rejection")
+
+    result = service._submit_weighted_entry(
+        {"ticker": "MSFT", "snapshot_id": "daily-limit-test", "decision_time": now},
+        quote,
+        {"score": 0.9},
+        quote_adapter=QuoteAdapter(),
+    )
+
+    assert result is None
+    assert service.broker.store.orders() == {}
+    decision = json.loads((paper_root / "logs" / "decisions.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert decision["reason"] == "max daily trades reached"
+
+
 def test_forward_uses_independent_affordable_options_watchlist(
     paper_root: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -577,7 +610,8 @@ def test_forward_uses_independent_affordable_options_watchlist(
     monkeypatch.setattr(service.option_data, "upcoming_earnings", lambda *_args, **_kwargs: {})
     captured: dict[str, object] = {}
 
-    def capture_options(snapshots, quotes):
+    def capture_options(snapshots, quotes, now=None):
+        del now
         captured["symbols"] = set(snapshots)
         captured["quote_symbols"] = set(quotes)
         return [], []

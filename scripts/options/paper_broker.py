@@ -135,8 +135,9 @@ class OptionPaperBroker:
         self.store.base.save_account(account, fill.filled_at)
         self.store.save_positions(option_positions)
         self.store.save_orders(orders)
-        self.store.base.increment_trades(now, line="options")
-        if fill.intent == "sell_to_close":
+        if fill.intent == "buy_to_open":
+            self.store.base.increment_trades(now, line="options")
+        else:
             self.store.base.add_daily_realized_pnl(account.realized_pnl - realized_before, now, line="options")
         append_jsonl(self.root, f"{self.log_prefix}paper_option_orders.jsonl", {"event": "filled", "order": order.to_dict(), "quote": quote.to_dict()})
         append_jsonl(self.root, f"{self.log_prefix}paper_option_fills.jsonl", {"fill": fill.to_dict(), "contract": order.contract.to_dict(), "quote": quote.to_dict()})
