@@ -26,6 +26,7 @@ def test_dashboard_state_explains_deterministic_rejection_and_paper_boundary(pap
     (paper_root / "logs" / "decisions.jsonl").write_text(json.dumps(baseline) + "\n", encoding="utf-8")
     state = build_dashboard_state(paper_root)
     assert state["mode"] == {"paper": True, "live_trading": False}
+    assert state["strategy_modes"]["weighted_relative_strength_v2"] == "shadow_only"
     assert state["safety"]["allow_options"] is True
     assert state["safety"]["options_risk"]["allow_sell_to_open"] is False
     assert state["safety"]["options_risk"]["allow_margin"] is False

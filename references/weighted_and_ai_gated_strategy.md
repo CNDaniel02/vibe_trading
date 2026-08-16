@@ -1,9 +1,10 @@
 # Weighted and AI-Gated Paper Strategy Policy
 
-## Active deterministic equity strategy
+## Shadow deterministic equity strategy
 
-`weighted_relative_strength_v2` replaces the all-AND entry decision without
-removing safety gates. A quote must be valid and fresh, the session must be
+`weighted_relative_strength_v2` replaces the all-AND candidate decision without
+removing safety gates. It is currently `shadow_only` because observed forward
+returns were negative after execution costs. A quote must be valid and fresh, the session must be
 regular, completed OHLCV must reach the expected prior NYSE session, the ticker
 must not already be held, and extreme chase risk remains prohibited.
 
@@ -12,13 +13,11 @@ market regime, and chase quality are soft features. Their weighted sum controls
 entry. The original `relative_strength_v1` output is recorded against the same
 snapshot as a shadow baseline.
 
-Weights stay fixed until at least 100 valid one-hour outcome labels mature.
-Only one overlapping label per ticker per hour is admitted, targets outside
+Adaptive weights are currently disabled. New observations target 360-minute
+net returns so the label horizon matches the prior holding period. Targets outside
 regular hours are not scheduled, and quotes arriving more than 15 minutes after
-the target expire without training. The adaptive mode uses a new versioned
-state file, minimizes average squared feature loss using exponential
-reweighting, and retains a non-zero floor. It cannot add features, change risk
-limits, or use future data.
+the target expire. The strategy cannot return to `paper_broker` until new
+out-of-sample labels show a positive edge after spread and slippage.
 
 ## Active deterministic options strategy
 
@@ -29,7 +28,7 @@ regime is a soft feature, not a mandatory direction switch.
 
 Earnings exclusion, contract liquidity, spread, DTE, Greeks, IV, premium,
 position count, cash, and shared deployment caps remain deterministic vetoes.
-Every contract-selection rejection category is logged. When no directional
+Entry spread may not exceed 4%. Every contract-selection rejection category is logged. When no directional
 event exists, technical scores retain their full weight; missing news is
 neutral rather than an automatic 30% score penalty.
 
@@ -47,11 +46,17 @@ The cycle is:
    reserving bounded slots for confirmed reported-earnings surprises.
 3. Search Exa for the top 5-8 candidates with a 48-hour cutoff.
 4. Ask DeepSeek for one low-cost structured ranking.
-5. Obtain primary-source verification for at most two deep candidates.
-6. Run News/Bull, Challenge, and Decision; Challenge has mandatory veto.
-7. Require a deterministic confidence floor and all existing risk checks.
-8. Route only to the namespaced local paper broker.
-9. Monitor, exit, journal, and evaluate the sleeve independently.
+5. Obtain primary-source verification for at most three deep candidates, with
+   two available slots reserved for ranked bearish opportunities.
+6. Run News/Bull and Challenge without thinking, then final Decision with
+   DeepSeek V4 Flash thinking; Challenge has mandatory veto.
+7. Require `entry_now`, numeric entry bounds, and an expiry no more than five
+   minutes after the decision. Refresh the quote and reject unmet conditions.
+8. Block a ticker for the rest of the session after a stop-loss exit.
+9. Require a deterministic confidence floor and all existing risk checks.
+10. Route only to the namespaced local paper broker.
+11. Monitor, exit, journal, and evaluate the sleeve independently by bullish
+    and bearish direction.
 
 Exa discovery uses low-latency search with inline token-bounded highlights and
 content no older than 24 hours. Only the final primary-source verification uses

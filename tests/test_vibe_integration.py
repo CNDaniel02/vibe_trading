@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 import scripts.orchestrator.forward_paper_service as forward_service_module
 from scripts.adapters.alpaca_market_data_adapter import AlpacaMarketDataAdapter
@@ -33,6 +34,16 @@ from scripts.strategies.relative_strength_v1 import decide_snapshot
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests" / "fixtures"
+
+
+def _set_weighted_execution(root: Path, execution: str) -> None:
+    strategy_path = root / "config" / "strategy_profiles.yaml"
+    strategies = yaml.safe_load(strategy_path.read_text(encoding="utf-8"))
+    strategies["weighted_relative_strength_v2"]["execution"] = execution
+    strategy_path.write_text(
+        yaml.safe_dump(strategies, sort_keys=False),
+        encoding="utf-8",
+    )
 
 
 def test_vibe_runtime_is_pinned_and_clean() -> None:
@@ -500,6 +511,7 @@ def test_deterministic_exit_rules() -> None:
 
 
 def test_forward_pipeline_dry_run_closes_loop(paper_root: Path) -> None:
+    _set_weighted_execution(paper_root, "paper_broker")
     report = run_dry_run(paper_root)
     result = report["result"]
     assert result["event"] == "forward_cycle_complete"
@@ -511,6 +523,20 @@ def test_forward_pipeline_dry_run_closes_loop(paper_root: Path) -> None:
     assert "AAPL" in report["paper_positions"]
     assert report["metrics"]["profitability"] == "insufficient_forward_evidence"
     assert report["metrics"]["promotion_eligible"] is False
+
+
+def test_weighted_equity_shadow_mode_keeps_candidate_out_of_broker(
+    paper_root: Path,
+) -> None:
+    _set_weighted_execution(paper_root, "shadow_only")
+
+    report = run_dry_run(paper_root)
+    result = report["result"]
+
+    assert result["selected_candidates"] == ["AAPL"]
+    assert result["active_execution"] == "shadow_only"
+    assert result["orders"] == []
+    assert report["paper_positions"] == {}
 
 
 def test_forward_equity_preflight_does_not_persist_known_capacity_rejection(paper_root: Path) -> None:
@@ -658,6 +684,7 @@ def test_fill_rate_excludes_deterministic_risk_rejections(paper_root: Path) -> N
 
 
 def test_forward_cycle_refreshes_clock_after_quote_collection(paper_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_weighted_execution(paper_root, "paper_broker")
     class LateQuoteAdapter:
         @staticmethod
         def fetch_quotes(symbols, **kwargs):
@@ -703,6 +730,7 @@ def test_forward_cycle_refreshes_clock_after_quote_collection(paper_root: Path, 
 def test_forward_cycle_falls_back_to_alpaca_and_records_stages(
     paper_root: Path,
 ) -> None:
+    _set_weighted_execution(paper_root, "paper_broker")
     class FailedPrimary:
         @staticmethod
         def fetch_quotes(*args, **kwargs):

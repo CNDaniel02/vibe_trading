@@ -94,6 +94,17 @@ class AiGatedInvestmentTeam:
         }:
             guardrails.append("invalid action/instrument pair")
             decision = self._no_trade(decision, ticker, "Action and instrument were inconsistent.")
+        elif decision["action"] in {"buy", "buy_to_open"} and (
+            not decision.get("entry_now")
+            or decision.get("max_entry_price") is None
+            or decision.get("entry_valid_until") is None
+        ):
+            guardrails.append("model did not provide an executable immediate entry")
+            decision = self._no_trade(
+                decision,
+                ticker,
+                "Trade decisions require immediate authorization, a maximum entry price, and an expiry.",
+            )
         return {
             "strategy": self.STRATEGY,
             "snapshot_id": snapshot["snapshot_id"],
@@ -147,6 +158,10 @@ class AiGatedInvestmentTeam:
             "supporting_evidence": list(decision.get("supporting_evidence", [])),
             "contrary_evidence": [*list(decision.get("contrary_evidence", [])), reason],
             "entry_condition": "None.",
+            "entry_now": False,
+            "min_entry_price": None,
+            "max_entry_price": None,
+            "entry_valid_until": None,
             "invalidation_condition": "Not applicable.",
             "exit_condition": "Not applicable.",
             "confidence": 0.0,

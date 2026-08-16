@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -167,11 +168,16 @@ class AiGatedPaperPipeline:
                 for order in self.option_broker.store.orders().values()
                 if order.status in active_statuses
             )
+            stopped_out_tickers = self._same_session_stop_tickers(decision_time)
             occupied_seeds = sorted(set(seed_by_ticker) & occupied_tickers)
+            stopped_out_seeds = sorted(
+                (set(seed_by_ticker) & stopped_out_tickers) - occupied_tickers
+            )
+            excluded_tickers = occupied_tickers | stopped_out_tickers
             seed_by_ticker = {
                 ticker: item
                 for ticker, item in seed_by_ticker.items()
-                if ticker not in occupied_tickers
+                if ticker not in excluded_tickers
             }
             contexts = (
                 self.discovery.fetch_market_context(list(seed_by_ticker), decision_time)
@@ -181,7 +187,7 @@ class AiGatedPaperPipeline:
             contexts = {
                 str(ticker).upper(): context
                 for ticker, context in contexts.items()
-                if str(ticker).upper() not in occupied_tickers
+                if str(ticker).upper() not in excluded_tickers
             }
             candidates = self._technical_candidates(contexts, seed_by_ticker, decision_time)
             top_count = max(5, min(8, int(self.profile.get("top_technical_candidates", 6))))
@@ -197,6 +203,13 @@ class AiGatedPaperPipeline:
             }
             for ticker in occupied_seeds
         ]
+        skipped.extend(
+            {
+                "ticker": ticker,
+                "reason": "same-session stop loss blocks ticker reentry",
+            }
+            for ticker in stopped_out_seeds
+        )
         validated: list[tuple[dict[str, Any], dict[str, Any]]] = []
         for candidate in selected:
             ticker = candidate["ticker"]
@@ -299,9 +312,10 @@ class AiGatedPaperPipeline:
 
         ranked = self._validated_ranking(ranking, researched)
         deep_limit = int(self.profile.get("top_deep_research_candidates", 2))
+        deep_research = self._select_deep_research_candidates(ranked, deep_limit)
         decisions: list[dict[str, Any]] = []
         orders: list[dict[str, Any]] = []
-        for rank in ranked[:deep_limit]:
+        for rank in deep_research:
             item = next(value for value in researched if value["ticker"] == rank["ticker"])
             if hasattr(self.news, "search_primary_evidence"):
                 try:
@@ -722,6 +736,43 @@ class AiGatedPaperPipeline:
         result.sort(key=lambda item: float(item["score"]), reverse=True)
         return result
 
+    def _select_deep_research_candidates(
+        self,
+        ranked: list[dict[str, Any]],
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        limit = max(0, limit)
+        bearish_reserve = min(
+            limit,
+            max(
+                0,
+                int(
+                    self.profile.get(
+                        "minimum_bearish_deep_research_candidates",
+                        0,
+                    )
+                ),
+            ),
+        )
+        selected: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        def add(item: dict[str, Any]) -> None:
+            ticker = str(item["ticker"])
+            if ticker in seen or len(selected) >= limit:
+                return
+            selected.append(item)
+            seen.add(ticker)
+
+        for item in ranked:
+            if len(selected) >= bearish_reserve:
+                break
+            if item.get("direction") == "bearish":
+                add(item)
+        for item in ranked:
+            add(item)
+        return selected
+
     def _agent_snapshot(self, item: dict[str, Any], ranking: dict[str, Any]) -> dict[str, Any]:
         cutoff_candidates = [item["research_time"]]
         cutoff_candidates.extend(
@@ -775,6 +826,35 @@ class AiGatedPaperPipeline:
                 "reason": f"model confidence below deterministic floor {minimum_confidence:g}",
                 "order": None,
             }
+        if not decision.get("entry_now", False):
+            return {
+                "status": "no_trade",
+                "reason": "model did not authorize immediate entry",
+                "order": None,
+            }
+        maximum_entry = decision.get("max_entry_price")
+        valid_until_text = decision.get("entry_valid_until")
+        if maximum_entry is None or valid_until_text is None:
+            return {
+                "status": "no_trade",
+                "reason": "model omitted maximum entry price or entry expiry",
+                "order": None,
+            }
+        decision_timestamp = parse_ts(snapshot["decision_time"])
+        valid_until = parse_ts(str(valid_until_text))
+        maximum_validity = int(self.profile.get("max_entry_validity_seconds", 300))
+        if valid_until < decision_timestamp:
+            return {
+                "status": "no_trade",
+                "reason": "entry authorization expired before the decision time",
+                "order": None,
+            }
+        if valid_until > decision_timestamp + timedelta(seconds=maximum_validity):
+            return {
+                "status": "no_trade",
+                "reason": "model entry authorization exceeds deterministic validity window",
+                "order": None,
+            }
         if research_only:
             return {
                 "status": "research_only",
@@ -790,6 +870,12 @@ class AiGatedPaperPipeline:
         if block_reason:
             return {"status": "no_trade", "reason": block_reason, "order": None}
         ticker = snapshot["ticker"]
+        if ticker in self._same_session_stop_tickers(snapshot["decision_time"]):
+            return {
+                "status": "no_trade",
+                "reason": "same-session stop loss blocks ticker reentry",
+                "order": None,
+            }
         observed = Quote(**item["market_context"]["quote"])
         try:
             quote = self.discovery.fetch_current_quote(
@@ -805,6 +891,38 @@ class AiGatedPaperPipeline:
             parse_ts(quote.asof),
             parse_ts(observed_now),
         ).isoformat()
+        if parse_ts(now) > valid_until:
+            return {
+                "status": "no_trade",
+                "reason": "entry authorization expired before execution",
+                "order": None,
+            }
+        minimum_entry = decision.get("min_entry_price")
+        maximum_entry = float(maximum_entry)
+        if minimum_entry is not None and float(minimum_entry) > maximum_entry:
+            return {
+                "status": "no_trade",
+                "reason": "model entry price bounds are inconsistent",
+                "order": None,
+            }
+        if quote.ask > maximum_entry:
+            return {
+                "status": "no_trade",
+                "reason": (
+                    f"underlying ask {quote.ask:g} is above model maximum entry price "
+                    f"{maximum_entry:g}"
+                ),
+                "order": None,
+            }
+        if minimum_entry is not None and quote.ask < float(minimum_entry):
+            return {
+                "status": "no_trade",
+                "reason": (
+                    f"underlying ask {quote.ask:g} is below model minimum entry price "
+                    f"{float(minimum_entry):g}"
+                ),
+                "order": None,
+            }
         if decision["instrument"] == "equity":
             if not self.profile.get("allow_equity", True):
                 return {"status": "no_trade", "reason": "equity disabled for AI sleeve", "order": None}
@@ -846,12 +964,33 @@ class AiGatedPaperPipeline:
             equity_at_cost += sum(position.cost_basis() for position in option_positions.values())
             budget = equity_at_cost * float(self.config["options_risk"].get("max_order_risk_pct_of_equity", 0.10)) * 0.95
             try:
-                selected = self.option_data.fetch_best_contract(
-                    underlying=ticker,
-                    underlying_price=quote.last,
-                    option_type=option_type,
-                    now=now,
-                    max_premium_usd=budget,
+                if hasattr(self.option_data, "fetch_best_contract_with_diagnostics"):
+                    selected, diagnostics = self.option_data.fetch_best_contract_with_diagnostics(
+                        underlying=ticker,
+                        underlying_price=quote.last,
+                        option_type=option_type,
+                        now=now,
+                        max_premium_usd=budget,
+                    )
+                else:
+                    selected = self.option_data.fetch_best_contract(
+                        underlying=ticker,
+                        underlying_price=quote.last,
+                        option_type=option_type,
+                        now=now,
+                        max_premium_usd=budget,
+                    )
+                    diagnostics = {"diagnostics_unavailable": True}
+                append_jsonl(
+                    self.root,
+                    "option_selection_diagnostics.jsonl",
+                    {
+                        "strategy": self.STRATEGY,
+                        "paper_sleeve": self.namespace,
+                        "ticker": ticker,
+                        "decision_time": snapshot["decision_time"],
+                        "diagnostics": diagnostics,
+                    },
                 )
             except Exception as exc:
                 return {
@@ -860,7 +999,15 @@ class AiGatedPaperPipeline:
                     "order": None,
                 }
             if selected is None:
-                return {"status": "no_trade", "reason": "no option passed deterministic liquidity/risk filters", "order": None}
+                return {
+                    "status": "no_trade",
+                    "reason": (
+                        "no option passed deterministic liquidity/risk filters: "
+                        f"{diagnostics.get('rejections', {})}"
+                    ),
+                    "selection_diagnostics": diagnostics,
+                    "order": None,
+                }
             contract, option_quote = selected
             order = self.option_broker.create_order(
                 decision_id=snapshot["snapshot_id"],
@@ -896,6 +1043,28 @@ class AiGatedPaperPipeline:
             self.broker.store.daily_counters(now),
             self.config,
         )
+
+    def _same_session_stop_tickers(self, now: str) -> set[str]:
+        session_date = parse_ts(self.clock.status(now).open_time or now).date()
+        stopped = {
+            order.symbol.upper()
+            for order in self.broker.store.orders().values()
+            if order.side == "sell"
+            and order.status == "filled"
+            and "stop loss" in order.thesis.lower()
+            and parse_ts(order.updated_at or order.submitted_at or order.created_at).date()
+            == session_date
+        }
+        stopped.update(
+            order.contract.underlying.upper()
+            for order in self.option_broker.store.orders().values()
+            if order.intent == "sell_to_close"
+            and order.status == "filled"
+            and "stop loss" in order.thesis.lower()
+            and parse_ts(order.updated_at or order.submitted_at or order.created_at).date()
+            == session_date
+        )
+        return stopped
 
     def _equity_buy_limit(self, ask: float) -> float:
         costs = self.config.get("costs", {})

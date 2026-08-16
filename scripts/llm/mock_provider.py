@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import timedelta
 from typing import Any
 
+from scripts.core.models import parse_ts
 from scripts.llm.base_provider import LLMProvider, ProviderRequest, ProviderResponse, ProviderUsage
 from scripts.llm.schemas import validate_schema
 from scripts.llm.usage_tracker import UsageTracker
@@ -315,6 +317,14 @@ class MockProvider(LLMProvider):
             0.0,
             min(1.0, float(bull.get("confidence", 0)) + float(challenge.get("confidence_adjustment", 0))),
         )
+        trade_now = action in {"buy", "buy_to_open"}
+        quote = payload.get("market_data", {}).get("quote", {})
+        ask = float(quote.get("ask") or 0)
+        valid_until = (
+            (parse_ts(str(payload["decision_time"])) + timedelta(minutes=5)).isoformat()
+            if trade_now
+            else None
+        )
         return {
             "action": action,
             "instrument": instrument,
@@ -323,6 +333,10 @@ class MockProvider(LLMProvider):
             "supporting_evidence": list(bull.get("supporting_facts", [])),
             "contrary_evidence": list(challenge.get("objections", [])),
             "entry_condition": "Fresh quote and deterministic risk approval.",
+            "entry_now": trade_now,
+            "min_entry_price": None,
+            "max_entry_price": round(ask * 1.001, 4) if trade_now and ask > 0 else None,
+            "entry_valid_until": valid_until,
             "invalidation_condition": "Catalyst is contradicted or market confirmation reverses.",
             "exit_condition": "Configured stop, target, time stop, invalidation, or pre-close exit.",
             "confidence": round(confidence, 3),

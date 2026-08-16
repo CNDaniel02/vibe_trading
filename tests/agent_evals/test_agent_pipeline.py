@@ -195,7 +195,7 @@ def test_api_provider_supports_deepseek_json_mode_and_base_url_override(monkeypa
             "base_url": "https://ignored.example",
             "base_url_env": "OPENAI_BASE_URL",
             "endpoint": "/chat/completions",
-            "model": "deepseek-v4-pro",
+            "model": "deepseek-v4-flash",
             "api_key_env": "TEST_LLM_API_KEY",
             "response_format": "json_object",
             "max_tokens": 4096,

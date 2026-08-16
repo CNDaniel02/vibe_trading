@@ -19,8 +19,10 @@ from scripts.evaluation.calculate_metrics import calculate_metrics
 from scripts.llm.api_provider import ApiProvider
 from scripts.llm.base_provider import ProviderError, ProviderRequest
 from scripts.llm.mock_provider import MockProvider
+from scripts.llm.schemas import CATALYST_DECISION_OUTPUT_SCHEMA
 from scripts.llm.usage_tracker import UsageTracker
 from scripts.options.models import OptionContract, OptionQuote
+from scripts.options.paper_broker import OptionPaperBroker
 from scripts.options.selection import rank_contracts_with_diagnostics
 from scripts.options.weighted_strategy import decide_weighted_option_direction
 from scripts.orchestrator.forward_paper_service import (
@@ -493,9 +495,14 @@ def test_metrics_ignore_stale_open_position_snapshot_after_flatten(
 def test_outcome_labeler_does_not_resolve_before_future_horizon(paper_root: Path) -> None:
     config = load_runtime_config(paper_root)
     decision = decide_weighted(snapshot(), config, paper_root)
+    profile = {
+        **config["strategies"]["weighted_relative_strength_v2"],
+        "outcome_horizon_minutes": 60,
+        "outcome_sampling_minutes": 60,
+    }
     labeler = CandidateOutcomeLabeler(
         paper_root,
-        config["strategies"]["weighted_relative_strength_v2"],
+        profile,
         config["costs"],
     )
     labeler.register(decision, snapshot())
@@ -513,9 +520,14 @@ def test_outcome_labeler_samples_one_overlapping_observation_per_ticker(
     paper_root: Path,
 ) -> None:
     config = load_runtime_config(paper_root)
+    profile = {
+        **config["strategies"]["weighted_relative_strength_v2"],
+        "outcome_horizon_minutes": 60,
+        "outcome_sampling_minutes": 60,
+    }
     labeler = CandidateOutcomeLabeler(
         paper_root,
-        config["strategies"]["weighted_relative_strength_v2"],
+        profile,
         config["costs"],
     )
     first = snapshot()
@@ -587,6 +599,66 @@ def test_option_selection_returns_exact_rejection_diagnostics(paper_root: Path) 
     ranked, diagnostics = rank_contracts_with_diagnostics([contract], {"opt": quote}, NOW, config)
     assert ranked == []
     assert diagnostics["rejections"]["option spread too wide"] == 1
+
+
+def test_option_spread_above_four_percent_is_rejected(paper_root: Path) -> None:
+    config = load_runtime_config(paper_root)
+    contract = OptionContract("opt", "chain", "AAPL", "put", 100, "2026-08-07")
+    quote = OptionQuote(
+        "opt",
+        0.98,
+        1.03,
+        1.005,
+        NOW,
+        "fixture",
+        delta=-0.45,
+        gamma=0.04,
+        theta=-0.03,
+        vega=0.08,
+        implied_volatility=0.3,
+        volume=1000,
+        open_interest=1000,
+    )
+
+    ranked, diagnostics = rank_contracts_with_diagnostics(
+        [contract],
+        {"opt": quote},
+        NOW,
+        config,
+    )
+
+    assert ranked == []
+    assert diagnostics["rejections"]["option spread too wide"] == 1
+
+
+def test_runtime_uses_flash_selective_thinking_and_shadow_equity(paper_root: Path) -> None:
+    config = load_runtime_config(paper_root)
+    api = config["llm"]["api"]
+    thinking = api["thinking"]["agents"]
+    weighted = config["strategies"]["weighted_relative_strength_v2"]
+
+    assert api["model"] == "deepseek-v4-flash"
+    assert api["input_cost_per_million_usd"] == pytest.approx(0.14)
+    assert api["output_cost_per_million_usd"] == pytest.approx(0.28)
+    assert thinking["challenge_agent"] == {"type": "disabled"}
+    assert thinking["catalyst_challenge_agent"] == {"type": "disabled"}
+    assert thinking["ai_gated_challenge_agent"] == {"type": "disabled"}
+    assert thinking["decision_manager"] == {"type": "enabled"}
+    assert thinking["catalyst_decision_manager"] == {"type": "enabled"}
+    assert thinking["ai_gated_decision_manager"] == {"type": "enabled"}
+    assert weighted["execution"] == "shadow_only"
+    assert weighted["outcome_horizon_minutes"] == 360
+    assert weighted["adaptive_weights"]["enabled"] is False
+
+
+def test_catalyst_decision_schema_requires_executable_entry_contract() -> None:
+    required = set(CATALYST_DECISION_OUTPUT_SCHEMA["required"])
+    assert {
+        "entry_now",
+        "min_entry_price",
+        "max_entry_price",
+        "entry_valid_until",
+    } <= required
 
 
 class _Discovery:
@@ -720,6 +792,317 @@ def test_ai_candidate_selection_reserves_reported_earnings_and_both_directions(
         item["technical_direction"] == "bearish"
         for item in selected
     ) >= 2
+
+
+def test_ai_deep_research_reserves_two_ranked_bearish_candidates(
+    paper_root: Path,
+) -> None:
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    pipeline = AiGatedPaperPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=_Discovery(),
+        news_adapter=_News(),
+        option_data=_OptionData(),
+    )
+    ranked = [
+        {"ticker": "BULL1", "score": 0.95, "direction": "bullish"},
+        {"ticker": "BULL2", "score": 0.92, "direction": "bullish"},
+        {"ticker": "BEAR1", "score": 0.81, "direction": "bearish"},
+        {"ticker": "BEAR2", "score": 0.79, "direction": "bearish"},
+        {"ticker": "BEAR3", "score": 0.75, "direction": "bearish"},
+    ]
+
+    selected = pipeline._select_deep_research_candidates(ranked, 3)
+
+    assert len(selected) == 3
+    assert sum(item["direction"] == "bearish" for item in selected) == 2
+
+
+def _ai_entry_analysis(
+    snapshot_id: str,
+    *,
+    entry_now: bool = True,
+    min_entry_price: float | None = None,
+    max_entry_price: float | None = 100.10,
+    entry_valid_until: str | None = "2026-07-13T15:05:00+00:00",
+) -> dict:
+    return {
+        "fail_closed": False,
+        "decision": {
+            "action": "buy",
+            "instrument": "equity",
+            "ticker": "AAPL",
+            "thesis": "Fixture thesis.",
+            "confidence": 0.8,
+            "entry_now": entry_now,
+            "min_entry_price": min_entry_price,
+            "max_entry_price": max_entry_price,
+            "entry_valid_until": entry_valid_until,
+            "no_trade_reason": None,
+        },
+        "snapshot_id": snapshot_id,
+    }
+
+
+def test_ai_entry_waits_when_model_price_cap_is_not_met(paper_root: Path) -> None:
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    pipeline = AiGatedPaperPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=_Discovery(),
+        news_adapter=_News(),
+        option_data=_OptionData(),
+    )
+    candidate_snapshot = snapshot()
+    item = {"market_context": {"quote": candidate_snapshot["market_data"]["quote"]}}
+
+    execution = pipeline._execute(
+        _ai_entry_analysis("price-cap", max_entry_price=99.0),
+        candidate_snapshot,
+        item,
+        live_cycle=False,
+    )
+
+    assert execution["status"] == "no_trade"
+    assert "above model maximum entry price" in execution["reason"]
+    assert pipeline.broker.store.positions() == {}
+
+
+def test_ai_entry_requires_immediate_unexpired_authorization(paper_root: Path) -> None:
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    pipeline = AiGatedPaperPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=_Discovery(),
+        news_adapter=_News(),
+        option_data=_OptionData(),
+    )
+    candidate_snapshot = snapshot()
+    item = {"market_context": {"quote": candidate_snapshot["market_data"]["quote"]}}
+
+    waiting = pipeline._execute(
+        _ai_entry_analysis("not-now", entry_now=False),
+        candidate_snapshot,
+        item,
+        live_cycle=False,
+    )
+    expired = pipeline._execute(
+        _ai_entry_analysis(
+            "expired",
+            entry_valid_until="2026-07-13T14:59:00+00:00",
+        ),
+        candidate_snapshot,
+        item,
+        live_cycle=False,
+    )
+
+    assert waiting["status"] == "no_trade"
+    assert "did not authorize immediate entry" in waiting["reason"]
+    assert expired["status"] == "no_trade"
+    assert "entry authorization expired" in expired["reason"]
+    assert pipeline.broker.store.positions() == {}
+
+
+def test_ai_same_session_stop_loss_blocks_ticker_reentry(paper_root: Path) -> None:
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    pipeline = AiGatedPaperPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=_Discovery(),
+        news_adapter=_News(),
+        option_data=_OptionData(),
+    )
+    entry_quote = Quote("AAPL", 100.0, 100.05, 100.02, NOW, avg_daily_volume_usd=100_000_000)
+    entry = pipeline.broker.create_order(
+        decision_id="prior-entry",
+        symbol="AAPL",
+        side="buy",
+        order_type="market",
+        quantity=1,
+        limit_price=None,
+        quote_seen_at=entry_quote.asof,
+        idempotency_key="prior-entry",
+        now=NOW,
+    )
+    assert pipeline.broker.submit_order(entry, entry_quote, NOW).status == "filled"
+    stop_quote = Quote("AAPL", 96.0, 96.05, 96.02, NOW, avg_daily_volume_usd=100_000_000)
+    stop = pipeline.broker.create_order(
+        decision_id="prior-stop",
+        symbol="AAPL",
+        side="sell",
+        order_type="market",
+        quantity=1,
+        limit_price=None,
+        quote_seen_at=stop_quote.asof,
+        thesis="deterministic stop loss",
+        idempotency_key="prior-stop",
+        now=NOW,
+    )
+    assert pipeline.broker.submit_order(stop, stop_quote, NOW).status == "filled"
+    candidate_snapshot = snapshot()
+    item = {"market_context": {"quote": candidate_snapshot["market_data"]["quote"]}}
+
+    execution = pipeline._execute(
+        _ai_entry_analysis("blocked-reentry"),
+        candidate_snapshot,
+        item,
+        live_cycle=False,
+    )
+
+    assert execution["status"] == "no_trade"
+    assert "same-session stop loss" in execution["reason"]
+    assert pipeline.broker.store.positions() == {}
+
+
+def test_ai_metrics_separate_bullish_and_bearish_results(paper_root: Path) -> None:
+    config = load_runtime_config(paper_root)
+    config["paper"]["strategy_lines"]["options"] = True
+    namespace = "ai_gated_technical_v1"
+    equity_broker = PaperBroker(paper_root, config, namespace=namespace)
+    option_broker = OptionPaperBroker(paper_root, config, namespace=namespace)
+
+    entry_quote = Quote("AAPL", 100.0, 100.01, 100.005, NOW, avg_daily_volume_usd=100_000_000)
+    equity_entry = equity_broker.create_order(
+        decision_id="bull-entry",
+        symbol="AAPL",
+        side="buy",
+        order_type="market",
+        quantity=1,
+        limit_price=None,
+        quote_seen_at=NOW,
+        idempotency_key="bull-entry",
+        now=NOW,
+    )
+    assert equity_broker.submit_order(equity_entry, entry_quote, NOW).status == "filled"
+    exit_time = "2026-07-13T15:30:00+00:00"
+    exit_quote = Quote("AAPL", 101.0, 101.01, 101.005, exit_time, avg_daily_volume_usd=100_000_000)
+    equity_exit = equity_broker.create_order(
+        decision_id="bull-exit",
+        symbol="AAPL",
+        side="sell",
+        order_type="market",
+        quantity=1,
+        limit_price=None,
+        quote_seen_at=exit_time,
+        idempotency_key="bull-exit",
+        now=exit_time,
+    )
+    assert equity_broker.submit_order(equity_exit, exit_quote, exit_time).status == "filled"
+
+    contract = OptionContract("put-1", "chain", "MSFT", "put", 100, "2026-08-07")
+    put_entry_quote = OptionQuote(
+        "put-1",
+        0.99,
+        1.0,
+        0.995,
+        NOW,
+        "fixture",
+        delta=-0.45,
+        gamma=0.04,
+        theta=-0.03,
+        vega=0.08,
+        implied_volatility=0.25,
+        volume=1000,
+        open_interest=5000,
+    )
+    put_entry = option_broker.create_order(
+        decision_id="bear-entry",
+        contract=contract,
+        intent="buy_to_open",
+        order_type="market",
+        quantity=1,
+        limit_price=None,
+        quote_seen_at=NOW,
+        idempotency_key="bear-entry",
+        now=NOW,
+    )
+    assert option_broker.submit_order(put_entry, put_entry_quote, NOW).status == "filled"
+    put_exit_quote = OptionQuote(
+        "put-1",
+        1.20,
+        1.21,
+        1.205,
+        exit_time,
+        "fixture",
+        delta=-0.40,
+        gamma=0.04,
+        theta=-0.02,
+        vega=0.07,
+        implied_volatility=0.24,
+        volume=1000,
+        open_interest=5000,
+    )
+    put_exit = option_broker.create_order(
+        decision_id="bear-exit",
+        contract=contract,
+        intent="sell_to_close",
+        order_type="market",
+        quantity=1,
+        limit_price=None,
+        quote_seen_at=exit_time,
+        idempotency_key="bear-exit",
+        now=exit_time,
+    )
+    assert option_broker.submit_order(put_exit, put_exit_quote, exit_time).status == "filled"
+
+    append_jsonl(
+        paper_root,
+        "ai_gated_decisions.jsonl",
+        {
+            "ranking": {"direction": "bullish"},
+            "decision": {"action": "buy", "instrument": "equity"},
+            "execution": {"status": "filled", "reason": None},
+        },
+    )
+    append_jsonl(
+        paper_root,
+        "ai_gated_decisions.jsonl",
+        {
+            "ranking": {"direction": "bearish"},
+            "decision": {"action": "buy_to_open", "instrument": "put"},
+            "execution": {"status": "filled", "reason": None},
+        },
+    )
+    append_jsonl(
+        paper_root,
+        "ai_gated_decisions.jsonl",
+        {
+            "ranking": {"direction": "bearish"},
+            "decision": {"action": "buy_to_open", "instrument": "put"},
+            "execution": {"status": "no_trade", "reason": "premium above deterministic budget"},
+        },
+    )
+
+    directional = calculate_metrics(paper_root, namespace=namespace)[
+        "directional_breakdown"
+    ]
+
+    assert directional["bullish"]["proposal_count"] == 1
+    assert directional["bullish"]["filled_entry_count"] == 1
+    assert directional["bullish"]["closed_trade_count"] == 1
+    assert directional["bullish"]["net_pnl"] > 0
+    assert directional["bearish"]["proposal_count"] == 2
+    assert directional["bearish"]["filled_entry_count"] == 1
+    assert directional["bearish"]["closed_trade_count"] == 1
+    assert directional["bearish"]["net_pnl"] > 0
+    assert directional["bearish"]["rejection_reasons"] == {
+        "premium above deterministic budget": 1
+    }
+    assert directional["bullish"]["modeled_cost_usd"] > 0
+    assert directional["bearish"]["modeled_cost_usd"] > 0
 
 
 def test_reported_earnings_priority_requires_event_to_be_available() -> None:

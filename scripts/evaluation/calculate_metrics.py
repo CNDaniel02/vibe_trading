@@ -55,8 +55,14 @@ def _closed_trade_pnls(fill_records: list[dict[str, Any]]) -> list[float]:
 
 
 def _closed_option_trade_pnls(fill_records: list[dict[str, Any]]) -> list[float]:
-    holdings: dict[str, dict[str, float]] = {}
-    pnls: list[float] = []
+    return [pnl for _, pnl in _closed_option_trade_results(fill_records)]
+
+
+def _closed_option_trade_results(
+    fill_records: list[dict[str, Any]],
+) -> list[tuple[str, float]]:
+    holdings: dict[str, dict[str, Any]] = {}
+    results: list[tuple[str, float]] = []
     fills = [record.get("fill", record) for record in fill_records]
     fills.sort(key=lambda fill: str(fill.get("filled_at", "")))
     for fill in fills:
@@ -67,7 +73,15 @@ def _closed_option_trade_pnls(fill_records: list[dict[str, Any]]) -> list[float]
         commission = float(fill.get("commission", 0))
         if not option_id or quantity <= 0 or price < 0:
             continue
-        holding = holdings.setdefault(option_id, {"quantity": 0.0, "average_price": 0.0, "multiplier": float(multiplier)})
+        holding = holdings.setdefault(
+            option_id,
+            {
+                "quantity": 0.0,
+                "average_price": 0.0,
+                "multiplier": float(multiplier),
+                "option_type": str(fill.get("option_type", "unknown")),
+            },
+        )
         if fill.get("intent") == "buy_to_open":
             new_quantity = holding["quantity"] + quantity
             holding["average_price"] = (
@@ -76,11 +90,91 @@ def _closed_option_trade_pnls(fill_records: list[dict[str, Any]]) -> list[float]
             holding["quantity"] = new_quantity
         elif fill.get("intent") == "sell_to_close" and holding["quantity"] >= quantity:
             pnl = quantity * multiplier * (price - holding["average_price"]) - commission
-            pnls.append(pnl)
+            results.append((str(holding["option_type"]), pnl))
             holding["quantity"] -= quantity
             if holding["quantity"] == 0:
                 holdings.pop(option_id, None)
-    return pnls
+    return results
+
+
+def _ai_directional_breakdown(
+    root: Path,
+    equity_closed_pnls: list[float],
+    option_trade_results: list[tuple[str, float]],
+    equity_fill_records: list[dict[str, Any]],
+    option_fill_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    buckets: dict[str, dict[str, Any]] = {
+        direction: {
+            "decision_count": 0,
+            "proposal_count": 0,
+            "filled_entry_count": 0,
+            "rejection_reasons": {},
+        }
+        for direction in ("bullish", "bearish")
+    }
+    for record in _read_jsonl(root / "logs" / "ai_gated_decisions.jsonl"):
+        decision = record.get("decision", {})
+        execution = record.get("execution", {})
+        direction = str(record.get("ranking", {}).get("direction", ""))
+        if direction not in buckets:
+            direction = "bearish" if decision.get("instrument") == "put" else "bullish"
+        bucket = buckets[direction]
+        bucket["decision_count"] += 1
+        if decision.get("action") in {"buy", "buy_to_open"}:
+            bucket["proposal_count"] += 1
+        if execution.get("status") == "filled":
+            bucket["filled_entry_count"] += 1
+        elif execution.get("reason"):
+            reason = str(execution["reason"])
+            reasons = bucket["rejection_reasons"]
+            reasons[reason] = int(reasons.get(reason, 0)) + 1
+
+    directional_pnls = {
+        "bullish": [
+            *equity_closed_pnls,
+            *(pnl for option_type, pnl in option_trade_results if option_type == "call"),
+        ],
+        "bearish": [
+            pnl for option_type, pnl in option_trade_results if option_type == "put"
+        ],
+    }
+    modeled_costs = {"bullish": 0.0, "bearish": 0.0}
+    for record in equity_fill_records:
+        fill = record.get("fill", record)
+        modeled_costs["bullish"] += (
+            float(fill.get("slippage_usd_per_share", 0))
+            * float(fill.get("quantity", 0))
+            + float(fill.get("commission", 0))
+        )
+    for record in option_fill_records:
+        fill = record.get("fill", record)
+        direction = "bearish" if fill.get("option_type") == "put" else "bullish"
+        modeled_costs[direction] += (
+            float(fill.get("slippage_usd_per_contract", 0))
+            * int(fill.get("quantity", 0))
+            * int(fill.get("multiplier", 100))
+            + float(fill.get("commission", 0))
+        )
+
+    for direction, bucket in buckets.items():
+        pnls = directional_pnls[direction]
+        proposals = int(bucket["proposal_count"])
+        bucket["fill_rate"] = round(
+            int(bucket["filled_entry_count"]) / proposals,
+            4,
+        ) if proposals else 0.0
+        bucket["closed_trade_count"] = len(pnls)
+        bucket["win_rate"] = round(
+            sum(pnl > 0 for pnl in pnls) / len(pnls),
+            4,
+        ) if pnls else 0.0
+        bucket["net_pnl"] = round(sum(pnls), 4)
+        bucket["modeled_cost_usd"] = round(modeled_costs[direction], 4)
+        bucket["rejection_reasons"] = dict(
+            sorted(bucket["rejection_reasons"].items())
+        )
+    return buckets
 
 
 def _line_metrics(orders: list[Any], closed_pnls: list[float], net_pnl: float) -> dict[str, Any]:
@@ -223,8 +317,11 @@ def calculate_metrics(root: str | Path, namespace: str | None = None) -> dict[st
     valid_snapshots = [item for item in snapshots if item.get("equity") is not None]
     equities = [float(item["equity"]) for item in valid_snapshots]
     sessions = {str(item.get("session")) for item in valid_snapshots if item.get("session")}
-    closed_pnls = _closed_trade_pnls(_read_jsonl(log_dir / "paper_fills.jsonl"))
-    option_closed_pnls = _closed_option_trade_pnls(_read_jsonl(log_dir / "paper_option_fills.jsonl"))
+    equity_fill_records = _read_jsonl(log_dir / "paper_fills.jsonl")
+    option_fill_records = _read_jsonl(log_dir / "paper_option_fills.jsonl")
+    closed_pnls = _closed_trade_pnls(equity_fill_records)
+    option_trade_results = _closed_option_trade_results(option_fill_records)
+    option_closed_pnls = [pnl for _, pnl in option_trade_results]
     all_closed_pnls = [*closed_pnls, *option_closed_pnls]
     gross_profit = sum(item for item in all_closed_pnls if item > 0)
     gross_loss = abs(sum(item for item in all_closed_pnls if item < 0))
@@ -312,7 +409,7 @@ def calculate_metrics(root: str | Path, namespace: str | None = None) -> dict[st
         )
         for name, line in {"equity": equity_line, "options": options_line}.items()
     }
-    return {
+    result = {
         "namespace": namespace,
         "initial_cash": account.initial_cash,
         "cash": round(account.cash, 4),
@@ -341,6 +438,15 @@ def calculate_metrics(root: str | Path, namespace: str | None = None) -> dict[st
         "evaluation_thresholds": evaluation,
         "lines": classified_lines,
     }
+    if namespace == "ai_gated_technical_v1":
+        result["directional_breakdown"] = _ai_directional_breakdown(
+            root,
+            closed_pnls,
+            option_trade_results,
+            equity_fill_records,
+            option_fill_records,
+        )
+    return result
 
 
 if __name__ == "__main__":

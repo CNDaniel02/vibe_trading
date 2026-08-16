@@ -4,7 +4,7 @@
 
 `auto-trading-skill` 是一个使用真实或接近实时市场数据、但只使用本地虚拟资金成交的美股和 long-premium 期权研究系统。它的目的不是证明某个模型会赚钱，而是把“收集数据、形成候选、研究证据、做出决策、通过风控、模拟成交、管理持仓、退出、记账、评估”连接成可以长期运行和审计的闭环。
 
-项目默认虚拟本金为 `$2,000`。主策略账户同时容纳股票和期权，二者独立记录订单、持仓和绩效，但共享现金、账户总风险和每日入场次数。另有一个独立的 `$2,000` AI-gated sleeve，用来测量 AI 策略，而不污染主确定性策略的结果。
+项目默认虚拟本金为 `$2,000`。主策略账户仍同时保存股票和期权账本，二者独立记录订单、持仓和绩效，但共享现金、账户总风险和每日入场次数。由于 forward 证据显示股票加权线在成本后为负期望，`weighted_relative_strength_v2` 当前只记录 shadow candidate 和未来标签，不再创建新股票订单；已有股票仓位仍由原退出流程管理。另有一个独立的 `$2,000` AI-gated sleeve，用来测量 AI 策略，而不污染主账户结果。
 
 项目目前不能进行真实交易。`config/paper_mode.yaml` 固定声明：
 
@@ -23,7 +23,7 @@ Robinhood 连接只用于显式 allowlist 内的只读市场数据。项目 brok
 
 | 策略 | 当前角色 | 是否可创建本地 paper order | 账户 |
 | --- | --- | --- | --- |
-| `weighted_relative_strength_v2` | 主股票确定性策略 | 是 | 主账户 |
+| `weighted_relative_strength_v2` | 股票确定性候选和 360 分钟标签 | 否，暂停为 shadow-only | 无新增资金占用 |
 | `long_directional_options_v2_weighted` | 主 long call/put 确定性策略 | 是 | 主账户 |
 | `relative_strength_v1` | 原始股票 baseline | 否，shadow comparison | 无独立资金 |
 | `long_directional_options_v1` | 原始期权 baseline | 否，shadow comparison | 无独立资金 |
@@ -32,7 +32,7 @@ Robinhood 连接只用于显式 allowlist 内的只读市场数据。项目 brok
 | `llm_news_drift_v1` | 全市场新闻优先的价格盲漂移实验 | 否，shadow-only | 独立参考预算，无账户 |
 | `ai_gated_technical_v1` | 技术前排候选加 Exa/DeepSeek 的实验策略 | 是 | 独立 AI sleeve |
 
-主账户的股票和期权可以并行筛选，也可以各自持仓和退出。它们不会各自把账户资金用满，因为 `scripts/risk/shared_portfolio_risk.py` 会同时执行：
+股票和期权仍会并行筛选；当前只有主期权线能创建主账户新仓，股票线继续产生可评估的 point-in-time 候选。历史或恢复出的股票持仓仍能独立退出。任何可执行线路都不能各自把账户资金用满，因为 `scripts/risk/shared_portfolio_risk.py` 会同时执行：
 
 - 账户总部署金额上限；
 - 股票线部署金额上限；
@@ -66,7 +66,8 @@ flowchart TD
     SNAP --> OP["期权方向和合约筛选"]
     SNAP --> AI
 
-    EQ --> RG["deterministic risk gates"]
+    EQ --> EL["360 分钟净成本标签"]
+    EL --> EV["shadow 评估"]
     OP --> RG
     AI --> RG
     NH --> NT["ticker + tradability checks"]
@@ -75,6 +76,18 @@ flowchart TD
     PB --> ST["state + append-only logs"]
     ST --> MON["monitor + exits"]
     ST --> MET["metrics + dashboard + journal"]
+```
+
+当前可执行边界可以简化为：
+
+```mermaid
+flowchart LR
+    W["weighted equity v2"] --> WS["shadow candidate only"]
+    O["weighted long options v2"] --> OR["option risk gate"] --> M["主 paper 账户"]
+    A["AI gated"] --> AC["可执行条件检查"] --> AR["共享 deterministic risk"] --> S["独立 AI sleeve"]
+    C["catalyst / news drift / baselines"] --> CS["shadow ledgers only"]
+    M -. "无真实 broker 方法" .-> L["本地 JSON/JSONL"]
+    S -. "无真实 broker 方法" .-> L
 ```
 
 网络调用不会直接运行在长期 supervisor 的主线程中。`scripts/orchestrator/forward_paper_service.py` 通过 `scripts/runtime/subprocess_runner.py` 为每个网络密集型周期启动有硬截止时间的子进程。超时会终止完整子进程树，并在 `logs/runtime_jobs.jsonl` 和 heartbeat 中留下失败证据。
@@ -155,6 +168,16 @@ forward cycle 的初始时钟只用于确认交易时段。网络请求结束后
 
 缺失报价、过期报价、异常未来时间戳、ask 小于 bid、异常价差、未完成 OHLCV 或证据时间越过 cutoff 都必须 fail closed。Exa 的 crawl time 不能冒充新闻发布时间。历史 replay 不能读取当前网络新闻。
 
+```mermaid
+flowchart LR
+    PUB["published_at"] --> FS["first_seen_at"] --> RET["retrieved_at"]
+    Q["quote.asof"] --> CUT["data_cutoff_time"]
+    RET --> CUT
+    CUT --> DEC["decision_time"] --> ORD["order.created_at"] --> FILL["fill.filled_at"]
+    FUT{"任何输入时间 > cutoff?"} -- "是" --> REJ["fail closed + audit"]
+    FUT -- "否" --> DEC
+```
+
 ## 6. Continuous Forward Service
 
 用户在终端运行：
@@ -190,15 +213,28 @@ forward cycle 的初始时钟只用于确认交易时段。网络请求结束后
 4. 获取 session volume，并建立包含 SPY benchmark、历史收益、成交量、价差、事件时间和持仓状态的 snapshot。
 5. 先处理上周期 open orders、成熟的 outcome label、股票退出、期权 open orders 和期权退出。
 6. 临近收盘 10 分钟时进入 exit-only，不再创建新 entry。
-7. 对股票池同时运行 `relative_strength_v1` shadow baseline 和 `weighted_relative_strength_v2` active score。
-8. active v2 把 relative strength、1 日动量、5 日动量、成交量确认、市场 regime 和 chase quality 作为软特征加权。行情有效性、时段、极端追高、已有仓位和二元事件仍是硬 gate。
+7. 对股票池同时运行 `relative_strength_v1` shadow baseline 和 `weighted_relative_strength_v2` shadow score。
+8. weighted v2 把 relative strength、1 日动量、5 日动量、成交量确认、市场 regime 和 chase quality 作为软特征加权。行情有效性、时段、极端追高、已有仓位和二元事件仍是硬 gate。
 9. 按分数排序，只取每周期有界的最高候选。
-10. 在创建订单前计算共享账户剩余容量。如果目标 notional 不可能通过总上限或股票线上限，记录 skip，不制造 rejected order。
-11. 通过股票 deterministic risk gate 后创建 limit order，由 paper broker 根据 ask 和不利滑点决定 filled 或 open。
-12. active 执行完成后，最多对一个已筛选候选运行 baseline-gated multi-agent shadow。这样 LLM 延迟不会让 active 行情变旧，也不会改变主策略成交。
-13. 写入 decision、order、fill、journal、portfolio snapshot、usage 和 heartbeat。
+10. 每个候选注册 point-in-time outcome observation；默认目标为 360 分钟后的 bid 减不利滑点，与此前约 6 小时的实际持仓周期对齐。
+11. `execution=shadow_only` 时明确跳过 `_submit_weighted_entry`，因此没有股票 entry order、fill 或资金占用。
+12. 最多对一个已筛选候选运行 baseline-gated multi-agent shadow；它同样不能创建订单。
+13. 写入 decision、candidate observation、成熟标签、portfolio snapshot、usage 和 heartbeat。
 
-adaptive weight 不会立刻开始学习。系统需要至少 100 个有效且成熟的一小时 outcome label。标签必须在正常交易时段成熟、同一 ticker/小时不重叠，而且到达时间不能超过目标时间 15 分钟。学习器只调整已有特征权重，不能改变风险限制或引入未来数据。
+adaptive weight 当前关闭，避免继续用此前高度相关的 60 分钟标签改变执行分数。360 分钟标签只有目标时刻仍位于正常交易时段时才会注册，并且行情到达不能晚于目标 15 分钟。新标签达到独立样本要求并在净成本后显示正向 out-of-sample 结果之前，股票线不能恢复 `paper_broker`。
+
+```mermaid
+flowchart TD
+    Q["新鲜股票 quote + 历史 bars"] --> G{"数据硬门通过?"}
+    G -- "否" --> N["no candidate"]
+    G -- "是" --> B["baseline v1 score"]
+    G -- "是" --> W["weighted v2 score"]
+    W --> T["保存 snapshot 和 360m target"]
+    T --> X{"未来 bid 在允许延迟内到达?"}
+    X -- "否" --> E["expired label + audit"]
+    X -- "是" --> P["按 ask/bid/slippage 计算净收益标签"]
+    P --> R["shadow report；不创建股票订单"]
+```
 
 ## 8. 主期权 Pipeline
 
@@ -217,7 +253,7 @@ adaptive weight 不会立刻开始学习。系统需要至少 100 个有效且�
 1. 只对独立 `options_watchlist` 构建 snapshot。该列表优先选择一张标准 100 股合约仍可能落入小账户预算的普通股票和 ETF。
 2. `long_directional_options_v2_weighted` 分别计算 bullish 和 bearish score。SPY regime 是软特征，公司级重大负面事件和明显相对弱势可以在大盘非 risk-off 时支持 long put。
 3. 读取 earnings calendar。临近二元事件且不符合策略规则时 fail closed。
-4. 从 Robinhood 只读 option chain 中按 21 至 45 DTE、绝对 delta 0.30 至 0.65、volume、open interest、spread、IV 和 Greeks 过滤。
+4. 从 Robinhood 只读 option chain 中按 21 至 45 DTE、绝对 delta 0.30 至 0.65、volume、open interest、IV、Greeks 和最多 4% bid/ask spread 过滤。
 5. 使用账户净值 10% 附近的 premium risk budget 过滤一张合约成本，并同时检查期权线 20% 和账户总 60% 部署上限。
 6. 选择最接近目标 DTE/delta 且流动性可接受的合约。诊断日志保存每类拒绝数量、最低可用 premium 和预算缺口。
 7. option limit buy 使用 ask 加不利滑点；limit sell 使用 bid 减不利滑点。限价不可达到时订单保持 open，不能用 midpoint 假设成交。
@@ -225,9 +261,25 @@ adaptive weight 不会立刻开始学习。系统需要至少 100 个有效且�
 
 当前没有模拟行权、指派、实物交割、组合保证金或 multi-leg spread。为了不让这些缺失变成隐含风险，持仓必须在 expiry/sellout 前强制平仓。当前也没有可用于策略晋级的完整历史期权 replay，期权有效性主要依赖 forward paper 数据。
 
+```mermaid
+flowchart TD
+    S["股票 snapshot"] --> D{"bullish score 或 bearish score 达标?"}
+    D -- "都不达标" --> NT["no_trade"]
+    D -- "bullish" --> C["long call"]
+    D -- "bearish" --> P["long put"]
+    C --> CH["Robinhood option chain"]
+    P --> CH
+    CH --> F{"DTE / delta / volume / OI / Greeks / IV / spread <= 4%"}
+    F -- "否" --> DG["保存逐项 rejection diagnostics"]
+    F -- "是" --> B{"一张合约 premium <= 10% 净值且共享风险可用?"}
+    B -- "否" --> DG
+    B -- "是" --> O["buy-to-open local paper order"]
+    O --> M["5 分钟 monitor"] --> E["止损 / 止盈 / 时间 / 收盘前退出"]
+```
+
 ## 9. LLM 和 Multi-Agent Pipeline
 
-`scripts/llm/base_provider.py` 定义统一 provider contract。业务 Agent 不直接依赖 DeepSeek SDK。`api_provider.py` 使用 OpenAI-compatible API，`mock_provider.py` 提供确定性测试，`local_provider.py` 只保留未来本地模型接口。
+`scripts/llm/base_provider.py` 定义统一 provider contract。业务 Agent 不直接依赖 DeepSeek SDK。`api_provider.py` 使用 OpenAI-compatible API，当前默认模型是 `deepseek-v4-flash`；`mock_provider.py` 提供确定性测试，`local_provider.py` 只保留未来本地模型接口。
 
 API key 只能从环境变量读取。每次调用记录 model、prompt version、输入/输出 token、latency、estimated cost、错误和 retry count。strict JSON Schema 校验失败时不能把自由文本当作交易结论。
 
@@ -240,7 +292,7 @@ API key 只能从环境变量读取。每次调用记录 model、prompt version�
 - Decision Manager：只能输出 `buy`、`hold`、`exit` 或 `no_trade` 及结构化条件；
 - Deterministic Risk Gate：最终 veto，永远位于 LLM 之后。
 
-thinking 只用于需要深入反证或最终综合的有限调用。若 thinking 因输出长度无法提供结构化 JSON，retry 会关闭 thinking 并要求简洁 schema 输出。模型永远拿不到 broker client，也不能修改 YAML。
+News、candidate ranking 和 Challenge 使用非 thinking 严格结构化输出。只有各 pipeline 的最终 Decision Manager 使用 thinking；若 thinking 因输出长度无法提供结构化 JSON，retry 会关闭 thinking 并要求简洁 schema 输出。这样保留最终综合能力，同时避免 Challenge 阶段此前频繁的长输出重试。模型永远拿不到 broker client，也不能修改 YAML。
 
 ## 10. Catalyst Shadow Pipeline
 
@@ -257,13 +309,37 @@ Exa 负责外部非结构化证据，不替代报价、historicals、fundamental
 1. 从 read-only watchlist、scanner、earnings 和市场数据形成候选。
 2. Python 同时计算 bullish 和 bearish 技术分数，选择前 5 至 8 个有界候选，并为已确认的财报 surprise 保留少量位置。
 3. Exa 对候选做有限并行搜索，DeepSeek 先做一次低成本结构化排序。
-4. 对最多两个深度候选补充 primary-source evidence。
+4. 对最多三个深度候选补充 primary-source evidence；如果排名结果中有足够 bearish 候选，至少两个位置保留给 bearish 方向，再用整体最高分填满其余位置。
 5. 运行 News/Bull、Challenge 和 Decision。Challenge 可以 veto，Decision 可以 no-trade。
-6. 对置信度、ticker、数据时间、股票或期权方向再次做 deterministic validation。
-7. 股票 proposal 进入 sleeve 的股票 risk gate；期权 proposal 进入 sleeve 的 option selection 和 shared risk gate。
-8. 只有所有检查通过才写本地 paper order，之后由独立 monitor 管理退出。
+6. trade action 必须同时给出 `entry_now=true`、`max_entry_price`、可选 `min_entry_price` 和最多五分钟有效的 `entry_valid_until`。模型写在自然语言里的“等待回调”或“缺口不超过某值”不能绕过这些字段。
+7. Python 刷新 underlying quote，逐项检查有效期和 ask 是否位于模型价格边界；不满足就记录 no-trade，不创建 pending 条件单。
+8. 当天因 stop loss 退出的 ticker 会在发现阶段和执行阶段同时被阻止重新入场，避免同一事件反复研究和止损重买。
+9. 股票 proposal 进入 sleeve 的股票 risk gate；期权 proposal 使用带拒绝诊断的 contract selection，再进入 option/shared risk gate。
+10. 只有所有检查通过才写本地 paper order，之后由独立 monitor 管理退出。
 
 盘前 90 分钟允许生成 research-only plan，但不能下单，也不消耗可执行 event cooldown。09:32 的作业会用新行情重新运行研究和风险检查，并不是无条件照搬盘前结论。
+
+```mermaid
+flowchart TD
+    U["Robinhood scanner/watchlist/earnings"] --> PY["Python bullish + bearish pre-score"]
+    PY --> TOP["5-8 个候选"]
+    TOP --> EXA["Exa 48h evidence + 去重/cooldown"]
+    EXA --> RK["Flash non-thinking ranker"]
+    RK --> DR["最多 3 个深研；bearish 最少 2 个可用名额"]
+    DR --> BN["Bull/News non-thinking"] --> CH["Challenge non-thinking"]
+    CH --> VT{"Challenge veto?"}
+    VT -- "是" --> NT["no_trade"]
+    VT -- "否" --> DM["Decision Manager thinking"]
+    DM --> EC{"entry_now + price bounds + <=5m expiry?"}
+    EC -- "否" --> NT
+    EC -- "是" --> RQ["刷新 underlying quote"]
+    RQ --> PM{"ask 位于模型边界且 ticker 今日未止损?"}
+    PM -- "否" --> NT
+    PM -- "是" --> IN{"equity / call / put"}
+    IN --> RG["deterministic account + instrument risk"]
+    RG -- "拒绝" --> NT
+    RG -- "通过" --> PB["独立 AI sleeve paper order"]
+```
 
 ## 11.1 News-First LLM Drift Shadow Pipeline
 
@@ -294,9 +370,28 @@ rejected
 
 第一版通常不会主动产生部分成交，但模型和持久化结构支持 `partially_filled`。`created` 绝不等于持仓。只有 fill 被原子应用到账户和 positions 后，系统才增加持仓和交易计数。
 
+```mermaid
+stateDiagram-v2
+    [*] --> created
+    created --> submitted_to_paper_broker
+    submitted_to_paper_broker --> filled: 可立即按不利价格成交
+    submitted_to_paper_broker --> open: 限价尚不可达
+    submitted_to_paper_broker --> rejected: deterministic risk 拒绝
+    open --> partially_filled: 数据结构支持
+    open --> filled: 新报价达到限价
+    open --> cancelled
+    open --> expired
+    partially_filled --> filled
+    partially_filled --> cancelled
+    filled --> [*]
+    rejected --> [*]
+    cancelled --> [*]
+    expired --> [*]
+```
+
 股票买入成交价基于 ask 加不利滑点；卖出基于 bid 减不利滑点。期权使用真实合约 bid/ask 和单独配置的不利滑点。limit 不可达到时订单保持 open，之后由新报价重试、过期或取消。
 
-账户、positions、orders 和 counters 使用原子文件替换保存。JSONL 审计使用跨进程锁和 durable append。idempotency key、duplicate order gate、已有持仓 gate 和禁止 average down 共同阻止重复下单。
+账户、positions、orders 和 counters 使用原子文件替换保存。JSONL 审计使用跨进程锁和 durable append。idempotency key、duplicate order gate、已有持仓 gate、禁止 average down 和 AI 同日 stop-loss ticker block 共同阻止重复下单。
 
 ## 13. Monitor、Exit 和 EOD
 
@@ -322,6 +417,8 @@ rejected
 - LLM latency、token 和 estimated cost；
 - baseline、AI sleeve 和 shadow decision comparison。
 
+AI sleeve 额外按方向拆分 `bullish` 与 `bearish`：decision count、trade proposal、filled entry、fill rate、拒绝原因、closed trade、win rate、净 P/L，以及成交记录中的 slippage/commission 模型化成本。股票和 long call 归入 bullish，long put 归入 bearish；两个方向不能再用合并结果掩盖差异。
+
 deterministic risk rejection 不再被计入“未成交率”的分母，因为它从未进入市场执行生命周期；它仍作为独立 rejected count 和风险诊断保留。
 
 dashboard 是只读视图。它不启动服务、不修改策略、不下单，只从 `state/` 和 `logs/` 生成初学者摘要。服务和 dashboard 应在两个终端分别启动。
@@ -333,7 +430,7 @@ dashboard 是只读视图。它不启动服务、不修改策略、不下单，�
 - `scripts/replay/replay_run_manager.py`：基于 CSV event stream、virtual clock、原始 deterministic investment team 和 paper broker 的基础 replay。
 - `scripts/replay/vibe_replay_run_manager.py`：基于 Vibe 5 分钟 OHLCV，合成不利 top-of-book，并复用股票 broker、risk、fill、exit 和 journal。
 
-当前 Vibe replay 的 entry strategy 仍是 `relative_strength_v1`，不是 active `weighted_relative_strength_v2`，也不包含完整期权 replay。因此“replay 与 forward 使用完全相同 active strategy”尚未实现。历史结果只能发现明显错误，不能替代 forward paper evidence。
+当前 Vibe replay 的 entry strategy 仍是 `relative_strength_v1`，不是 forward 中的 `weighted_relative_strength_v2` 候选口径，也不包含完整期权 replay。因此 replay 与 forward 尚未使用完全相同的策略组合。历史结果只能发现明显错误，不能替代 forward paper evidence。
 
 最终晋级判断以 `config/evaluation.yaml` 为准，默认至少需要：
 
@@ -357,19 +454,48 @@ dashboard 是只读视图。它不启动服务、不修改策略、不下单，�
 - APScheduler：负责时间调度；heartbeat、process lock、resource conflict、hard timeout、state recovery 和 fail-closed 由项目代码负责。
 - LangGraph：当前未引入。确定性 pipeline 尚不需要复杂 graph checkpoint、human approval 或长期条件图。
 
+## 16.1 Hawkes Process 研究结论
+
+Hawkes Process 是带自激强度的点过程，适合研究“某类事件发生后，短时间内同类或交叉事件到达率是否上升”。金融文献最常见的输入是逐笔成交、买卖方向、订单提交/取消和 order-book 状态，而不是稀疏新闻标题。参考：[Hawkes processes in finance](https://arxiv.org/abs/1502.04592)、[state-dependent Hawkes order flow](https://arxiv.org/abs/1809.08060) 和关于显著性、非平稳性的检验讨论 [Nonparametric Hawkes Processes and Financial Data](https://papers.ssrn.com/sol3/Delivery.cfm/SSRN_ID2583431_code1821037.pdf?abstractid=2450101&mirid=1)。
+
+本次审计的新闻 ledger 只有 211 个事件、165 个 ticker，单 ticker 最多 5 个事件；Exa 又是按 15 分钟轮询发现事件。现在拟合 Hawkes，强度很可能反映 scheduler cadence、来源重复和抓取延迟，而不是可交易的信息聚集。因此项目当前没有新增 Hawkes dependency，也没有把 Hawkes score 接入候选、风险或订单路径。这是基于数据不适用的明确拒绝，不是遗漏。
+
+完整研究边界和未来 shadow experiment contract 见 `references/hawkes_process_assessment.md`。
+
+只有满足以下条件后才允许建立隔离 shadow experiment：
+
+1. 获得 point-in-time 的逐笔成交或 order-book event stream，并保存交易方向、事件类型和交易所时间；
+2. 每个资产每天至少有数千个可验证事件，而不是个位数新闻；
+3. 在历史 replay 中完成稳定性、残差、goodness-of-fit、非平稳基线和 out-of-sample 检验；
+4. Hawkes 输出只作为额外 shadow feature，与不使用它的同 snapshot baseline 对照；
+5. 在扣除 spread、slippage 和延迟后显示独立增益，才讨论进入 deterministic candidate score，仍不能绕过 risk gate。
+
+```mermaid
+flowchart LR
+    T["未来 tick/order-book 数据"] --> V{"事件量、时间精度和许可满足?"}
+    V -- "否；当前状态" --> OFF["不实现 Hawkes"]
+    V -- "是" --> FIT["多变量 Hawkes 拟合"]
+    FIT --> TEST["残差/稳定性/OOS 检验"]
+    TEST -- "失败" --> OFF
+    TEST -- "通过" --> SH["shadow feature"]
+    SH --> CMP["同 snapshot 净成本对照"]
+    CMP -- "有独立增益" --> REVIEW["人工评审后才可能晋级"]
+```
+
 ## 17. 当前明确限制
 
 1. 当前累计 forward 数据不足，尚无稳定盈利证据。
 2. 一张标准期权合约代表 100 股，`$2,000` 账户和 10% premium cap 会让许多高价标的天然不可交易。独立低价观察池改善覆盖，但不保证产生合格合约。
 3. 没有 short option、spread、margin、exercise、assignment、实物交割或 portfolio margin 模拟。
-4. 没有完整 active v2 股票加期权 historical replay。
-5. AI-gated 策略目前大多输出 no-trade，尚无足够成交可评价盈利性。
+4. weighted v2 股票线因 forward 净成本结果为负而处于 shadow-only，也没有可支持重新晋级的完整同策略 historical replay。
+5. AI-gated 已有少量成交但结果为负；可执行入场契约修复后的新样本仍为零，旧样本不能用于证明修复后策略有效。
 6. catalyst 策略只有 shadow proposal，不能用它的决策结果宣称 paper PnL。
 7. news-drift 刚进入 forward shadow 收集阶段，尚无足够 event、firm-day 或 portfolio-day 样本；Exa 搜索费用在未配置合同单价时仍是 unpriced。
 8. 官方论文 replication package 尚未下载和独立复现；当前指标只是为该复现预留兼容聚合口径，不能称为论文复现结果。
 9. saved Robinhood scans 只有用户已创建时才能产生候选，项目不会创建或修改 scanner。
 10. Alpaca IEX 和部分第三方历史源不等于全市场 consolidated feed，成交模拟精度仍有限。
 11. dashboard 是解释层，不是账户真相。发生冲突时，以 state、append-only logs、runtime heartbeat 和 paper broker ledger 为准。
+12. 当前没有适合 Hawkes Process 的逐笔成交或 order-book event stream，新闻 ledger 也过于稀疏，因此没有 Hawkes 交易信号。
 
 ## 18. 开发和验证顺序
 

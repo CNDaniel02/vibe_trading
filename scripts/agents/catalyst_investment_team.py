@@ -111,6 +111,17 @@ class CatalystInvestmentTeam:
         if not self._instrument_action_consistent(decision):
             guardrails.append("decision action and instrument were inconsistent")
             decision = self._force_no_trade(decision, ticker, "Decision action and instrument were inconsistent.")
+        elif decision["action"] in {"buy", "buy_to_open"} and (
+            not decision.get("entry_now")
+            or decision.get("max_entry_price") is None
+            or decision.get("entry_valid_until") is None
+        ):
+            guardrails.append("decision lacked an executable immediate entry")
+            decision = self._force_no_trade(
+                decision,
+                ticker,
+                "Trade proposals require immediate authorization, a maximum entry price, and an expiry.",
+            )
 
         return {
             "strategy": "exa_deepseek_catalyst_v1",
@@ -184,6 +195,10 @@ class CatalystInvestmentTeam:
                 "supporting_evidence": [],
                 "contrary_evidence": [reason],
                 "entry_condition": "None.",
+                "entry_now": False,
+                "min_entry_price": None,
+                "max_entry_price": None,
+                "entry_valid_until": None,
                 "invalidation_condition": "Not applicable.",
                 "exit_condition": "Not applicable.",
                 "confidence": 0.0,
@@ -206,6 +221,10 @@ class CatalystInvestmentTeam:
                 "action": "no_trade",
                 "instrument": "none",
                 "ticker": ticker,
+                "entry_now": False,
+                "min_entry_price": None,
+                "max_entry_price": None,
+                "entry_valid_until": None,
                 "option_preference": None,
                 "no_trade_reason": reason,
             }

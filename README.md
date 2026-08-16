@@ -14,7 +14,7 @@ The paper broker supports fractional equity quantities in increments of `0.001` 
 - `paper: true`
 - `live_readonly: false`
 - `live_trading: false`
-- `weighted_relative_strength_v2` is the active deterministic equity paper strategy.
+- `weighted_relative_strength_v2` is shadow-only while its net-of-cost forward edge is negative.
 - `long_directional_options_v2_weighted` is the active long-call/long-put paper strategy.
 - `relative_strength_v1` and `long_directional_options_v1` remain unchanged deterministic shadow baselines.
 - `multi_agent_relative_strength_v2_candidate` and Vibe Swarm are shadow/research only.
@@ -33,15 +33,11 @@ Vibe OHLCV + Robinhood MCP equity/options data + Exa news
                  |
  deterministic validation + weighted technical scoring
         |                         |
- equity paper path      options direction + contract filter
+ equity 360m labels     options direction + contract filter
         |                         |
- equity risk gate          options risk gate
-        |                         |
-        +---- shared cash and total-risk cap ----+
-        |                                        |
- equity paper broker                    options paper broker
-        |                                        |
-        +---- independent exits and metrics -----+
+ shadow evaluation          options/shared risk gate
+                                  |
+                         local options paper broker
 ```
 
 Screened equities also flow through the preserved shadow comparison. LLM output
@@ -53,7 +49,7 @@ In parallel, `exa_deepseek_catalyst_v1` runs independently of baseline screening
 core watchlist + market-wide earnings + saved read-only scans + Exa market events
         -> low-cost candidate extraction and structured ranking
         -> ticker instrument validation + timestamped evidence snapshot
-        -> thinking Bull/News -> Challenge -> Decision
+        -> non-thinking Bull/News + Challenge -> thinking Decision
         -> deterministic equity or long-option risk veto
         -> shadow proposal and catalyst journal only
 ```
@@ -64,7 +60,8 @@ core watchlist + market-wide earnings + saved read-only scans + Exa market event
 read-only watchlist/scans/earnings -> deterministic technical top 5-8
         -> bounded parallel Exa evidence searches
         -> low-cost DeepSeek ranking
-        -> News/Bull -> thinking Challenge -> thinking Decision
+        -> News/Bull + Challenge in non-thinking mode
+        -> thinking Decision + executable price/time contract
         -> deterministic equity/options/shared-risk veto
         -> isolated local paper sleeve, monitor, exit, journal, and metrics
 ```
@@ -112,7 +109,7 @@ Required for continuous forward evaluation:
 EXA_API_KEY
 OPENAI_API_KEY
 OPENAI_BASE_URL=https://api.deepseek.com
-LLM_MODEL=deepseek-v4-pro
+LLM_MODEL=deepseek-v4-flash
 ```
 
 Then authorize the project's read-only Python MCP client once:
@@ -218,18 +215,19 @@ Current external blockers are shown by `--readiness`. Until all required sources
 
 ## How a paper entry is decided
 
-The active equity strategy is deterministic `weighted_relative_strength_v2`.
+The equity candidate strategy is deterministic `weighted_relative_strength_v2`,
+but its execution is currently `shadow_only` after negative net-of-cost forward
+results. It records point-in-time candidates and 360-minute outcome labels but
+does not create new equity entry orders.
 Valid/fresh quotes, regular-session timing, fresh completed OHLCV, no existing
 position, and the extreme-chase cap remain hard safety gates. Relative strength,
 1-day and 5-day momentum, volume confirmation, market regime, and chase quality
-contribute to one weighted score. A weak soft feature no longer vetoes all other
-evidence. Fixed weights are used for the first 100 valid matured one-hour observations;
-after that an exponential minimum-squared-loss update can reweight features.
-Every weight change is persisted and visible in the dashboard.
+contribute to one weighted score. Adaptive updates are disabled until aligned
+360-minute labels show an out-of-sample edge after spread and slippage.
 
 The baseline-screened DeepSeek comparison remains shadow-only: fast
 non-thinking mode is used for structured news extraction, while thinking mode
-is enabled for its Challenge Agent and Decision Manager. The dashboard displays
+is enabled only for its final Decision Manager. The dashboard displays
 structured evidence and verdicts, never raw private chain-of-thought.
 
 The independent catalyst lane remains shadow-only. The executable AI-gated
@@ -237,7 +235,11 @@ lane starts from the technical top set rather than waiting for an active buy
 signal. Exa uses a 48-hour window, immutable evidence snapshots, URL/event/content
 deduplication, primary-source verification for deep candidates, a two-hour ticker
 cooldown, and a 24-hour event cooldown. DeepSeek ranks the bounded set cheaply;
-thinking is enabled only for Challenge and final Decision. The AI sleeve has
+up to three candidates receive deep research, with two available slots reserved
+for ranked bearish candidates. Thinking is enabled only for final Decision.
+Every trade action must include immediate authorization, numeric entry bounds,
+and an expiry of at most five minutes; a refreshed quote must satisfy them.
+The AI sleeve has
 independent cash, orders, positions, journals, and metrics so its return can be
 compared without contaminating the deterministic account.
 
@@ -256,7 +258,7 @@ company-level catalyst evidence. A strong company-specific negative event or
 clear relative weakness can support a long put even when SPY is neutral or
 risk-on. Contract selection still requires 21-45 DTE, delta, spread, volume,
 open interest, IV, Greeks, premium budget, and earnings-event checks, and now
-records exact rejection counts. One contract may be opened, premium risk is
+rejects spreads above 4% while recording exact rejection counts. One contract may be opened, premium risk is
 capped at 10% of account equity, and the full options line is capped at 20%.
 Fills use bid/ask plus adverse slippage and can never violate the agent's limit.
 

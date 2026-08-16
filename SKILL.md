@@ -9,7 +9,7 @@ description: Build, run, test, and review an equity plus long-call/long-put pape
 
 Default to `paper` mode. Treat `live_trading` as disabled unless a human explicitly changes configuration and asks for a separate live-trading implementation. In paper mode, never call live order tools such as `place_equity_order`, `place_option_order`, or cancellation tools.
 
-Use real market data only as observations. Route equity orders through `scripts/simulation/paper_broker.py` and long-premium option orders through `scripts/options/paper_broker.py`. Equity and options share cash within each virtual account. The AI-gated strategy uses a separate namespaced account so its statistics cannot contaminate the active deterministic account.
+Use real market data only as observations. Route enabled equity orders through `scripts/simulation/paper_broker.py` and long-premium option orders through `scripts/options/paper_broker.py`. The weighted equity line is currently shadow-only; do not silently restore its broker execution. Equity and options share cash within each virtual account. The AI-gated strategy uses a separate namespaced account so its statistics cannot contaminate the deterministic account.
 
 ## Workflow
 
@@ -17,9 +17,9 @@ Use real market data only as observations. Route equity orders through `scripts/
 2. Collect read-only Robinhood MCP or Alpaca bid/ask snapshots and Vibe OHLCV. Reject missing, stale, future-dated, or abnormal data.
 3. Run deterministic validation plus weighted relative-strength scoring without model calls.
 4. For baseline-screened candidates, run provider-neutral News, Challenge, and Decision agents with strict JSON Schema outputs.
-5. Independently run `exa_deepseek_catalyst_v1`: read-only market discovery, Exa evidence, low-cost ranking, thinking Bull/News, Challenge, Decision, and deterministic risk veto.
+5. Independently run `exa_deepseek_catalyst_v1`: read-only market discovery, Exa evidence, low-cost ranking, non-thinking Bull/News and Challenge, thinking Decision, and deterministic risk veto.
 6. Keep `relative_strength_v1` and `long_directional_options_v1` unchanged as deterministic shadow baselines.
-7. Run `ai_gated_technical_v1` only against a bounded technical top set. Exa and DeepSeek may propose a trade, but execution is restricted to the isolated paper sleeve and the deterministic risk veto.
+7. Run `ai_gated_technical_v1` only against a bounded technical top set. Exa and DeepSeek may propose a trade, but execution requires a short-lived numeric entry contract, is restricted to the isolated paper sleeve, and remains subject to deterministic risk veto.
 8. Independently run `llm_news_drift_v1`: market-wide Exa discovery, one price-blind headline classification, then deterministic ticker/tradability checks. It is shadow-only and has no broker.
 9. Run deterministic risk checks after model synthesis; risk retains final veto authority.
 10. Let the fill model decide `open`, `filled`, `rejected`, `expired`, or `cancelled`; never fill through a limit.
@@ -97,3 +97,4 @@ Read only what is needed:
 - `references/catalyst_strategy_policy.md` for discovery limits, evidence deduplication, cooldowns, and promotion boundaries.
 - `references/weighted_and_ai_gated_strategy.md` for weighted scoring, adaptive labels, company-specific puts, and AI paper-sleeve isolation.
 - `references/llm_news_drift_policy.md` for the news-first shadow lane, paper-replication boundary, and isolated P2 experiments.
+- `references/hawkes_process_assessment.md` for why Hawkes is not currently implemented and the future data/readiness contract.

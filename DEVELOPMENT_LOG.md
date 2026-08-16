@@ -1,5 +1,34 @@
 # Development Log
 
+## 2026-08-16 (America/Los_Angeles) - 亏损根因修复、DeepSeek V4 Flash 迁移与方向性评估
+
+### 运行和亏损证据
+
+- 审计期间服务已由用户停止；本次没有接管、启动或修改连续运行进程。主模拟账户累计已实现损益为 `-$108.8394`，其中股票线 26 笔已平仓、`-$84.84`、胜率 `38.46%`、profit factor `0.3432`；期权线 7 笔已平仓、`-$24.00`、胜率 `42.86%`、profit factor `0.4286`。独立 AI sleeve 为 6 笔已平仓、`-$48.8163`、胜率 `16.67%`、profit factor `0.1275`。
+- 两笔历史 EOD 异常宽价差约放大亏损 `$44.17`；该问题已在上一提交通过报价 provider/fallback 和最大退出价差保护修复，历史 append-only 记录未回写。
+- 21 笔可比股票往返交易的标的 midpoint 变化约 `-$17.38`，模拟执行拖累约 `-$18.17`，对应已实现约 `-$35.53`。因此亏损同时来自信号边际不足和交易成本，而不是单一成交模型错误。
+- AI sleeve 的主要可执行性缺陷是模型写出的条件入场没有被机器执行：例如输出“价格低于某值再买”，旧代码仍可能按当前 ask 立即下单；止损后的同日 ticker 也可再次进入完整研究和下单路径。两类缺陷均已封闭。
+- 期权历史结果中，合约 midpoint 变化合计约 `+$20.50`，但实际模拟结果为 `-$24.00`，估算 spread/slippage 拖累约 `$44.50`。5 笔 put 合计 `-$1.00`，2 笔 call 合计 `-$23.00`；当前样本不能证明“看跌判断更准”，只能支持将看涨和看跌独立计量。
+
+### 修改内容
+
+- API provider 默认模型迁移到 `deepseek-v4-flash`。新闻提取、候选排序和 Challenge 使用非 thinking；只有 Catalyst 与 AI gated 的最终 Decision Manager 使用 thinking。所有 API key 仍只从环境变量读取。
+- AI gated 最终决策 schema 新增 `entry_now`、明确的最小/最大入场价和最长 5 分钟有效期。执行前刷新正股 ask；价格越界、条件尚未成立、授权过期或字段缺失时保持 `no_trade`，不会创建订单。
+- 止损成交后的 ticker 在同一交易时段进入 cooldown，并在 Exa/LLM 前和最终执行前各检查一次，阻止同日止损后重新追入。
+- AI 深度研究候选从 2 个提高到 3 个，其中在存在合格负面候选时至少保留 2 个名额；没有人为降低最终风险门槛，也没有扩大 long premium 之外的期权权限。
+- 期权最大相对价差由 6% 收紧到 4%。合约筛选会保存精确拒绝原因；方向绩效按 bullish equity/call 与 bearish put 分开统计，包含提案数、成交数、拒绝原因、已平仓 PnL 和成本。
+- `weighted_relative_strength_v2` 改为 `shadow_only`，继续产生候选和 360 分钟后收益标签，但不再进入 paper broker。`relative_strength_v1` 仍保留为原始 deterministic baseline，未自动替换 active strategy。
+- Hawkes Process 暂不进入执行 pipeline。当前约 211 个离散新闻事件分布在约 165 个 ticker，且 Exa 为分钟级轮询，不具备可靠估计自激过程所需的逐笔成交、订单簿或高密度同类事件序列。评估和未来数据门槛记录在 `references/hawkes_process_assessment.md`。
+- 中文架构文档补充总执行边界、无前视时间轴、股票影子决策树、期权流程、AI gated 流程、订单状态机、方向绩效和 Hawkes 后续实验图。dashboard 同步显示当前配置的“只观察”边界、AI 看涨/看跌提案和净结果。
+
+### 安全、验证和部署
+
+- 模式仍为 `paper=true`、`live_readonly=false`、`live_trading=false`。LLM 不能直接创建订单、修改风控、扩张 universe 或调用 Robinhood 写工具；所有可执行提案仍需经过 deterministic risk gate。
+- deterministic forward dry run：网络调用 0、真实下单工具调用 0、股票订单 0、股票持仓 0、期末净值 `$2,000`，并确认 weighted lane 为 `shadow_only`。
+- options dry run：网络调用 0、真实下单工具调用 0；固定 fixture 的 put 以 ask 加不利滑点买入、以 bid 减不利滑点退出，测试损益 `+$18`。该结果只验证闭环和成本方向，不是策略盈利证据。
+- 真实 DeepSeek Flash API pilot：4 次模型调用、0 error、1 次 structured retry；总延迟约 `40.886s`，8,368 input tokens、4,586 output tokens，按当前配置估算 `$0.0024556`。fixture 没有 Exa 或市场数据调用，没有创建 paper order，也没有调用真实下单工具。
+- 全量 pytest 为 `179 passed`，仅有 4 条上游 `exchange_calendars` deprecation warning；`compileall` 通过。只读 readiness 确认 Robinhood MCP、Exa、Alpaca fallback、DeepSeek、期权数据和 Vibe 均 ready，`ready_for_full_forward_evaluation=true`。`graphify update .` 已重建 1,954 nodes / 5,327 edges；连续服务必须由用户在自己的终端重新启动，新的 scheduler 和模型配置才会加载。
+
 ## 2026-08-11 (America/Los_Angeles) - Forward results audit and execution-quality repair
 
 ### Runtime and performance evidence

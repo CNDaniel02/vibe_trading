@@ -16,12 +16,12 @@ relative_strength_v1:
   max_chase_score: 0.75
 
 weighted_relative_strength_v2:
-  execution: paper_broker
+  execution: shadow_only
   allow_model_calls: false
   minimum_entry_score: 0.68
   hard_max_chase_score: 0.95
   reject_binary_event_within_days: 1
-  outcome_horizon_minutes: 60
+  outcome_horizon_minutes: 360
   outcome_sampling_minutes: 60
   max_outcome_label_delay_minutes: 15
   weight_state_file: strategy_weights_v2.json
@@ -33,7 +33,7 @@ weighted_relative_strength_v2:
     market_regime: 0.10
     chase_quality: 0.10
   adaptive_weights:
-    enabled: true
+    enabled: false
     learning_rate: 1.5
     minimum_labeled_samples: 100
     weight_floor: 0.05
@@ -114,7 +114,8 @@ ai_gated_technical_v1:
   top_technical_candidates: 6
   minimum_candidates_per_direction: 2
   reported_earnings_priority_candidates: 2
-  top_deep_research_candidates: 2
+  top_deep_research_candidates: 3
+  minimum_bearish_deep_research_candidates: 2
   allow_premarket_research: true
   premarket_research_window_minutes: 90
   minimum_minutes_to_close_for_research: 30
@@ -122,6 +123,7 @@ ai_gated_technical_v1:
   minimum_technical_prefilter_score: 0.48
   minimum_model_rank_score: 0.55
   minimum_decision_confidence: 0.58
+  max_entry_validity_seconds: 300
   ticker_cooldown_minutes: 120
   event_cooldown_hours: 24
   allow_equity: true

@@ -4,7 +4,7 @@ This project reuses ai-berkshire workflow ideas as policy, not as a live-trading
 
 ## Strategy Isolation
 
-- `weighted_relative_strength_v2` is the active deterministic paper strategy.
+- `weighted_relative_strength_v2` is a deterministic shadow candidate strategy while its net-cost edge is negative.
 - `relative_strength_v1` remains unchanged as a same-snapshot shadow baseline.
 - `multi_agent_relative_strength_v2_candidate` is shadow-only and cannot create orders.
 - `ai_gated_technical_v1` starts from a bounded technical top set and may execute

@@ -369,23 +369,29 @@ class ForwardPaperService:
         selected = active_candidates[:max_candidates]
         shadow_results: list[dict[str, Any]] = []
         orders: list[dict[str, Any]] = []
+        active_execution = str(
+            self.config.get("strategies", {})
+            .get("weighted_relative_strength_v2", {})
+            .get("execution", "shadow_only")
+        )
         # Deterministic execution is intentionally completed before network-bound
         # Exa and LLM shadow research. Shadow latency must not age the quote or
         # alter the active weighted strategy's fill.
-        for active in selected:
-            symbol = active["ticker"]
-            snapshot = snapshots[symbol]
-            order = self._submit_weighted_entry(
-                snapshot,
-                quotes[symbol],
-                active,
-                quote_adapter=effective_quote_adapter,
-                quote_provider=effective_quote_provider,
-                cycle_id=cycle_id,
-                live_cycle=requested_now is None,
-            )
-            if order is not None:
-                orders.append(order)
+        if active_execution == "paper_broker":
+            for active in selected:
+                symbol = active["ticker"]
+                snapshot = snapshots[symbol]
+                order = self._submit_weighted_entry(
+                    snapshot,
+                    quotes[symbol],
+                    active,
+                    quote_adapter=effective_quote_adapter,
+                    quote_provider=effective_quote_provider,
+                    cycle_id=cycle_id,
+                    live_cycle=requested_now is None,
+                )
+                if order is not None:
+                    orders.append(order)
 
         option_snapshots = {
             symbol: snapshot
@@ -423,6 +429,7 @@ class ForwardPaperService:
             "option_watchlist_count": len(option_watchlist),
             "baseline_candidates": len(baseline_candidates),
             "active_strategy": "weighted_relative_strength_v2",
+            "active_execution": active_execution,
             "active_candidates": len(active_candidates),
             "selected_candidates": [item["ticker"] for item in selected],
             "shadow_candidates": [item["ticker"] for item in shadow_selected],

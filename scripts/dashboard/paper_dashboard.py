@@ -791,6 +791,18 @@ def build_dashboard_state(root: str | Path) -> dict[str, Any]:
         "orders": orders[:30],
         "option_orders": option_orders[:30],
         "latest_cycle": latest_cycle,
+        "strategy_modes": {
+            "weighted_relative_strength_v2": str(
+                runtime.get("strategies", {})
+                .get("weighted_relative_strength_v2", {})
+                .get("execution", "shadow_only")
+            ),
+            "long_directional_options_v2_weighted": str(
+                runtime.get("strategies", {})
+                .get("long_directional_options_v2_weighted", {})
+                .get("execution", "shadow_only")
+            ),
+        },
         "candidates": candidates,
         "option_decisions": option_decisions,
         "metrics": metrics,
@@ -1110,11 +1122,14 @@ function tradeTable(d){
 }
 function strategies(d){
   const b=d.beginner_summary||{},s=b.strategy_lines||{},eq=s.equity||{},op=s.options||{},ai=s.ai||{};
-  const eqCopy=eq.entries?`监控 ${eq.watchlist_count||0} 个标的；开仓 ${eq.entries||0} 笔，平仓 ${eq.closed_trades||0} 笔。${eq.earnings_risk_entries?`其中 ${eq.earnings_risk_entries} 笔发生在临近财报的标的，已新增财报风险门。`:"系统会继续按加权分数和确定性风控筛选。"}`:`监控 ${eq.watchlist_count||0} 个标的；这一天没有新开股票仓位。`;
+  const equityShadow=((d.strategy_modes||{}).weighted_relative_strength_v2||"")==="shadow_only";
+  const eqCopy=equityShadow?`监控 ${eq.watchlist_count||0} 个标的；当前只保存候选和未来收益标签，不会创建新的股票订单。`:eq.entries?`监控 ${eq.watchlist_count||0} 个标的；开仓 ${eq.entries||0} 笔，平仓 ${eq.closed_trades||0} 笔。${eq.earnings_risk_entries?`其中 ${eq.earnings_risk_entries} 笔发生在临近财报的标的，已新增财报风险门。`:"系统会继续按加权分数和确定性风控筛选。"}`:`监控 ${eq.watchlist_count||0} 个标的；这一天没有新开股票仓位。`;
   const opCopy=op.status==="validation_error"?`完成 ${op.direction_evaluations||0} 次方向评估；进入合约筛选 ${op.selection_attempts||0} 次，但报价时间校验故障使合约全部落选。`:`完成 ${op.direction_evaluations||0} 次方向评估；进入合约筛选 ${op.selection_attempts||0} 次，未创建模拟期权订单。`;
-  const aiCopy=ai.status==="failed_closed"?`${ai.failed||0} 次模型排名失败，系统安全停止，没有下单。`:`完成 ${ai.completed||0} 次 AI 决策循环；最近一次从 ${ai.latest_candidate_count||0} 个候选中选出 ${ai.latest_top_set_count||0} 个做新闻研究。`;
-  return `<section class="band"><div class="band-head"><div><h2>三条策略线分别发生了什么</h2><p class="muted">股票、期权和 AI 独立统计，但共享总账户风险上限。</p></div></div><div class="band-body"><div class="strategy-grid">
-    <article class="strategy"><div class="strategy-top"><h3>股票加权策略</h3><span class="pill ${eq.status==="traded"?"good":""}">${esc(statusLabel[eq.status]||eq.status)}</span></div><div class="strategy-number ${tone(eq.daily_pnl)}">${signedMoney(eq.daily_pnl)}</div><p class="strategy-copy">${esc(eqCopy)}</p></article>
+  const directional=(((d.ai_gated||{}).metrics||{}).directional_breakdown)||{},bull=directional.bullish||{},bear=directional.bearish||{};
+  const directionCopy=(bull.proposal_count||bear.proposal_count)?` 看涨提案 ${bull.proposal_count||0} 个、净结果 ${signedMoney(bull.net_pnl)}；看跌提案 ${bear.proposal_count||0} 个、净结果 ${signedMoney(bear.net_pnl)}。`:"";
+  const aiCopy=(ai.status==="failed_closed"?`${ai.failed||0} 次模型排名失败，系统安全停止，没有下单。`:`完成 ${ai.completed||0} 次 AI 决策循环；最近一次从 ${ai.latest_candidate_count||0} 个候选中选出 ${ai.latest_top_set_count||0} 个做新闻研究。`)+directionCopy;
+  return `<section class="band"><div class="band-head"><div><h2>三条策略线分别发生了什么</h2><p class="muted">股票和期权共享主模拟账户；AI 使用独立模拟账户，三条线分别统计。</p></div></div><div class="band-body"><div class="strategy-grid">
+    <article class="strategy"><div class="strategy-top"><h3>股票加权策略</h3><span class="pill ${equityShadow?"good":eq.status==="traded"?"good":""}">${equityShadow?"只观察":esc(statusLabel[eq.status]||eq.status)}</span></div><div class="strategy-number ${tone(eq.daily_pnl)}">${signedMoney(eq.daily_pnl)}</div><p class="strategy-copy">${esc(eqCopy)}</p></article>
     <article class="strategy"><div class="strategy-top"><h3>买入 Call / Put 期权</h3><span class="pill ${op.status==="validation_error"?"bad":""}">${esc(statusLabel[op.status]||op.status)}</span></div><div class="strategy-number">${op.orders||0} 笔订单</div><p class="strategy-copy">${esc(opCopy)}</p></article>
     <article class="strategy"><div class="strategy-top"><h3>AI 独立模拟策略</h3><span class="pill ${ai.status==="failed_closed"?"bad":"good"}">${esc(statusLabel[ai.status]||ai.status)}</span></div><div class="strategy-number">${ai.completed||0} 次完成</div><p class="strategy-copy">${esc(aiCopy)}</p></article>
   </div></div></section>`;
@@ -1132,7 +1147,7 @@ function candidates(d){
     const why=(x.reasons||[]).map(humanReason).join("；")||"综合分达到入场线";
     return `<tr><td data-label="股票"><strong>${esc(x.ticker)}</strong><div class="small muted">${localTime(x.asof)} 最后评估</div></td><td data-label="动作"><span class="pill ${x.action==="buy"?"good":"warn"}">${esc(statusLabel[x.action]||x.action)}</span></td><td data-label="综合分" class="score"><div class="score-line"><span>${score.toFixed(1)} 分</span><span class="small muted">入场线 ${threshold.toFixed(1)}</span></div><div class="score-track"><div class="score-fill" style="width:${Math.min(100,score)}%"></div></div></td><td data-label="原因" class="reason">${esc(why)}</td></tr>`;
   }).join("");
-  return `<section class="band"><div class="band-head"><div><h2>最后一次股票筛选</h2><p class="muted">这里只显示分数最高的 8 个；实际监控数量见上方股票策略。分数高不代表一定上涨，风险门仍可否决。</p></div></div><div class="table-wrap"><table class="mobile-stack"><thead><tr><th>股票</th><th>系统动作</th><th>综合分</th><th>简单原因</th></tr></thead><tbody>${rows||'<tr><td colspan="4" class="muted">暂无股票筛选记录。</td></tr>'}</tbody></table></div></section>`;
+  return `<section class="band"><div class="band-head"><div><h2>最后一次股票筛选</h2><p class="muted">这里只显示分数最高的 8 个。当前股票线只记录候选和 360 分钟后的模拟结果，不会因为分数高而创建订单。</p></div></div><div class="table-wrap"><table class="mobile-stack"><thead><tr><th>股票</th><th>系统动作</th><th>综合分</th><th>简单原因</th></tr></thead><tbody>${rows||'<tr><td colspan="4" class="muted">暂无股票筛选记录。</td></tr>'}</tbody></table></div></section>`;
 }
 function advanced(d){
   const b=d.beginner_summary||{},op=((b.strategy_lines||{}).options||{}),ops=b.operations||{},m=d.metrics||{},w=d.adaptive_weights||{};

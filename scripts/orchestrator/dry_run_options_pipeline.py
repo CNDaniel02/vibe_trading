@@ -35,9 +35,9 @@ def run_options_dry_run(project_root: str | Path) -> dict[str, Any]:
         )
         entry_quote = OptionQuote(
             option_id=contract.option_id,
-            bid=0.95,
+            bid=0.97,
             ask=1.00,
-            mark=0.975,
+            mark=0.985,
             updated_at=DRY_RUN_TIME,
             source="fixture",
             delta=-0.45,

@@ -56,6 +56,21 @@ def generate_report(root: str | Path) -> Path:
                 "- Account and order state are isolated from the deterministic baseline.",
             ]
         )
+        for direction, values in ai_metrics.get("directional_breakdown", {}).items():
+            lines.extend(
+                [
+                    "",
+                    f"### AI {direction.title()} Exposure",
+                    f"- Proposals: {values['proposal_count']}",
+                    f"- Filled entries: {values['filled_entry_count']}",
+                    f"- Fill rate: {values['fill_rate']:.4f}",
+                    f"- Closed trades: {values['closed_trade_count']}",
+                    f"- Win rate: {values['win_rate']:.4f}",
+                    f"- Net PnL: ${values['net_pnl']:.2f}",
+                    f"- Modeled slippage and commission: ${values['modeled_cost_usd']:.2f}",
+                    f"- Rejection reasons: {values['rejection_reasons']}",
+                ]
+            )
     lines.extend([
         "",
         "## Decision",
