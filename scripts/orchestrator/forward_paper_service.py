@@ -734,7 +734,7 @@ class ForwardPaperService:
         return result
 
     def _fetch_eod_equity_quotes(self, positions: dict[str, Any]) -> dict[str, Quote]:
-        symbols = list(positions)
+        symbols = [str(symbol).upper() for symbol in positions]
         if not symbols:
             return {}
 
@@ -747,26 +747,73 @@ class ForwardPaperService:
             symbol: "us_etf" if symbol in etf_symbols else "us_equity"
             for symbol in symbols
         }
-        alpaca_config = self.integration_config.get("forward_data", {}).get("alpaca", {})
-        alpaca = AlpacaMarketDataAdapter(alpaca_config)
-        if alpaca.readiness().get("ready"):
+        max_exit_spread_bps = float(
+            self.config["universe"].get(
+                "max_exit_spread_bps",
+                self.config["universe"].get("max_spread_bps", 999999),
+            )
+        )
+        remaining = set(symbols)
+        resolved: dict[str, Quote] = {}
+        providers = [(self.quote_provider, self.quote_adapter)]
+        if self.fallback_quote_provider and self.fallback_quote_adapter:
+            providers.append((self.fallback_quote_provider, self.fallback_quote_adapter))
+
+        for provider, adapter in providers:
+            if not remaining:
+                break
             try:
-                return alpaca.fetch_quotes(symbols, liquidity_usd=liquidity, asset_classes=asset_classes)
+                fetched = adapter.fetch_quotes(
+                    sorted(remaining),
+                    liquidity_usd=liquidity,
+                    asset_classes=asset_classes,
+                )
             except Exception as exc:
                 append_jsonl(
                     self.root,
                     "audit.jsonl",
-                    {"event": "eod_alpaca_quote_fallback", "reason": f"{type(exc).__name__}: {exc}"},
+                    {
+                        "event": "eod_equity_quote_provider_failed",
+                        "provider": provider,
+                        "reason": f"{type(exc).__name__}: {exc}",
+                    },
                 )
-        try:
-            return self.quote_adapter.fetch_quotes(symbols, liquidity_usd=liquidity, asset_classes=asset_classes)
-        except Exception as exc:
+                continue
+            for symbol in sorted(remaining):
+                quote = fetched.get(symbol)
+                if quote is None:
+                    continue
+                if quote.bid <= 0 or quote.ask <= 0 or quote.ask < quote.bid:
+                    reason = "invalid quote"
+                elif quote.spread_bps() > max_exit_spread_bps:
+                    reason = "exit quote spread too wide"
+                else:
+                    resolved[symbol] = quote
+                    continue
+                append_jsonl(
+                    self.root,
+                    "audit.jsonl",
+                    {
+                        "event": "eod_equity_quote_rejected",
+                        "provider": provider,
+                        "symbol": symbol,
+                        "reason": reason,
+                        "spread_bps": round(quote.spread_bps(), 4),
+                        "quote": quote.to_dict(),
+                    },
+                )
+            remaining.difference_update(resolved)
+
+        if remaining:
             append_jsonl(
                 self.root,
                 "audit.jsonl",
-                {"event": "eod_equity_quote_failed_closed", "reason": f"{type(exc).__name__}: {exc}"},
+                {
+                    "event": "eod_equity_quote_failed_closed",
+                    "symbols": sorted(remaining),
+                },
             )
-            return {}
+        return resolved
 
     @staticmethod
     def _overnight_position_ids(positions: dict[str, Any], session_open: str) -> set[str]:
@@ -1299,6 +1346,46 @@ def _emit_runtime_event(event: dict[str, Any]) -> None:
     print(json.dumps(event, sort_keys=True), flush=True)
 
 
+def _runtime_job_allowed(
+    job_name: str,
+    now: str,
+    config: dict[str, Any],
+    *,
+    clock: UsEquityMarketClock | None = None,
+) -> bool:
+    state = (clock or UsEquityMarketClock()).status(now)
+    if job_name in {"forward", "ai_monitor", "eod_guard"}:
+        return state.is_regular
+    if state.is_regular:
+        return True
+    current = parse_ts(now)
+    if job_name == "catalyst":
+        profile = config.get("strategies", {}).get("exa_deepseek_catalyst_v1", {}).get("discovery", {})
+        window = float(profile.get("premarket_research_window_minutes", 90))
+        allowed = bool(profile.get("allow_premarket_research", False))
+    elif job_name == "ai_gated":
+        profile = config.get("strategies", {}).get("ai_gated_technical_v1", {})
+        window = float(profile.get("premarket_research_window_minutes", 90))
+        allowed = bool(profile.get("allow_premarket_research", False))
+    elif job_name == "news_drift":
+        profile = config.get("strategies", {}).get("llm_news_drift_v1", {})
+        if state.market_session not in set(profile.get("allowed_market_sessions", [])):
+            return False
+        if state.market_session == "pre_market" and state.open_time:
+            minutes = (parse_ts(state.open_time) - current).total_seconds() / 60
+            return 0 < minutes <= float(profile.get("premarket_window_minutes", 120))
+        if state.market_session == "after_hours" and state.close_time:
+            minutes = (current - parse_ts(state.close_time)).total_seconds() / 60
+            return 0 <= minutes <= float(profile.get("after_hours_window_minutes", 120))
+        return False
+    else:
+        return True
+    if not allowed or state.market_session != "pre_market" or not state.open_time:
+        return False
+    minutes_to_open = (parse_ts(state.open_time) - current).total_seconds() / 60
+    return 0 < minutes_to_open <= window
+
+
 def serve(root: str | Path) -> None:
     root = Path(root).resolve()
     config = load_runtime_config(root)
@@ -1306,6 +1393,7 @@ def serve(root: str | Path) -> None:
     runtime = config.get("integrations", {}).get("runtime", {})
     scheduler = BlockingScheduler(timezone="America/New_York")
     runner = SubprocessJobRunner(root)
+    market_clock = UsEquityMarketClock()
     latest_results: dict[str, dict[str, Any]] = {}
 
     def run_worker(
@@ -1338,6 +1426,8 @@ def serve(root: str | Path) -> None:
         )
 
     def run_forward_cycle() -> None:
+        if not _runtime_job_allowed("forward", utc_now(), config, clock=market_clock):
+            return
         run_worker(
             "forward",
             ["--once"],
@@ -1356,6 +1446,8 @@ def serve(root: str | Path) -> None:
         )
 
     def run_catalyst_cycle() -> None:
+        if not _runtime_job_allowed("catalyst", utc_now(), config, clock=market_clock):
+            return
         run_worker(
             "catalyst",
             ["--catalyst-once"],
@@ -1365,6 +1457,8 @@ def serve(root: str | Path) -> None:
         )
 
     def run_ai_gated_cycle() -> None:
+        if not _runtime_job_allowed("ai_gated", utc_now(), config, clock=market_clock):
+            return
         run_worker(
             "ai_gated",
             ["--ai-gated-once"],
@@ -1374,6 +1468,8 @@ def serve(root: str | Path) -> None:
         )
 
     def run_ai_monitor() -> None:
+        if not _runtime_job_allowed("ai_monitor", utc_now(), config, clock=market_clock):
+            return
         run_worker(
             "ai_monitor",
             ["--ai-monitor-once"],
@@ -1383,6 +1479,8 @@ def serve(root: str | Path) -> None:
         )
 
     def run_news_drift_cycle() -> None:
+        if not _runtime_job_allowed("news_drift", utc_now(), config, clock=market_clock):
+            return
         run_worker(
             "news_drift",
             ["--news-drift-once"],
@@ -1392,6 +1490,8 @@ def serve(root: str | Path) -> None:
         )
 
     def run_eod_guard() -> None:
+        if not _runtime_job_allowed("eod_guard", utc_now(), config, clock=market_clock):
+            return
         run_worker(
             "eod_guard",
             ["--eod-once"],

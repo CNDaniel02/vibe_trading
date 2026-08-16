@@ -143,7 +143,46 @@ class AiGatedPaperPipeline:
                 list(self.config.get("universe", {}).get("default_watchlist", [])),
             )
             seed_by_ticker = {str(item["ticker"]).upper(): item for item in seeds if item.get("ticker")}
-            contexts = self.discovery.fetch_market_context(list(seed_by_ticker), decision_time)
+            active_statuses = {
+                "created",
+                "submitted_to_paper_broker",
+                "open",
+                "partially_filled",
+            }
+            occupied_tickers = {
+                str(ticker).upper()
+                for ticker in self.broker.store.positions()
+            }
+            occupied_tickers.update(
+                position.contract.underlying.upper()
+                for position in self.option_broker.store.positions().values()
+            )
+            occupied_tickers.update(
+                order.symbol.upper()
+                for order in self.broker.store.orders().values()
+                if order.status in active_statuses
+            )
+            occupied_tickers.update(
+                order.contract.underlying.upper()
+                for order in self.option_broker.store.orders().values()
+                if order.status in active_statuses
+            )
+            occupied_seeds = sorted(set(seed_by_ticker) & occupied_tickers)
+            seed_by_ticker = {
+                ticker: item
+                for ticker, item in seed_by_ticker.items()
+                if ticker not in occupied_tickers
+            }
+            contexts = (
+                self.discovery.fetch_market_context(list(seed_by_ticker), decision_time)
+                if seed_by_ticker
+                else {}
+            )
+            contexts = {
+                str(ticker).upper(): context
+                for ticker, context in contexts.items()
+                if str(ticker).upper() not in occupied_tickers
+            }
             candidates = self._technical_candidates(contexts, seed_by_ticker, decision_time)
             top_count = max(5, min(8, int(self.profile.get("top_technical_candidates", 6))))
             selected = self._select_technical_candidates(candidates, top_count)
@@ -151,7 +190,13 @@ class AiGatedPaperPipeline:
             return self._failed(cycle_id, "technical_discovery", exc, calls_before)
 
         researched: list[dict[str, Any]] = []
-        skipped: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = [
+            {
+                "ticker": ticker,
+                "reason": "existing AI sleeve position or active order",
+            }
+            for ticker in occupied_seeds
+        ]
         validated: list[tuple[dict[str, Any], dict[str, Any]]] = []
         for candidate in selected:
             ticker = candidate["ticker"]

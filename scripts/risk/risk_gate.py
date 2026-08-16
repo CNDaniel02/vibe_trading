@@ -52,6 +52,14 @@ def validate_quote(
     if quote.halted:
         return RiskDecision(False, "halted symbol")
     if not enforce_entry_liquidity:
+        max_exit_spread_bps = float(
+            universe.get(
+                "max_exit_spread_bps",
+                universe.get("max_spread_bps", 999999),
+            )
+        )
+        if quote.spread_bps() > max_exit_spread_bps:
+            return RiskDecision(False, "exit quote spread too wide")
         return RiskDecision(True, "exit quote ok")
     if quote.is_otc and not universe.get("allow_otc", False):
         return RiskDecision(False, "OTC not allowed")

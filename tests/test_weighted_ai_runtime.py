@@ -23,7 +23,11 @@ from scripts.llm.usage_tracker import UsageTracker
 from scripts.options.models import OptionContract, OptionQuote
 from scripts.options.selection import rank_contracts_with_diagnostics
 from scripts.options.weighted_strategy import decide_weighted_option_direction
-from scripts.orchestrator.forward_paper_service import ForwardPaperService, main as forward_main
+from scripts.orchestrator.forward_paper_service import (
+    ForwardPaperService,
+    _runtime_job_allowed,
+    main as forward_main,
+)
 from scripts.runtime.heartbeat import write_heartbeat
 from scripts.runtime.process_lock import ProcessLock
 from scripts.runtime.subprocess_runner import SubprocessJobRunner
@@ -818,6 +822,47 @@ def test_ai_gated_pipeline_executes_only_in_isolated_paper_sleeve(paper_root: Pa
     assert {"place_order", "review_order", "replace_order"}.isdisjoint(dir(sleeve))
 
 
+def test_ai_gated_pipeline_does_not_research_existing_position(
+    paper_root: Path,
+) -> None:
+    class CountingNews(_News):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def search(self, ticker, decision_time, company_name=None):
+            self.calls += 1
+            return super().search(ticker, decision_time, company_name)
+
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    news = CountingNews()
+    pipeline = AiGatedPaperPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=_Discovery(),
+        news_adapter=news,
+        option_data=_OptionData(),
+    )
+    pipeline.broker.store.save_positions(
+        {"AAPL": Position("AAPL", 1, 100, NOW, NOW)}
+    )
+    account = pipeline.broker.store.account()
+    account.cash = 1900
+    pipeline.broker.store.save_account(account, NOW)
+
+    result = pipeline.run(NOW)
+
+    assert result["event"] == "ai_gated_cycle_complete"
+    assert result["model_calls"] == 0
+    assert result["paper_orders_created"] == 0
+    assert news.calls == 0
+    assert result["skipped"] == [
+        {"ticker": "AAPL", "reason": "existing AI sleeve position or active order"}
+    ]
+
+
 def test_ai_gated_pipeline_skips_model_research_near_close(
     paper_root: Path,
 ) -> None:
@@ -898,6 +943,72 @@ def test_eod_guard_recovers_overnight_equity_position(
     assert result["reason"] == "overnight recovery flatten"
     assert result["equity_exits"][0]["status"] == "filled"
     assert set(service.broker.store.positions()) == {"MSFT"}
+
+
+def test_eod_quotes_prefer_configured_primary_and_fallback_from_wide_quote(
+    paper_root: Path,
+) -> None:
+    class QuoteAdapter:
+        def __init__(self, quote: Quote) -> None:
+            self.quote = quote
+            self.calls = 0
+
+        def fetch_quotes(self, symbols, **kwargs):
+            del kwargs
+            self.calls += 1
+            return {symbol: self.quote for symbol in symbols}
+
+    service = ForwardPaperService(paper_root)
+    wide_primary = Quote(
+        "AAPL",
+        95.0,
+        105.0,
+        100.0,
+        NOW,
+        source="primary",
+        avg_daily_volume_usd=100_000_000,
+    )
+    good_fallback = Quote(
+        "AAPL",
+        100.0,
+        100.05,
+        100.02,
+        NOW,
+        source="fallback",
+        avg_daily_volume_usd=100_000_000,
+    )
+    primary = QuoteAdapter(wide_primary)
+    fallback = QuoteAdapter(good_fallback)
+    service.quote_provider = "robinhood_mcp"
+    service.quote_adapter = primary  # type: ignore[assignment]
+    service.fallback_quote_provider = "alpaca"
+    service.fallback_quote_adapter = fallback  # type: ignore[assignment]
+
+    quotes = service._fetch_eod_equity_quotes(
+        {"AAPL": Position("AAPL", 1, 100, NOW, NOW)}
+    )
+
+    assert quotes["AAPL"].source == "fallback"
+    assert primary.calls == 1
+    assert fallback.calls == 1
+
+
+def test_runtime_jobs_do_not_spawn_outside_their_market_windows(
+    paper_root: Path,
+) -> None:
+    config = load_runtime_config(paper_root)
+    overnight = "2026-07-13T06:00:00+00:00"
+    bounded_premarket = "2026-07-13T12:30:00+00:00"
+    regular = NOW
+
+    for job in ("forward", "ai_monitor", "eod_guard"):
+        assert _runtime_job_allowed(job, overnight, config) is False
+        assert _runtime_job_allowed(job, bounded_premarket, config) is False
+        assert _runtime_job_allowed(job, regular, config) is True
+    for job in ("catalyst", "ai_gated", "news_drift"):
+        assert _runtime_job_allowed(job, overnight, config) is False
+        assert _runtime_job_allowed(job, bounded_premarket, config) is True
+        assert _runtime_job_allowed(job, regular, config) is True
 
 
 def test_ai_monitor_recovers_only_overnight_positions(paper_root: Path) -> None:

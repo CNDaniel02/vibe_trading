@@ -116,8 +116,8 @@ def test_exit_ignores_entry_liquidity_rules_and_does_not_consume_trade_limit(pap
     exit_quote = Quote(
         symbol="SPY",
         bid=99.0,
-        ask=120.0,
-        last=100.0,
+        ask=99.1,
+        last=99.05,
         asof=NOW,
         source="test",
         avg_daily_volume_usd=1,
@@ -133,6 +133,42 @@ def test_exit_ignores_entry_liquidity_rules_and_does_not_consume_trade_limit(pap
         limit_price=None,
     )
     assert pb.submit_order(exit_order, exit_quote, now=NOW).status == "filled"
+    counters = pb.store.daily_counters(NOW)
+    assert counters["trades"] == 1
+    assert counters["equity_trades"] == 1
+
+
+def test_exit_rejects_pathological_spread_without_consuming_trade_limit(paper_root):
+    pb = broker(paper_root)
+    entry_quote = quote(bid=100.0, ask=100.1)
+    entry = make_order(pb, entry_quote, order_type="market", limit_price=None)
+    assert pb.submit_order(entry, entry_quote, now=NOW).status == "filled"
+
+    exit_quote = Quote(
+        symbol="SPY",
+        bid=95.0,
+        ask=105.0,
+        last=100.0,
+        asof=NOW,
+        source="test",
+        avg_daily_volume_usd=1,
+        asset_class="us_etf",
+    )
+    exit_order = make_order(
+        pb,
+        exit_quote,
+        decision_id="bad-exit-quote",
+        idempotency_key="bad-exit-quote",
+        side="sell",
+        order_type="market",
+        limit_price=None,
+    )
+
+    result = pb.submit_order(exit_order, exit_quote, now=NOW)
+
+    assert result.status == "rejected"
+    assert result.reject_reason == "exit quote spread too wide"
+    assert "SPY" in pb.store.positions()
     counters = pb.store.daily_counters(NOW)
     assert counters["trades"] == 1
     assert counters["equity_trades"] == 1

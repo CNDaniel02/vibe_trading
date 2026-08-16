@@ -1,5 +1,33 @@
 # Development Log
 
+## 2026-08-11 (America/Los_Angeles) - Forward results audit and execution-quality repair
+
+### Runtime and performance evidence
+
+- The supervisor remained healthy and paper-only. From `2026-08-10T12:18:15Z` through this audit it completed 2,665 supervised jobs with no failure or timeout in that interval. It nevertheless spawned 1,021 idle EOD workers, 1,133 mostly skipped news-drift workers, 226 forward workers, and 218 AI monitor workers.
+- The shared main account is flat with `$1,919.8167` cash and raw realized PnL of `-$80.1834` (`-4.0092%`). It has 14 sessions and 24 closed trades, below the configured 20-session and 30-trade evidence thresholds.
+- The main equity line reports 20 closed trades, `-$67.1833`, 40% win rate, and 0.3703 profit factor. Two August 10 mandatory exits used Alpaca IEX quotes with 4.29% and 5.39% spreads. Their bid-to-last gaps alone overstated loss by about `$44.17`; the immutable raw account and logs remain unchanged.
+- The main long-premium options line reports 4 closed trades, `-$13.00`, 50% win rate, and 0.5185 profit factor. The latest TLT long put made `$4.00`; the sample is too small for threshold tuning.
+- The isolated AI sleeve is flat with `$1,987.8623` cash and `-$12.1378` realized PnL (`-0.6069%`). It has 3 closed trades, 33.33% win rate, and 0.3701 profit factor. On August 10 it bought EMBJ, lost `$14.9679`, then repeated the full Exa/DeepSeek research path while already holding EMBJ before deterministic position risk rejected the duplicate order.
+- The news-drift lane remains shadow-only: 131 events, 23 proposals, 50 valid return labels, 7 portfolio days, and no broker orders. All five available next-close labels still use the legacy label policy; the new executable-preclose policy does not yet have a next-close sample.
+- A fresh read-only healthcheck found Alpaca, Exa, DeepSeek, and Vibe ready, but the persisted Robinhood MCP OAuth session now requests authorization in new processes. Main equity can use Alpaca fallback; options, scanner discovery, Catalyst, AI gated research, and news drift are degraded until OAuth is refreshed.
+
+### Changes
+
+- EOD equity quotes now follow the configured provider order instead of hard-coding Alpaca first. A missing, invalid, or wider-than-allowed primary quote is audited and retried through the configured fallback.
+- Equity exits continue to ignore entry-only volume, price-floor, and universe filters, but now fail closed when spread exceeds the new `max_exit_spread_bps: 100` execution-quality limit.
+- AI gated discovery removes tickers with an existing sleeve position or active equity/option order before market context, Exa, or DeepSeek work. The skip reason remains visible in cycle output.
+- The supervisor now suppresses forward, EOD, and AI monitor subprocesses outside regular hours. Catalyst and AI research run only during regular hours or their bounded premarket windows; news drift runs only during its configured premarket, regular, or after-hours windows.
+- Strategy scores, entry thresholds, position limits, stop rules, and adaptive weights were not changed. The available clean trade sample is not sufficient to distinguish a profitable parameter change from overfitting.
+
+### Safety, validation, and deployment
+
+- Paper/live mode boundaries are unchanged: `paper=true`, `live_readonly=false`, `live_trading=false`. No Robinhood order, review, replace, or cancel capability was added or called.
+- Historical state, fills, account cash, OAuth material, SQLite records, and append-only logs were not edited.
+- Focused broker, AI, and orchestrator regression suite: `82 passed`. Full suite: `170 passed`; only four upstream `exchange_calendars` deprecation warnings remain. `compileall` passed.
+- Read-only healthcheck confirms the supervisor heartbeat and lock are healthy, but full forward readiness is false because Robinhood OAuth must be refreshed.
+- Child workers load the EOD and AI fixes immediately, but scheduler window suppression lives in the long-running supervisor process. Restart the service from the user's terminal after reauthorizing Robinhood MCP.
+
 本文件是项目的持续开发日志。后续任何改变代码、配置、运行行为、数据源、风险边界或评估口径的更新，都应在文件顶部追加一条记录，不覆盖历史记录。
 
 每条记录至少包含：变更原因和运行证据、修改内容、安全影响、验证结果、是否需要重启。纯格式调整可以合并记录，但不能省略会影响交易决策或绩效统计的变化。
