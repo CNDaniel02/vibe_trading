@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -57,6 +59,39 @@ def test_legacy_executors_are_entry_frozen_by_default(paper_root: Path) -> None:
         config["strategies"]["ai_gated_technical_v1"]["new_entries_enabled"]
         is False
     )
+
+
+def test_readiness_cli_never_constructs_stateful_service(
+    paper_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    report = {
+        "paper_mode": True,
+        "live_trading": False,
+        "ready_for_ai_instrument_allocator_paper": True,
+    }
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["forward_paper_service", "--root", str(paper_root), "--readiness"],
+    )
+    monkeypatch.setattr(
+        forward_service_module,
+        "run_healthcheck",
+        lambda _root: report,
+    )
+    monkeypatch.setattr(
+        forward_service_module,
+        "ForwardPaperService",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("readiness must not construct the stateful service")
+        ),
+    )
+
+    forward_service_module.main()
+
+    assert json.loads(capsys.readouterr().out) == report
 
 
 def test_entry_frozen_ai_pipeline_skips_research_but_keeps_monitor_result(

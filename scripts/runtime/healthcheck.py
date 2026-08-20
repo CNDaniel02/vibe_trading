@@ -65,6 +65,11 @@ def run_healthcheck(root: str | Path, require_heartbeat: bool = False) -> dict:
         .get("ai_gated_technical_v1", {})
         .get("enabled", False)
     )
+    allocator_enabled = bool(
+        config.get("strategies", {})
+        .get("ai_instrument_allocator_v1", {})
+        .get("enabled", False)
+    )
     news_drift_enabled = bool(
         config.get("strategies", {})
         .get("llm_news_drift_v1", {})
@@ -104,6 +109,15 @@ def run_healthcheck(root: str | Path, require_heartbeat: bool = False) -> dict:
         not ai_gated_enabled
         or (discovery_data["ready"] and exa["ready"] and llm_ready)
     )
+    allocator_ready = bool(
+        not allocator_enabled
+        or (
+            discovery_data["ready"]
+            and option_data["ready"]
+            and exa["ready"]
+            and llm_ready
+        )
+    )
     news_drift_ready = bool(
         not news_drift_enabled
         or (discovery_data["ready"] and exa["ready"] and llm_ready)
@@ -115,6 +129,7 @@ def run_healthcheck(root: str | Path, require_heartbeat: bool = False) -> dict:
         and options_ready
         and catalyst_ready
         and ai_gated_ready
+        and allocator_ready
         and news_drift_ready
     )
     degraded_reasons: list[str] = []
@@ -126,6 +141,8 @@ def run_healthcheck(root: str | Path, require_heartbeat: bool = False) -> dict:
         degraded_reasons.append("enabled catalyst discovery line is not ready")
     if ai_gated_enabled and not ai_gated_ready:
         degraded_reasons.append("enabled AI-gated paper line is not ready")
+    if allocator_enabled and not allocator_ready:
+        degraded_reasons.append("enabled AI instrument allocator line is not ready")
     if news_drift_enabled and not news_drift_ready:
         degraded_reasons.append("enabled news-drift shadow line is not ready")
     if not forward_ready:
@@ -142,6 +159,10 @@ def run_healthcheck(root: str | Path, require_heartbeat: bool = False) -> dict:
         "operational_status": operational_status,
         "degraded_reasons": degraded_reasons,
         "paper_mode": True,
+        "live_trading": False,
+        "llm_provider": llm_provider,
+        "llm_api_key_env": llm_key_env if llm_provider == "api" else None,
+        "llm_ready": llm_ready,
         "missing_state_files": missing,
         "watchdog": watchdog,
         "integrations": {
@@ -156,7 +177,18 @@ def run_healthcheck(root: str | Path, require_heartbeat: bool = False) -> dict:
         "quote_data": quote_data,
         "fallback_quote_provider": fallback_quote_provider,
         "fallback_quote_data": fallback_quote_data,
+        "vibe": vibe,
+        "option_data": option_data,
+        "discovery_data": discovery_data,
+        "exa": exa,
         "forward_ready": forward_ready,
+        "ready_for_forward_quotes": forward_ready,
+        "ready_for_news_shadow": bool(exa["ready"] and llm_ready),
+        "ready_for_catalyst_discovery": catalyst_ready,
+        "ready_for_ai_gated_paper": ai_gated_ready,
+        "ready_for_ai_instrument_allocator_paper": allocator_ready,
+        "ready_for_news_drift_shadow": news_drift_ready,
+        "ready_for_full_forward_evaluation": full_forward_evaluation_ready,
         "options_line": {
             "enabled": options_enabled,
             "ready": options_ready,
@@ -170,6 +202,12 @@ def run_healthcheck(root: str | Path, require_heartbeat: bool = False) -> dict:
         "ai_gated_paper": {
             "enabled": ai_gated_enabled,
             "ready": ai_gated_ready,
+            "llm_provider": llm_provider,
+            "llm_ready": llm_ready,
+        },
+        "ai_instrument_allocator_paper": {
+            "enabled": allocator_enabled,
+            "ready": allocator_ready,
             "llm_provider": llm_provider,
             "llm_ready": llm_ready,
         },

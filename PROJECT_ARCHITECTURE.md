@@ -98,6 +98,8 @@ flowchart LR
 
 网络调用不会直接运行在长期 supervisor 的主线程中。`scripts/orchestrator/forward_paper_service.py` 通过 `scripts/runtime/subprocess_runner.py` 为每个网络密集型周期启动有硬截止时间的子进程。超时会终止完整子进程树，并在 `logs/runtime_jobs.jsonl` 和 heartbeat 中留下失败证据。
 
+`--readiness` 和 `scripts.runtime.healthcheck` 只检查配置、凭据可用性与只读数据源，不构造 stateful forward service，也不会初始化任何策略 sleeve。新的 allocator 账户只在实际 allocator stage 或 monitor 首次运行时建立。
+
 各作业声明自己会使用的资源，例如 `main_account`、`ai_account`、`allocator_account`、`evidence_store` 和 `news_event_store`。资源冲突时作业会明确记录 `skipped`，而不是同时写同一份状态。旧 EOD guard 继续管理旧账户；allocator 使用自己的 horizon-aware monitor，不能被旧“每日收盘全部平仓”规则误伤。News-drift 只占用自己的 SQLite 资源，不能阻塞或写入任一账户。
 
 ## 4. 目录职责

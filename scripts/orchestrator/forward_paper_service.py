@@ -45,6 +45,7 @@ from scripts.research.snapshot_builder import build_snapshot
 from scripts.risk.position_sizing import calculate_entry_quantity
 from scripts.risk.shared_portfolio_risk import daily_entry_limit_reason, shared_entry_capacity
 from scripts.runtime.heartbeat import write_heartbeat
+from scripts.runtime.healthcheck import run_healthcheck
 from scripts.runtime.market_clock import UsEquityMarketClock
 from scripts.runtime.process_lock import ProcessLock
 from scripts.options.exit_policy import evaluate_option_exit
@@ -1954,6 +1955,9 @@ def main() -> None:
     ):
         serve(args.root)
         return
+    if args.readiness:
+        print(json.dumps(run_healthcheck(args.root), indent=2, sort_keys=True))
+        return
     if args.evaluate_once:
         report_path = generate_report(args.root)
         news_drift_report_path = generate_news_drift_report(args.root)
@@ -1991,9 +1995,7 @@ def main() -> None:
             result = run_news_drift_once(args.root, args.now)
         else:
             service = ForwardPaperService(args.root)
-            if args.readiness:
-                result = service.readiness()
-            elif args.catalyst_once:
+            if args.catalyst_once:
                 result = service.run_catalyst_discovery(args.now)
             elif args.ai_gated_once:
                 result = service.run_ai_gated_cycle(args.now)

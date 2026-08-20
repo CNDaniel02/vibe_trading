@@ -7,6 +7,10 @@
 `$10,000` only when that namespaced account does not already exist. Existing
 state always wins over configuration on restart.
 
+Readiness and healthcheck commands do not construct the stateful forward
+service or initialize this namespace. The namespace is initialized only by an
+actual allocator stage or monitor invocation.
+
 The `$2,000` main account and historical `$2,000` AI-gated account are immutable
 legacy ledgers. `long_directional_options_v2_weighted` and
 `ai_gated_technical_v1` cannot create new entries, but their original open-order,

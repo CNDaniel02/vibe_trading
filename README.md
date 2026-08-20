@@ -165,7 +165,7 @@ each data-collection stage are written to append-only runtime logs.
 # No-network independent catalyst discovery dry run
 .\.venv\Scripts\python.exe -m scripts.orchestrator.dry_run_catalyst_pipeline
 
-# Credential and integration readiness
+# Read-only credential and integration readiness; does not initialize a sleeve
 .\.venv\Scripts\python.exe -m scripts.orchestrator.forward_paper_service --readiness
 
 # One real forward paper cycle; fails closed outside regular NYSE hours

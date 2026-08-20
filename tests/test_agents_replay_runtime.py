@@ -118,8 +118,17 @@ def test_process_lock_recovers_confirmed_stale_owner(paper_root):
 
 
 def test_healthcheck_and_scheduler_wrapper(paper_root):
+    allocator_state = (
+        paper_root
+        / "state"
+        / "strategy_sleeves"
+        / "ai_instrument_allocator_v1"
+    )
+    assert not allocator_state.exists()
     health = run_healthcheck(paper_root)
+    assert not allocator_state.exists()
     assert health["ok"] == health["full_forward_evaluation_ready"]
+    assert "ready_for_ai_instrument_allocator_paper" in health
     assert health["quote_provider"] in {"alpaca", "robinhood_mcp"}
     assert health["forward_ready"] == bool(
         health["integrations"]["vibe"]["ready"]
