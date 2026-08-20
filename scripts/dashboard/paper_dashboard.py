@@ -1475,12 +1475,23 @@ main{max-width:1420px;margin:0 auto;padding:20px 24px 48px}
 .table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:760px}
 th,td{padding:10px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}th{font-size:11px;color:var(--muted);font-weight:700;background:var(--surface-soft)}
 tbody tr:last-child td{border-bottom:0}.num{font-variant-numeric:tabular-nums;white-space:nowrap}.muted{color:var(--muted)}.small{font-size:12px}
+.reason{max-width:540px;color:var(--muted);overflow-wrap:anywhere}
+.pipeline{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:0;padding:14px 16px}
+.pipeline-step{position:relative;padding:8px 20px 8px 0;min-width:0}.pipeline-step:not(:last-child)::after{content:"→";position:absolute;right:6px;top:9px;color:var(--line-strong);font-weight:700}
+.pipeline-step strong{display:block;font-size:13px}.pipeline-step span{display:block;color:var(--muted);font-size:11px;margin-top:2px}
+.stat-strip{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border-bottom:1px solid var(--line)}
+.stat{padding:12px 14px;border-right:1px solid var(--line);min-width:0}.stat:last-child{border-right:0}.stat-label{font-size:11px;color:var(--muted)}.stat-value{font-size:18px;font-weight:750;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.issue-list{padding:4px 16px}.issue{display:grid;grid-template-columns:10px minmax(0,1fr) auto;gap:10px;padding:11px 0;border-bottom:1px solid var(--line);align-items:start}.issue:last-child{border-bottom:0}.issue-mark{width:8px;height:8px;border-radius:2px;background:var(--amber);margin-top:6px}.issue.error .issue-mark{background:var(--red)}
+.issue-title{font-weight:700}.issue-copy{color:var(--muted);font-size:12px;margin-top:2px}.issue-count{font-variant-numeric:tabular-nums;color:var(--muted);white-space:nowrap}
+.definition-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0;border-top:1px solid var(--line)}.definition{padding:12px 14px;border-right:1px solid var(--line)}.definition:last-child{border-right:0}.definition strong{display:block;margin-bottom:2px}.definition span{font-size:12px;color:var(--muted)}
+.evidence-details summary{cursor:pointer;color:var(--text);font-weight:600;list-style-position:outside}.evidence-details div{margin-top:7px;color:var(--muted);white-space:normal}.evidence-details[open] summary{color:var(--blue)}
+.history-details>summary{cursor:pointer;padding:14px 16px;font-weight:700}.history-details>summary span{display:block;margin-top:2px;color:var(--muted);font-size:12px;font-weight:400}.history-details[open]>summary{border-bottom:1px solid var(--line);color:var(--blue)}
 .empty-state{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:36px 20px;text-align:center;color:var(--muted)}
 .empty-state h2{color:var(--text);font-size:18px;margin:0 0 5px}
 .error-box{background:var(--red-soft);border:1px solid #e9bdc2;border-radius:6px;padding:16px;color:var(--red)}
 @media(max-width:940px){
   .activity{grid-template-columns:1fr}.account-grid{grid-template-columns:1fr}
-  .topbar-inner{align-items:flex-start}.runtime-strip{gap:10px 16px}
+  .topbar-inner{align-items:flex-start}.runtime-strip{gap:10px 16px}.pipeline{grid-template-columns:1fr}.pipeline-step{padding:7px 0 7px 20px}.pipeline-step:not(:last-child)::after{content:"↓";left:2px;right:auto;top:8px}.stat-strip{grid-template-columns:repeat(2,minmax(0,1fr))}.stat:nth-child(2){border-right:0}.stat:nth-child(-n+2){border-bottom:1px solid var(--line)}
 }
 @media(max-width:680px){
   .topbar-inner,.paper-boundary-inner{padding-left:14px;padding-right:14px;align-items:flex-start;flex-direction:column;gap:10px}
@@ -1488,7 +1499,16 @@ tbody tr:last-child td{border-bottom:0}.num{font-variant-numeric:tabular-nums;wh
   main{padding:14px}.page-heading{display:block}.asof{margin-top:4px}.activity-main,.current-alerts{padding:14px}
   .account-body{grid-template-columns:1fr}.account-primary{border-right:0;border-bottom:1px solid var(--line)}
   .account-facts{grid-template-columns:1fr}.fact:nth-child(odd){border-right:0}.fact:nth-last-child(-n+2){border-bottom:1px solid var(--line)}.fact:last-child{border-bottom:0}
-  .account-equity{font-size:25px}
+  .account-equity{font-size:25px}.definition-grid{grid-template-columns:1fr}.definition{border-right:0;border-bottom:1px solid var(--line)}.definition:last-child{border-bottom:0}
+  .table-wrap{overflow:visible}
+  table.mobile-table{min-width:0}
+  table.mobile-table thead{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+  table.mobile-table,table.mobile-table tbody,table.mobile-table tr,table.mobile-table td{display:block;width:100%}
+  table.mobile-table tr{padding:9px 0;border-bottom:1px solid var(--line)}table.mobile-table tr:last-child{border-bottom:0}
+  table.mobile-table td{display:grid;grid-template-columns:92px minmax(0,1fr);gap:8px;padding:5px 14px;border:0;white-space:normal;min-width:0}
+  table.mobile-table td::before{content:attr(data-label);font-size:11px;color:var(--muted);font-weight:700}
+  table.mobile-table td[colspan]{display:block;text-align:center;padding:18px 14px}
+  table.mobile-table td[colspan]::before{content:none}.issue{grid-template-columns:10px minmax(0,1fr)}.issue-count{grid-column:2}
 }
 </style>
 </head>
@@ -1591,9 +1611,9 @@ function strategySummaryRows(state){
     {name:"股票加权",mode:(state.strategy_modes||{}).weighted_relative_strength_v2==="shadow_only"?"只观察":"模拟交易",kind:"info",pnl:(metricLines.equity||{}).net_pnl,activity:`监控 ${equity.watchlist_count||0} 个标的`},
     {name:"方向期权",mode:(state.strategy_modes||{}).long_directional_options_v2_weighted_new_entries?"模拟交易":"只管理旧仓",kind:"warn",pnl:(metricLines.options||{}).net_pnl,activity:`${options.direction_evaluations||0} 次方向评估`},
     {name:"旧 AI Gated",mode:(state.strategy_modes||{}).ai_gated_technical_v1_new_entries?"模拟交易":"只管理旧仓",kind:"warn",pnl:((state.ai_gated||{}).metrics||{}).net_pnl,activity:`${ai.completed||0} 次完成`},
-    {name:"AI 工具分配器",mode:(state.strategy_modes||{}).ai_instrument_allocator_v1==="paper"?"模拟交易":"未启用",kind:"good",pnl:allocatorMetrics.realized_pnl,activity:`${array(allocator.positions).length+array(allocator.option_positions).length} 个持仓`},
+    {name:"AI 工具分配器",mode:String((state.strategy_modes||{}).ai_instrument_allocator_v1||"").includes("paper")?"模拟交易":"未启用",kind:"good",pnl:allocatorMetrics.realized_pnl,activity:`${array(allocator.positions).length+array(allocator.option_positions).length} 个持仓`},
   ];
-  return rows.map(row=>`<tr><td><strong>${esc(row.name)}</strong></td><td>${statusBadge(row.mode,row.kind)}</td><td class="num ${tone(row.pnl)}">${signedMoney(row.pnl)}</td><td class="muted">${esc(row.activity)}</td></tr>`).join("");
+  return rows.map(row=>`<tr><td data-label="策略"><strong>${esc(row.name)}</strong></td><td data-label="状态">${statusBadge(row.mode,row.kind)}</td><td data-label="累计 PnL" class="num ${tone(row.pnl)}">${signedMoney(row.pnl)}</td><td data-label="最近活动" class="muted">${esc(row.activity)}</td></tr>`).join("");
 }
 function renderOverview(state){
   const b=state.beginner_summary||{},day=b.day||{},legacy=b.account||{},allocator=state.ai_instrument_allocator||{},allocatorAccount=allocator.account||{},allocatorMetrics=allocator.metrics||{};
@@ -1614,9 +1634,156 @@ function renderOverview(state){
     </div>
     <div class="account-grid">${legacyCard}${allocatorCard}</div>
     <section class="section-block"><div class="section-head"><div><h3>最近交易日结果</h3><p>只把已完成买入和卖出的闭环计入当日结果。</p></div><strong class="num ${tone(day.realized_pnl)}">${signedMoney(day.realized_pnl)}</strong></div>
-      <div class="table-wrap"><table><thead><tr><th>已平仓</th><th>盈利</th><th>亏损</th><th>当前持仓</th><th>盈利证据</th></tr></thead><tbody><tr><td class="num">${day.closed_trades||0} 笔</td><td class="num good-text">${day.wins||0} 笔</td><td class="num bad-text">${day.losses||0} 笔</td><td class="num">${number(legacy.open_equity_positions)+number(legacy.open_option_positions)} 个</td><td>${esc((b.evidence||{}).sufficient?"达到最低样本线，仍需继续前向验证":"样本或质量仍不足")}</td></tr></tbody></table></div>
+      <div class="table-wrap"><table class="mobile-table"><thead><tr><th>已平仓</th><th>盈利</th><th>亏损</th><th>当前持仓</th><th>盈利证据</th></tr></thead><tbody><tr><td data-label="已平仓" class="num">${day.closed_trades||0} 笔</td><td data-label="盈利" class="num good-text">${day.wins||0} 笔</td><td data-label="亏损" class="num bad-text">${day.losses||0} 笔</td><td data-label="当前持仓" class="num">${number(legacy.open_equity_positions)+number(legacy.open_option_positions)} 个</td><td data-label="盈利证据">${esc((b.evidence||{}).sufficient?"达到最低样本线，仍需继续前向验证":"样本或质量仍不足")}</td></tr></tbody></table></div>
     </section>
-    <section class="section-block"><div class="section-head"><div><h3>策略状态速览</h3><p>每条策略的账户和交易权限相互区分。</p></div></div><div class="table-wrap"><table><thead><tr><th>策略</th><th>当前模式</th><th>累计 PnL</th><th>最近活动</th></tr></thead><tbody>${strategySummaryRows(state)}</tbody></table></div></section>`;
+    <section class="section-block"><div class="section-head"><div><h3>策略状态速览</h3><p>每条策略的账户和交易权限相互区分。</p></div></div><div class="table-wrap"><table class="mobile-table"><thead><tr><th>策略</th><th>当前模式</th><th>累计 PnL</th><th>最近活动</th></tr></thead><tbody>${strategySummaryRows(state)}</tbody></table></div></section>`;
+}
+function localDateTime(value){
+  if(!value)return "—";
+  const parsed=new Date(value);
+  return Number.isNaN(parsed.getTime())?"—":parsed.toLocaleString("zh-CN",{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false});
+}
+function humanReason(value){
+  const reason=String(value||"");let match;
+  if(!reason)return "没有记录原因";
+  if(reason.includes("future option quote would create lookahead"))return "期权报价时间早于决策时间，系统拒绝使用";
+  if(reason.includes("future quote would create lookahead"))return "报价时间晚于决策截止点，系统拒绝使用";
+  if(reason.includes("spread too wide"))return "买卖价差过大，预估成交成本过高";
+  if(reason.includes("insufficient option volume"))return "期权成交量不足";
+  if(reason.includes("insufficient option open interest"))return "期权未平仓量不足";
+  if(reason.includes("outside regular market session"))return "当前不在美股正常交易时段";
+  if(reason.includes("stale"))return "行情或证据已经过期";
+  if(reason.includes("mandatory pre-close flatten"))return "按规则在收盘前平仓";
+  if(reason.includes("existing position is managed by the exit pipeline"))return "已有持仓，继续交由退出模块管理";
+  if(reason.includes("binary earnings event inside"))return "临近财报，事件波动风险过高";
+  if((match=reason.match(/weighted technical score ([0-9.]+) below ([0-9.]+)/)))return `综合分 ${match[1]}，低于入场线 ${match[2]}`;
+  if((match=reason.match(/best weighted option score below ([0-9.]+)/)))return `期权方向分数低于入场线 ${match[1]}`;
+  return reason;
+}
+function firstReason(value,fallback="没有记录原因"){
+  const values=array(value).filter(Boolean);
+  return values.length?values.map(humanReason).join("；"):fallback;
+}
+function expandableEvidence(value){
+  const text=String(value||"—").trim();
+  if(text.length<=180)return esc(text);
+  return `<details class="evidence-details"><summary>${esc(text.slice(0,180).trim())}…</summary><div>${esc(text)}</div></details>`;
+}
+function optionDisplay(contract){
+  const type=contract.option_type==="put"?"看跌 Put":contract.option_type==="call"?"看涨 Call":"期权";
+  return `${contract.underlying||"—"} ${type} · ${contract.expiration_date||"—"} · $${contract.strike_price??"—"}`;
+}
+function orderStatusLabel(status){
+  return ({created:"已创建",submitted_to_paper_broker:"已提交模拟券商",open:"等待成交",partially_filled:"部分成交",filled:"已成交",cancelled:"已取消",expired:"已过期",rejected:"已拒绝"})[status]||status||"未知";
+}
+function orderStatusKind(status){
+  if(status==="filled")return "good";
+  if(["rejected","expired","cancelled"].includes(status))return status==="cancelled"?"":"bad";
+  return openOrderStatuses.has(status)?"warn":"";
+}
+function collectPositions(state){
+  const rows=[];
+  const allocator=state.ai_instrument_allocator||{},ai=state.ai_gated||{};
+  const addEquity=(items,account,strategy,mandates=[])=>array(items).forEach(position=>{
+    const mandate=array(mandates).find(item=>item.ticker===position.symbol&&item.status==="open")||{};
+    rows.push({account,strategy,instrument:"股票",symbol:position.symbol||"—",direction:"看涨 Long",quantity:position.quantity,average:position.average_price,cost:number(position.quantity)*number(position.average_price),pnl:position.unrealized_pnl,opened:position.opened_at,status:"持有中",exit:humanReason((position.exit_evaluation||{}).reason||mandate.invalidation_condition||mandate.planned_exit_at||"退出模块持续监控")});
+  });
+  const addOptions=(items,account,strategy,mandates=[])=>array(items).forEach(position=>{
+    const contract=position.contract||{},mandate=array(mandates).find(item=>item.ticker===contract.underlying&&item.status==="open")||{};
+    rows.push({account,strategy,instrument:contract.option_type==="put"?"看跌 Put":"看涨 Call",symbol:optionDisplay(contract),direction:contract.option_type==="put"?"看跌":"看涨",quantity:position.quantity,average:position.average_price,cost:number(position.quantity)*number(position.average_price)*number(contract.multiplier||100),pnl:position.unrealized_pnl,opened:position.opened_at,status:"持有中",exit:humanReason(mandate.invalidation_condition||mandate.planned_exit_at||"退出模块持续监控")});
+  });
+  addEquity(state.positions,"旧 $2,000 账本","股票/旧策略");
+  addOptions(state.option_positions,"旧 $2,000 账本","方向期权");
+  addEquity(ai.positions,"旧 AI sleeve","旧 AI Gated");
+  addOptions(ai.option_positions,"旧 AI sleeve","旧 AI Gated");
+  addEquity(allocator.positions,"$10,000 allocator","AI 工具分配器",allocator.mandates);
+  addOptions(allocator.option_positions,"$10,000 allocator","AI 工具分配器",allocator.mandates);
+  return rows;
+}
+function collectOrders(state){
+  const rows=[];
+  const addEquity=(items,account,strategy)=>array(items).forEach(order=>rows.push({account,strategy,instrument:"股票",symbol:order.symbol||"—",action:order.side==="sell"?"卖出":"买入",quantity:order.quantity,price:order.average_fill_price??order.limit_price,status:order.status,time:order.submitted_at||order.created_at,reason:order.reject_reason||order.thesis||"—"}));
+  const addOptions=(items,account,strategy)=>array(items).forEach(order=>rows.push({account,strategy,instrument:(order.contract||{}).option_type==="put"?"看跌 Put":"看涨 Call",symbol:optionDisplay(order.contract||{}),action:order.intent==="sell_to_close"?"卖出平仓":"买入开仓",quantity:order.quantity,price:order.average_fill_price??order.limit_price,status:order.status,time:order.submitted_at||order.created_at,reason:order.reject_reason||order.thesis||"—"}));
+  addEquity(state.orders,"旧 $2,000 账本","股票/旧策略");
+  addOptions(state.option_orders,"旧 $2,000 账本","方向期权");
+  const ai=state.ai_gated||{};addEquity(ai.orders,"旧 AI sleeve","旧 AI Gated");addOptions(ai.option_orders,"旧 AI sleeve","旧 AI Gated");
+  const allocator=state.ai_instrument_allocator||{};addEquity(allocator.orders,"$10,000 allocator","AI 工具分配器");addOptions(allocator.option_orders,"$10,000 allocator","AI 工具分配器");
+  return rows.sort((left,right)=>String(right.time||"").localeCompare(String(left.time||"")));
+}
+function positionTable(rows){
+  const body=rows.map(row=>`<tr data-record-type="position"><td data-label="账户"><strong>${esc(row.account)}</strong><div class="small muted">${esc(row.strategy)}</div></td><td data-label="标的"><strong>${esc(row.symbol)}</strong><div class="small muted">${esc(row.instrument)} · ${esc(row.direction)}</div></td><td data-label="数量" class="num">${esc(row.quantity)}</td><td data-label="平均成本" class="num">${money(row.average)}<div class="small muted">占用 ${money(row.cost)}</div></td><td data-label="未实现 PnL" class="num ${tone(row.pnl)}">${row.pnl==null?"暂无估值":signedMoney(row.pnl)}</td><td data-label="状态">${statusBadge(row.status,"good")}</td><td data-label="退出计划" class="reason">${esc(row.exit)}<div class="small muted">开仓 ${localDateTime(row.opened)}</div></td></tr>`).join("");
+  return `<div class="table-wrap"><table class="mobile-table"><thead><tr><th>账户</th><th>标的与方向</th><th>数量</th><th>平均成本</th><th>未实现 PnL</th><th>状态</th><th>退出计划</th></tr></thead><tbody>${body||'<tr><td colspan="7" class="muted">当前没有持仓。</td></tr>'}</tbody></table></div>`;
+}
+function orderTable(rows,emptyText){
+  const body=rows.slice(0,20).map(row=>`<tr data-record-type="order"><td data-label="账户"><strong>${esc(row.account)}</strong><div class="small muted">${esc(row.strategy)}</div></td><td data-label="标的"><strong>${esc(row.symbol)}</strong><div class="small muted">${esc(row.instrument)}</div></td><td data-label="动作">${esc(row.action)}</td><td data-label="数量" class="num">${esc(row.quantity)}</td><td data-label="价格" class="num">${money(row.price)}</td><td data-label="状态">${statusBadge(orderStatusLabel(row.status),orderStatusKind(row.status))}</td><td data-label="时间与原因" class="reason">${expandableEvidence(humanReason(row.reason))}<div class="small muted">${localDateTime(row.time)}</div></td></tr>`).join("");
+  return `<div class="table-wrap"><table class="mobile-table"><thead><tr><th>账户</th><th>标的</th><th>动作</th><th>数量</th><th>价格</th><th>状态</th><th>时间与原因</th></tr></thead><tbody>${body||`<tr><td colspan="7" class="muted">${esc(emptyText)}</td></tr>`}</tbody></table></div>`;
+}
+function renderPortfolio(state){
+  const positions=collectPositions(state),orders=collectOrders(state),openOrders=orders.filter(order=>openOrderStatuses.has(order.status)),history=orders.filter(order=>!openOrderStatuses.has(order.status));
+  document.getElementById("view-portfolio").className="";
+  document.getElementById("view-portfolio").innerHTML=`<div class="page-heading"><div><h2>持仓与订单</h2><p>订单只有成交后才会成为持仓；两套账户不会合并。</p></div><div class="asof">${positions.length} 个持仓 · ${openOrders.length} 笔未完成订单</div></div>
+    <section class="section-block"><div class="section-head"><div><h3>当前持仓</h3><p>股票和期权统一展示，账户归属保持独立。</p></div>${statusBadge(positions.length+" 个",positions.length?"info":"")}</div>${positionTable(positions)}</section>
+    <section class="section-block"><div class="section-head"><div><h3>未完成订单</h3><p>已创建、已提交、等待成交和部分成交均不计为完整持仓。</p></div>${statusBadge(openOrders.length+" 笔",openOrders.length?"warn":"good")}</div>${orderTable(openOrders,"当前没有等待成交的订单。")}</section>
+    <section class="section-block"><details class="history-details"><summary>最近订单记录 · ${history.length} 笔<span>展开查看最近 20 笔已成交、拒绝、取消或过期订单。</span></summary>${orderTable(history,"尚无已结束订单。")}</details></section>`;
+}
+function strategyDetailRows(state){
+  const b=state.beginner_summary||{},lines=b.strategy_lines||{},metrics=state.metrics||{},metricLines=metrics.lines||{},ai=state.ai_gated||{},allocator=state.ai_instrument_allocator||{},news=state.news_drift||{};
+  const latestCandidate=array(state.candidates).slice().sort((a,b)=>number(b.score)-number(a.score))[0]||{};
+  const latestOption=array(state.option_decisions).slice().sort((a,b)=>Math.max(number(b.call_score),number(b.put_score))-Math.max(number(a.call_score),number(a.put_score)))[0]||{};
+  const latestAi=array(ai.decisions).slice(-1)[0]||{},latestAllocation=allocator.latest_allocation||{},newsMetrics=news.metrics||{},newsNext=(((newsMetrics.horizons||{}).next_close||{}).portfolio_day)||{};
+  return [
+    {name:"weighted_relative_strength_v2",label:"股票加权",mode:(state.strategy_modes||{}).weighted_relative_strength_v2==="shadow_only"?"只观察":"模拟交易",kind:"info",account:"旧 $2,000",decisions:(lines.equity||{}).watchlist_count,entries:(lines.equity||{}).entries,closed:(metricLines.equity||{}).closed_trade_count,pnl:(metricLines.equity||{}).net_pnl,win:(metricLines.equity||{}).win_rate,reason:firstReason(latestCandidate.reasons,latestCandidate.action==="buy"?"最近候选达到技术门槛":"暂无候选")},
+    {name:"long_directional_options_v2_weighted",label:"方向期权",mode:(state.strategy_modes||{}).long_directional_options_v2_weighted_new_entries?"模拟交易":"只管理旧仓",kind:"warn",account:"旧 $2,000",decisions:(lines.options||{}).direction_evaluations,entries:(lines.options||{}).orders,closed:(metricLines.options||{}).closed_trade_count,pnl:(metricLines.options||{}).net_pnl,win:(metricLines.options||{}).win_rate,reason:firstReason(latestOption.reasons,"最近没有通过合约筛选")},
+    {name:"ai_gated_technical_v1",label:"旧 AI Gated",mode:(state.strategy_modes||{}).ai_gated_technical_v1_new_entries?"模拟交易":"只管理旧仓",kind:"warn",account:"旧 AI sleeve",decisions:(lines.ai||{}).cycles,entries:(ai.metrics||{}).entry_count,closed:(ai.metrics||{}).closed_trade_count,pnl:(ai.metrics||{}).net_pnl,win:(ai.metrics||{}).win_rate,reason:humanReason((latestAi.execution||{}).reason||(latestAi.decision||{}).no_trade_reason||(latestAi.decision||{}).thesis||"暂无最近决策")},
+    {name:"ai_instrument_allocator_v1",label:"AI 工具分配器",mode:String((state.strategy_modes||{}).ai_instrument_allocator_v1||"").includes("paper")?"模拟交易":"未启用",kind:"good",account:"$10,000 allocator",decisions:array(allocator.decisions).length,entries:(allocator.metrics||{}).entry_count,closed:(allocator.metrics||{}).closed_trade_count,pnl:(allocator.metrics||{}).net_pnl??(allocator.metrics||{}).realized_pnl,win:(allocator.metrics||{}).win_rate,reason:humanReason(latestAllocation.reason||((latestAllocation.selected_instrument||{}).ticker?"已选择工具，等待执行或持仓管理":"最近没有选择可执行工具"))},
+    {name:"llm_news_drift_v1",label:"新闻漂移实验",mode:"只观察",kind:"info",account:"不进入账户",decisions:newsMetrics.proposal_count,entries:0,closed:newsMetrics.valid_return_label_count,pnl:null,win:newsNext.hit_rate,reason:newsMetrics.profitability||"insufficient_forward_evidence"},
+  ];
+}
+function renderStrategies(state){
+  const rows=strategyDetailRows(state).map(row=>`<tr><td data-label="策略"><strong>${esc(row.label)}</strong><div class="small muted">${esc(row.name)}</div></td><td data-label="状态">${statusBadge(row.mode,row.kind)}</td><td data-label="账户">${esc(row.account)}</td><td data-label="决策" class="num">${row.decisions??"—"}</td><td data-label="入场" class="num">${row.entries??"—"}</td><td data-label="平仓" class="num">${row.closed??"—"}</td><td data-label="累计 PnL" class="num ${tone(row.pnl)}">${signedMoney(row.pnl)}</td><td data-label="胜率" class="num">${row.win==null?"—":pct(number(row.win)*100)}</td><td data-label="最近结论" class="reason">${esc(row.reason)}</td></tr>`).join("");
+  document.getElementById("view-strategies").className="";
+  document.getElementById("view-strategies").innerHTML=`<div class="page-heading"><div><h2>策略表现</h2><p>同一行比较权限、账户、交易数量和结果；影子实验不会混入账户 PnL。</p></div></div>
+    <section class="section-block"><div class="table-wrap"><table class="mobile-table"><thead><tr><th>策略</th><th>当前模式</th><th>账户</th><th>决策</th><th>入场</th><th>平仓</th><th>累计 PnL</th><th>胜率</th><th>最近结论</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="definition-grid"><div class="definition"><strong>胜率</strong><span>盈利交易数除以已平仓交易数，不能单独代表是否赚钱。</span></div><div class="definition"><strong>累计 PnL</strong><span>已实现盈利减去亏损和模拟执行成本。</span></div><div class="definition"><strong>只管理旧仓</strong><span>停止新增入场，但原有持仓继续执行止盈、止损和期限退出。</span></div></div></section>`;
+}
+function renderAiDecisions(state){
+  const allocator=state.ai_instrument_allocator||{},allocation=allocator.latest_allocation||{},selected=allocation.selected_instrument||{},decisions=array(allocator.decisions).slice().reverse().slice(0,12);
+  const decisionRows=decisions.map(item=>{const signal=item.signal||{},challenge=item.challenge||{};return `<tr><td data-label="时间" class="num">${localDateTime(item.asof)}</td><td data-label="股票"><strong>${esc(item.ticker)}</strong></td><td data-label="研究阶段">${esc(({overnight:"晚间研究",premarket_update:"盘前更新",preopen_revalidation:"开盘前复核",open_execution:"开盘执行",intraday:"盘中研究"})[item.stage]||item.stage)}</td><td data-label="方向">${esc(signal.action||"no_trade")}</td><td data-label="期限">${esc(signal.horizon||"—")}</td><td data-label="Challenge">${challenge.veto_recommended?statusBadge("建议否决","bad"):statusBadge(challenge.recommendation||"已检查","info")}</td><td data-label="结构化结论" class="reason">${expandableEvidence(signal.thesis||signal.no_trade_reason||"—")}</td></tr>`}).join("");
+  const catalystRows=array(state.catalyst_decisions).slice().reverse().slice(0,6).map(item=>{const bull=item.bull_news||{},challenge=item.challenge||{},decision=item.decision||{};return `<tr><td data-label="时间" class="num">${localDateTime(item.asof)}</td><td data-label="股票"><strong>${esc(item.ticker)}</strong><div class="small muted">${esc(item.instrument||"—")}</div></td><td data-label="Bull / News" class="reason">${expandableEvidence(bull.catalyst_summary||"没有保存催化摘要")}</td><td data-label="Challenge" class="reason">${expandableEvidence(firstReason(challenge.objections,challenge.veto_recommended?"建议否决":"未提出关键反对"))}</td><td data-label="Decision" class="reason">${expandableEvidence(decision.thesis||decision.no_trade_reason||"—")}</td><td data-label="Python 风控">${statusBadge(item.risk_approved?"通过":"拒绝",item.risk_approved?"good":"bad")}<div class="small muted">${expandableEvidence(humanReason(item.risk_reason))}</div></td></tr>`}).join("");
+  const candidateRows=array(state.candidates).slice().sort((a,b)=>number(b.score)-number(a.score)).slice(0,8).map(item=>`<tr><td data-label="股票"><strong>${esc(item.ticker)}</strong></td><td data-label="综合分" class="num">${(number(item.score)*100).toFixed(1)}</td><td data-label="入场线" class="num">${(number(item.minimum_entry_score)*100).toFixed(1)}</td><td data-label="系统动作">${statusBadge(item.action==="buy"?"候选":"不交易",item.action==="buy"?"good":"warn")}</td><td data-label="原因" class="reason">${esc(firstReason(item.reasons,item.action==="buy"?"达到候选门槛":"暂无原因"))}</td></tr>`).join("");
+  const selectedLabel=selected.ticker?`${selected.ticker} · ${selected.instrument_type==="put"?"看跌 Put":selected.instrument_type==="call"?"看涨 Call":"股票"}`:"尚未选择工具";
+  document.getElementById("view-ai").className="";
+  document.getElementById("view-ai").innerHTML=`<div class="page-heading"><div><h2>AI 决策</h2><p>模型负责结构化研究；只有确定性 Python 风控可以批准模拟执行。</p></div><div class="asof">私有推理原文不会显示</div></div>
+    <section class="section-block"><div class="section-head"><div><h3>决策流水线</h3><p>每一步都使用同一 data cutoff，不允许未来数据。</p></div></div><div class="pipeline"><div class="pipeline-step"><strong>1. 候选</strong><span>技术和事件发现</span></div><div class="pipeline-step"><strong>2. Exa 证据</strong><span>新闻与原始来源</span></div><div class="pipeline-step"><strong>3. DeepSeek</strong><span>结构化方向判断</span></div><div class="pipeline-step"><strong>4. Challenge</strong><span>反证与否决建议</span></div><div class="pipeline-step"><strong>5. Python 风控</strong><span>最终 veto 权</span></div></div></section>
+    <section class="section-block"><div class="section-head"><div><h3>最近一次工具分配</h3><p>$10,000 独立模拟账户与 $2,000 可负担性对照。</p></div>${statusBadge(allocation.status||"暂无分配",allocation.status==="selected"?"good":"warn")}</div><div class="stat-strip"><div class="stat"><div class="stat-label">选中工具</div><div class="stat-value">${esc(selectedLabel)}</div></div><div class="stat"><div class="stat-label">数量</div><div class="stat-value">${selected.quantity??"—"}</div></div><div class="stat"><div class="stat-label">保守情景净收益</div><div class="stat-value ${tone(selected.conservative_net_return_pct)}">${selected.conservative_net_return_pct==null?"—":pct(number(selected.conservative_net_return_pct)*100)}</div></div><div class="stat"><div class="stat-label">概率 EV</div><div class="stat-value">${allocation.probability_ev_available?money(allocation.probability_ev_usd):"未校准，不展示"}</div></div></div></section>
+    <section class="section-block"><div class="section-head"><div><h3>Allocator 结构化决策</h3><p>最多显示最近 12 条研究结论。</p></div></div><div class="table-wrap"><table class="mobile-table"><thead><tr><th>时间</th><th>股票</th><th>研究阶段</th><th>方向</th><th>期限</th><th>Challenge</th><th>结构化结论</th></tr></thead><tbody>${decisionRows||'<tr><td colspan="7" class="muted">尚无 allocator 决策。</td></tr>'}</tbody></table></div></section>
+    <section class="section-block"><div class="section-head"><div><h3>Exa + DeepSeek 催化研究</h3><p>Bull / News、Challenge、Decision 与确定性 Python 风控分栏展示。</p></div></div><div class="table-wrap"><table class="mobile-table"><thead><tr><th>时间</th><th>股票</th><th>Bull / News</th><th>Challenge</th><th>Decision</th><th>Python 风控</th></tr></thead><tbody>${catalystRows||'<tr><td colspan="6" class="muted">尚无新的催化决策。</td></tr>'}</tbody></table></div></section>
+    <section class="section-block"><div class="section-head"><div><h3>最近候选排名</h3><p>这是研究入口，不代表已经创建订单。</p></div></div><div class="table-wrap"><table class="mobile-table"><thead><tr><th>股票</th><th>综合分</th><th>入场线</th><th>系统动作</th><th>原因</th></tr></thead><tbody>${candidateRows||'<tr><td colspan="5" class="muted">尚无候选排名。</td></tr>'}</tbody></table></div></section>`;
+}
+function healthRows(state){
+  const heartbeat=state.heartbeat||{},summary=state.beginner_summary||{},ops=summary.operations||{},news=state.news_drift||{},jobs=((heartbeat.payload||{}).latest_jobs)||{},rows=[];
+  const add=(component,status,detail,kind)=>rows.push({component,status,detail,kind});
+  add("Paper-only 安全边界",(state.mode||{}).paper&&!(state.mode||{}).live_trading?"正常":"异常","paper=true · live_trading=false · 页面无写入入口",(state.mode||{}).paper&&!(state.mode||{}).live_trading?"good":"bad");
+  const service=heartbeat.effective_status||"unknown";add("Forward service",serviceLabels[service]||service,heartbeat.last_heartbeat_at?`最近心跳 ${localDateTime(heartbeat.last_heartbeat_at)}`:"没有心跳时间",service==="ok"?"good":service==="degraded"?"warn":service==="unknown"?"":"bad");
+  const jobValues=Object.values(jobs),failed=jobValues.filter(job=>["failed","timed_out"].includes((job||{}).status)).length;add("Scheduler",failed?`${failed} 个最近作业异常`:"最近作业正常",`${jobValues.length} 个受监督作业有最近状态`,failed?"bad":"good");
+  add("市场数据",heartbeat.stale?"数据过期":"时间戳新鲜",heartbeat.age_seconds==null?"没有可用时间戳":`心跳年龄 ${number(heartbeat.age_seconds).toFixed(0)} 秒`,heartbeat.stale?"bad":"good");
+  add("Robinhood 权限边界","只读",(state.mode||{}).live_trading?"检测到 live_trading=true":"dashboard 不导入 broker adapter，也没有真实下单方法",(state.mode||{}).live_trading?"bad":"good");
+  add("Exa 新闻发现",(news.latest_cycle||{}).event?"有最近周期":"暂无最近周期",(news.latest_cycle||{}).ts?`最近 ${localDateTime(news.latest_cycle.ts)}`:"等待新的 discovery cycle",(news.latest_cycle||{}).event?"good":"");
+  add("DeepSeek 调用",ops.llm_errors?`${ops.llm_errors} 次历史错误`:"最近交易日无记录错误",`${ops.llm_calls||0} 次调用 · 估算成本 $${number(ops.estimated_api_cost_usd).toFixed(4)}`,ops.llm_errors?"warn":"good");
+  add("审计与真实下单","只追加 / 未调用",`最近交易日记录 ${ops.runtime_jobs||0} 个作业；dashboard 只读`,"good");
+  return rows;
+}
+function renderHealth(state){
+  const b=state.beginner_summary||{},ops=b.operations||{},heartbeat=state.heartbeat||{},jobs=((heartbeat.payload||{}).latest_jobs)||{};
+  const componentRows=healthRows(state).map(row=>`<tr><td data-label="组件"><strong>${esc(row.component)}</strong></td><td data-label="状态">${statusBadge(row.status,row.kind)}</td><td data-label="说明" class="reason">${esc(row.detail)}</td></tr>`).join("");
+  const jobRows=Object.entries(jobs).map(([name,job])=>`<tr><td data-label="作业"><strong>${esc(name)}</strong></td><td data-label="状态">${statusBadge((job||{}).status||"未知",["failed","timed_out"].includes((job||{}).status)?"bad":(job||{}).status==="completed"?"good":"warn")}</td><td data-label="完成时间" class="num">${localDateTime((job||{}).finished_at||(job||{}).ts)}</td><td data-label="安全摘要" class="reason">${esc(humanReason((job||{}).error||(job||{}).reason||"最近一次作业已保存状态"))}</td></tr>`).join("");
+  const issues=array(b.issues),issueRows=issues.map(issue=>`<div class="issue ${issue.severity==="error"?"error":""}"><span class="issue-mark"></span><div><div class="issue-title">${esc(issue.title)}</div><div class="issue-copy">影响：${esc(issue.impact)}<br>处理记录：${esc(issue.resolution)}</div></div><span class="issue-count">${issue.count||0} 次</span></div>`).join("");
+  document.getElementById("view-health").className="";
+  document.getElementById("view-health").innerHTML=`<div class="page-heading"><div><h2>系统健康</h2><p>当前状态与历史计数分开展示；历史故障不等于此刻仍在失败。</p></div><div class="asof">心跳 ${localDateTime(heartbeat.last_heartbeat_at)}</div></div>
+    <section class="section-block"><div class="section-head"><div><h3>当前组件状态</h3><p>这里优先回答现在是否有问题。</p></div></div><div class="table-wrap"><table class="mobile-table"><thead><tr><th>组件</th><th>状态</th><th>说明</th></tr></thead><tbody>${componentRows}</tbody></table></div></section>
+    <section class="section-block"><div class="section-head"><div><h3>最近调度作业</h3><p>只显示 heartbeat 中每个作业的最近一次状态。</p></div></div><div class="table-wrap"><table class="mobile-table"><thead><tr><th>作业</th><th>状态</th><th>完成时间</th><th>安全摘要</th></tr></thead><tbody>${jobRows||'<tr><td colspan="4" class="muted">没有可用的最近作业状态。</td></tr>'}</tbody></table></div></section>
+    <section class="section-block"><div class="section-head"><div><h3>最近交易日历史事件</h3><p>${esc(b.session_date||"—")} 的累计计数，仅用于复盘，不表示当前仍在故障。</p></div>${statusBadge(issues.length?issues.length+" 类":"无",issues.length?"warn":"good")}</div><div class="issue-list">${issueRows||'<div class="clear-state" style="padding:12px 0">最近交易日没有记录运行异常。</div>'}</div></section>
+    <section class="section-block"><div class="stat-strip"><div class="stat"><div class="stat-label">受监督作业</div><div class="stat-value">${ops.runtime_jobs||0}</div></div><div class="stat"><div class="stat-label">历史失败作业</div><div class="stat-value ${ops.failed_jobs?"bad-text":""}">${ops.failed_jobs||0}</div></div><div class="stat"><div class="stat-label">模型调用</div><div class="stat-value">${ops.llm_calls||0}</div></div><div class="stat"><div class="stat-label">估算 API 成本</div><div class="stat-value">$${number(ops.estimated_api_cost_usd).toFixed(4)}</div></div></div></section>`;
 }
 function activateTab(id,updateHash=true){
   const active=TAB_IDS.includes(id)?id:"overview";
@@ -1651,7 +1818,7 @@ async function refresh(){
     const response=await fetch("/api/state",{cache:"no-store"});
     if(!response.ok)throw new Error("HTTP "+response.status);
     const state=await response.json();
-    renderHeader(state);renderOverview(state);
+    renderHeader(state);renderOverview(state);renderPortfolio(state);renderStrategies(state);renderAiDecisions(state);renderHealth(state);
   }catch(error){
     document.getElementById("view-overview").innerHTML=`<div class="error-box"><strong>无法读取本地状态</strong><div>${esc(error.message||error)}</div></div>`;
   }finally{refreshInFlight=false}
@@ -1665,6 +1832,32 @@ refresh();setInterval(refresh,REFRESH_INTERVAL_MS);
 
 def make_handler(root: Path) -> type[BaseHTTPRequestHandler]:
     class DashboardHandler(BaseHTTPRequestHandler):
+        def do_HEAD(self) -> None:  # noqa: N802
+            path = urlparse(self.path).path
+            if path == "/api/state":
+                status = HTTPStatus.OK
+                content_type = "application/json; charset=utf-8"
+            elif path == "/":
+                status = HTTPStatus.OK
+                content_type = "text/html; charset=utf-8"
+            elif path == "/favicon.ico":
+                status = HTTPStatus.NO_CONTENT
+                content_type = "image/x-icon"
+            else:
+                status = HTTPStatus.NOT_FOUND
+                content_type = "text/plain; charset=utf-8"
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+
+        def do_OPTIONS(self) -> None:  # noqa: N802
+            self.send_response(HTTPStatus.NO_CONTENT)
+            self.send_header("Allow", "GET, HEAD, OPTIONS")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
         def do_GET(self) -> None:  # noqa: N802
             path = urlparse(self.path).path
             if path == "/api/state":

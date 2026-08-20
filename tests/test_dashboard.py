@@ -78,7 +78,26 @@ def test_dashboard_state_explains_deterministic_rejection_and_paper_boundary(pap
 def test_dashboard_handler_exposes_only_read_routes(paper_root):
     handler = make_handler(paper_root)
     assert handler.__name__ == "DashboardHandler"
-    assert not hasattr(handler, "do_POST")
+    assert hasattr(handler, "do_GET")
+    assert hasattr(handler, "do_HEAD")
+    assert hasattr(handler, "do_OPTIONS")
+    for method in ("do_POST", "do_PUT", "do_PATCH", "do_DELETE"):
+        assert not hasattr(handler, method)
+
+
+def test_dashboard_options_route_advertises_only_read_methods(paper_root):
+    handler_type = make_handler(paper_root)
+    handler = object.__new__(handler_type)
+    responses = []
+    headers = []
+    handler.send_response = lambda status: responses.append(status)
+    handler.send_header = lambda name, value: headers.append((name, value))
+    handler.end_headers = lambda: None
+
+    handler.do_OPTIONS()
+
+    assert responses == [204]
+    assert ("Allow", "GET, HEAD, OPTIONS") in headers
 
 
 def test_dashboard_page_has_five_accessible_operational_tabs():
@@ -117,6 +136,46 @@ def test_dashboard_page_keeps_explicit_paper_only_boundary():
     assert "仅使用假钱模拟" in _BEGINNER_PAGE
     assert "不会调用真实下单工具" in _BEGINNER_PAGE
     assert "模拟交易控制台" in _BEGINNER_PAGE
+
+
+def test_dashboard_page_renders_all_operational_detail_views():
+    for function_name in (
+        "renderPortfolio",
+        "renderStrategies",
+        "renderAiDecisions",
+        "renderHealth",
+    ):
+        assert f"function {function_name}(state)" in _BEGINNER_PAGE
+        assert f"{function_name}(state)" in _BEGINNER_PAGE
+    assert 'data-record-type="position"' in _BEGINNER_PAGE
+    assert 'data-record-type="order"' in _BEGINNER_PAGE
+    assert "只管理旧仓" in _BEGINNER_PAGE
+    assert "确定性 Python 风控" in _BEGINNER_PAGE
+    assert "当前组件状态" in _BEGINNER_PAGE
+    assert "最近交易日历史事件" in _BEGINNER_PAGE
+
+
+def test_dashboard_page_keeps_private_reasoning_out_of_rendering():
+    assert "reasoning_content" not in _BEGINNER_PAGE
+    assert "private chain-of-thought" not in _BEGINNER_PAGE.lower()
+
+
+def test_dashboard_page_has_mobile_labeled_operational_rows():
+    assert 'class="mobile-table"' in _BEGINNER_PAGE
+    assert 'data-label="账户"' in _BEGINNER_PAGE
+    assert 'data-label="状态"' in _BEGINNER_PAGE
+    assert "table.mobile-table thead" in _BEGINNER_PAGE
+
+
+def test_dashboard_page_collapses_long_ai_evidence_by_default():
+    assert "function expandableEvidence(value)" in _BEGINNER_PAGE
+    assert "evidence-details" in _BEGINNER_PAGE
+    assert "slice().reverse().slice(0,6)" in _BEGINNER_PAGE
+
+
+def test_dashboard_page_collapses_completed_order_history_by_default():
+    assert '<details class="history-details">' in _BEGINNER_PAGE
+    assert '<details class="history-details" open>' not in _BEGINNER_PAGE
 
 
 def test_dashboard_ignores_client_disconnect_during_response(paper_root):
