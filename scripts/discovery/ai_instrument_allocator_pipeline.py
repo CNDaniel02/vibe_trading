@@ -514,21 +514,31 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                 "reason": f"fresh executable data failed closed: {type(exc).__name__}: {exc}",
                 "order": None,
             }
+        execution_now = max(
+            [
+                parse_ts(now),
+                parse_ts(quote.asof),
+                *(
+                    parse_ts(option_quote.updated_at)
+                    for _, option_quote in option_candidates
+                ),
+            ]
+        ).isoformat()
         allocation = allocate_instrument(
             signal,
             quote,
             option_candidates,
             account_state,
             self.config,
-            now,
+            execution_now,
         )
         allocation.update(
             {
                 "plan_id": plan["plan_id"],
-                "decision_time": now,
-                "data_cutoff_time": max(parse_ts(now), parse_ts(quote.asof)).isoformat(),
+                "decision_time": execution_now,
+                "data_cutoff_time": execution_now,
                 "entry_authorization_valid_until": (
-                    parse_ts(now)
+                    parse_ts(execution_now)
                     + timedelta(
                         seconds=int(self.profile.get("max_entry_validity_seconds", 300))
                     )
@@ -547,7 +557,7 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                 self.root,
                 f"strategy_sleeves/{self.namespace}/short_equity_counterfactual.jsonl",
                 {
-                    "decision_time": now,
+                    "decision_time": execution_now,
                     "plan_id": plan["plan_id"],
                     **allocation["short_equity_counterfactual"],
                 },
@@ -557,7 +567,7 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
             return {"status": "no_trade", "reason": allocation.get("reason"), "allocation": allocation, "order": None}
 
         planned_exit_at = planned_exit_time(
-            now,
+            execution_now,
             signal["horizon"],
             max_holding_trading_days=int(signal.get("max_holding_trading_days", 1)),
             minutes_before_close=int(self.config["paper"].get("exit_before_close_minutes", 10)),
@@ -576,11 +586,11 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                 planned_stop_price=float(selected["planned_stop_price"]),
                 signal_horizon=signal["horizon"],
                 idempotency_key=f"{self.STRATEGY}:{plan['plan_id']}:equity:{ticker}",
-                now=now,
+                now=execution_now,
             )
             exposure_id = f"equity:{ticker}"
-            self._register_mandate(order.order_id, exposure_id, selected["instrument_type"], signal, plan, planned_exit_at, selected.get("planned_stop_price"), now)
-            submitted = self.broker.submit_order(order, quote, now)
+            self._register_mandate(order.order_id, exposure_id, selected["instrument_type"], signal, plan, planned_exit_at, selected.get("planned_stop_price"), execution_now)
+            submitted = self.broker.submit_order(order, quote, execution_now)
         else:
             candidate = next(
                 (
@@ -605,21 +615,21 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                 strategy=self.STRATEGY,
                 signal_horizon=signal["horizon"],
                 idempotency_key=f"{self.STRATEGY}:{plan['plan_id']}:option:{contract.option_id}",
-                now=now,
+                now=execution_now,
             )
             exposure_id = f"option:{contract.option_id}"
-            self._register_mandate(order.order_id, exposure_id, selected["instrument_type"], signal, plan, planned_exit_at, None, now)
-            submitted = self.option_broker.submit_order(order, option_quote, now)
+            self._register_mandate(order.order_id, exposure_id, selected["instrument_type"], signal, plan, planned_exit_at, None, execution_now)
+            submitted = self.option_broker.submit_order(order, option_quote, execution_now)
         self.mandates.reconcile(
             equity_orders=self.broker.store.orders(),
             option_orders=self.option_broker.store.orders(),
-            now=now,
+            now=execution_now,
         )
         self.plans.set_plan_status(
             str(plan["plan_id"]),
             "executed" if submitted.status in {"filled", "open", "partially_filled"} else "rejected",
             reason=submitted.reject_reason,
-            now=now,
+            now=execution_now,
         )
         return {
             "status": submitted.status,

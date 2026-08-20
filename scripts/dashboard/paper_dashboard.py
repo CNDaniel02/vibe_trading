@@ -1308,10 +1308,12 @@ function strategies(d){
 }
 function allocator(d){
   const a=d.ai_instrument_allocator||{},m=a.metrics||{},allocation=a.latest_allocation||{},selected=allocation.selected_instrument||{},cf=allocation.counterfactual_2000||{},short=a.short_equity_counterfactual||{},mandates=a.mandates||[],plans=a.plans||[],costs=m.execution_cost_decomposition||{};
+  const stageLabel={overnight:"晚间完整研究",premarket_update:"盘前更新",preopen_revalidation:"开盘前复核",open_execution:"开盘后执行复核",intraday:"盘中研究"};
+  const horizonLabel={intraday_close:"当天收盘前",next_close:"下一交易日收盘前",two_to_five_days:"持有 2 至 5 个交易日"};
   const instrument=selected.instrument_type==="equity"?"股票":selected.instrument_type==="call"?"看涨 Call":selected.instrument_type==="put"?"看跌 Put":"尚未选中";
   const affordability=allocation.counterfactual_2000==null?"尚无可比较的已选工具":cf.affordable?`同一工具可负担，最多 ${esc(cf.max_affordable_quantity)} 单位`:`同一工具不可负担：${esc(cf.rejection_reason||"超过风险预算")}`;
-  const rows=(a.decisions||[]).slice().reverse().slice(0,6).map(x=>{const s=x.signal||{};return `<tr><td>${localTime(x.asof)}</td><td><strong>${esc(x.ticker)}</strong></td><td>${esc(x.stage)}</td><td>${esc(s.horizon||"—")}</td><td>${esc(s.action||"—")}</td><td class="reason">${esc(s.thesis||s.no_trade_reason||"—")}</td></tr>`}).join("");
-  return `<section class="band"><div class="band-head"><div><h2>AI Instrument Allocator · 独立 $10,000 模拟账户</h2><p class="muted">先预测指定时间范围的涨跌区间，再由 Python 比较股票、Call 或 Put；模型不能直接下单。</p></div><span class="pill good">独立纸面账户</span></div><div class="band-body">
+  const rows=(a.decisions||[]).slice().reverse().slice(0,6).map(x=>{const s=x.signal||{};return `<tr><td>${localTime(x.asof)}</td><td><strong>${esc(x.ticker)}</strong></td><td>${esc(stageLabel[x.stage]||x.stage||"—")}</td><td>${esc(horizonLabel[s.horizon]||s.horizon||"—")}</td><td>${esc(s.action||"—")}</td><td class="reason">${esc(s.thesis||s.no_trade_reason||"—")}</td></tr>`}).join("");
+  return `<section class="band"><div class="band-head"><div><h2>AI 股票/期权选择器 · 独立 $10,000 模拟账户</h2><p class="muted">先判断指定持有期内可能落入哪个涨跌区间，再由 Python 比较股票、Call 或 Put；模型不能直接下单。</p><p class="small muted">策略编号：ai_instrument_allocator_v1</p></div><span class="pill good">独立纸面账户</span></div><div class="band-body">
     <div class="metrics">
       <div class="metric"><div class="metric-name">当前净值</div><div class="metric-value">${m.ending_equity==null?"尚未初始化":money(m.ending_equity)}</div><div class="metric-note">初始假钱 $10,000</div></div>
       <div class="metric"><div class="metric-name">累计结果</div><div class="metric-value ${tone(m.realized_pnl)}">${m.realized_pnl==null?"—":signedMoney(m.realized_pnl)}</div><div class="metric-note">独立于旧 $2,000 账本</div></div>
@@ -1320,9 +1322,9 @@ function allocator(d){
     </div>
     <div class="advanced-grid" style="margin-top:14px">
       <div><h3>$2,000 可负担性对照</h3><p>${affordability}</p><p class="small muted">只检查 $10,000 分配器已经选中的同一工具，不会重选股票、行权价或到期日。</p></div>
-      <div><h3>看跌影子基准</h3><p>${short.benchmark_name?`${esc(short.ticker)} 的假设直接做空结果只单独记录。`:"最近没有看跌影子记录。"}</p><p class="small muted">不会进入账户、不会创建订单，也不会与 Long Put PnL 合并。</p></div>
-      <div><h3>持仓期限与恢复</h3><p>${mandates.filter(x=>x.status==="open").length} 个有效 mandate · ${plans.filter(x=>x.status==="active").length} 个待执行计划</p><p class="small muted">intraday 当日平仓；next_close 次日平仓；two_to_five_days 按计划持有。缺失 mandate 会安全平仓。</p></div>
-      <div><h3>概率使用边界</h3><p>${allocation.probability_ev_available?"已校准后可显示概率 EV":"原始概率尚未校准，不显示概率 EV"}</p><p class="small muted">当前只把 signed return buckets 当作排序和情景输入。</p></div>
+      <div><h3>假设直接做空的对照（不交易）</h3><p>${short.benchmark_name?`${esc(short.ticker)} 的假设直接做空结果只单独记录。`:"最近没有看跌对照记录。"}</p><p class="small muted">不会进入账户、不会创建订单，也不会与买入 Put 的盈亏合并。</p></div>
+      <div><h3>持仓期限与重启恢复</h3><p>${mandates.filter(x=>x.status==="open").length} 个有效持仓计划 · ${plans.filter(x=>x.status==="active").length} 个待执行计划</p><p class="small muted">可选择当天收盘前、下一交易日收盘前，或持有 2 至 5 个交易日。持仓计划缺失时会安全平仓。</p></div>
+      <div><h3>模型概率目前怎么用</h3><p>${allocation.probability_ev_available?"校准完成后可显示按概率估算的预期收益":"尚未完成概率校准，不显示按概率估算的预期收益"}</p><p class="small muted">当前只用各涨跌区间的原始概率做候选排序和保守情景比较。</p></div>
     </div>
     <div class="table-wrap" style="margin-top:14px"><table><thead><tr><th>时间</th><th>股票</th><th>阶段</th><th>期限</th><th>结论</th><th>简要论点</th></tr></thead><tbody>${rows||'<tr><td colspan="6" class="muted">尚无 allocator 模型决策。</td></tr>'}</tbody></table></div>
   </div></section>`;
@@ -1404,7 +1406,11 @@ def make_handler(root: Path) -> type[BaseHTTPRequestHandler]:
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+                # Browser refreshes can be cancelled while state is rendering.
+                return
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return

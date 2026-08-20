@@ -42,6 +42,22 @@ def test_dashboard_handler_exposes_only_read_routes(paper_root):
     assert not hasattr(handler, "do_POST")
 
 
+def test_dashboard_ignores_client_disconnect_during_response(paper_root):
+    class DisconnectedWriter:
+        def write(self, _body):
+            raise ConnectionAbortedError("browser closed")
+
+    handler_type = make_handler(paper_root)
+    handler = object.__new__(handler_type)
+    handler.path = "/"
+    handler.wfile = DisconnectedWriter()
+    handler.send_response = lambda *_args, **_kwargs: None
+    handler.send_header = lambda *_args, **_kwargs: None
+    handler.end_headers = lambda: None
+
+    handler.do_GET()
+
+
 def test_dashboard_exposes_sanitized_catalyst_decision(paper_root):
     catalyst = {
         "ticker": "IONQ",

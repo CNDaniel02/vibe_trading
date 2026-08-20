@@ -1033,6 +1033,16 @@ class _AllocatorNoOptions:
         return {}
 
 
+class _AllocatorFutureOptionData(_AllocatorNoOptions):
+    def fetch_contract_candidates(self, **_kwargs):
+        contract = _option_contract("aapl-put-future", "2026-08-21", "put")
+        quote = replace(
+            _option_quote("aapl-put-future", bid=1.95, ask=1.96),
+            updated_at="2026-07-13T15:00:05+00:00",
+        )
+        return [(contract, quote)], {"candidate_count": 1}
+
+
 def test_open_execution_uses_saved_plan_without_llm_and_only_new_namespace(
     paper_root: Path,
 ) -> None:
@@ -1076,6 +1086,50 @@ def test_open_execution_uses_saved_plan_without_llm_and_only_new_namespace(
     assert set(pipeline.broker.store.positions()) == {"AAPL"}
     assert pipeline.mandates.for_exposure("equity:AAPL")["status"] == "open"
     assert (paper_root / "state" / "paper_account.json").read_bytes() == legacy_account_before
+
+
+def test_allocator_execution_advances_to_latest_observed_option_quote(
+    paper_root: Path,
+) -> None:
+    from scripts.discovery.ai_instrument_allocator_pipeline import (
+        AiInstrumentAllocatorPipeline,
+    )
+
+    config = load_runtime_config(paper_root)
+    config["strategies"]["ai_instrument_allocator_v1"][
+        "option_minimum_scenario_return_pct"
+    ] = -1
+    tracker = UsageTracker()
+    pipeline = AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=_AllocatorExecutionDiscovery(),
+        news_adapter=_NoNews(),
+        option_data=_AllocatorFutureOptionData(),
+    )
+    pipeline.plans.save_plan(
+        {
+            "plan_id": "future-option-quote-plan",
+            "strategy": "ai_instrument_allocator_v1",
+            "ticker": "AAPL",
+            "created_at": "2026-07-13T14:55:00+00:00",
+            "valid_until": "2026-07-13T15:05:00+00:00",
+            "status": "active",
+            "signal": _bearish_signal(),
+            "snapshot": {"snapshot_id": "future-option-quote-snapshot"},
+        }
+    )
+
+    result = pipeline.run_stage("open_execution", REGULAR_NOW)
+    execution = result["executions"][0]
+
+    assert execution["status"] == "filled"
+    assert execution["order"]["updated_at"] == "2026-07-13T15:00:05+00:00"
+    assert execution["allocation"]["decision_time"] == "2026-07-13T15:00:05+00:00"
+    assert execution["allocation"]["data_cutoff_time"] == "2026-07-13T15:00:05+00:00"
+    assert execution["live_order_tools_called"] is False
 
 
 @pytest.mark.parametrize(
