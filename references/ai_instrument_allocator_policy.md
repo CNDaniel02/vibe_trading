@@ -23,7 +23,8 @@ fills, PnL, journal, or logs to the allocator.
 
 - 20:00 ET: full evidence research and overnight conditional plans;
 - 08:00 ET: active-plan-only incremental evidence update; new evidence runs
-  fast News, Challenge, and Decision without discovery or ranking;
+  fast News, Challenge, and Decision without discovery or ranking. Each call
+  receives the prior signal plus only evidence not present in the prior plan;
 - 09:25 ET: active-plan-only evidence invalidation; new evidence runs fast News
   and Challenge only and may retain or veto, but cannot redirect, a plan;
 - 09:32 ET: fresh-quote execution with no LLM call;
@@ -62,11 +63,20 @@ Decision stage returns exactly one horizon and seven mutually exclusive signed
 return buckets whose sum must equal one within `1e-6`.
 
 Python derives bullish, bearish, neutral, dominant bucket, and conservative
-move. Raw model values are `uncalibrated`; they may rank scenarios but cannot be
-used as real-world probabilities or probability EV. Calibration is isolated by
-horizon and uses expanding walk-forward folds containing only labels that had
-matured before each test decision. Promotion primarily compares out-of-sample
-Brier score and log loss. ECE and reliability curves are diagnostics.
+move. The conservative move is the probability-weighted mean of the weakest
+50% of scenarios within the selected directional mass, not the lower bound of
+the single dominant bucket. Raw model values are `uncalibrated`; they may rank
+scenarios but cannot be used as real-world probabilities or probability EV.
+Calibration is isolated by horizon and uses expanding walk-forward folds
+containing only labels that had matured before each test decision. Promotion
+primarily compares out-of-sample Brier score and log loss. ECE and reliability
+curves are diagnostics.
+
+The API schema intentionally excludes forecast reference fields. After strict
+model validation, Python fixes `forecast_reference_price` and
+`forecast_reference_time` from the immutable quote in the first research
+snapshot. An 08:00 incremental update preserves both fields and the original
+horizon. Missing or future reference data fails closed.
 
 ## Instrument allocation
 
@@ -76,7 +86,25 @@ The option candidate set is bounded across at most three expirations. A spread
 at or below 1.5% is preferred; above 2% is rejected.
 
 Option comparison uses observed top-of-book and scenario repricing across the
-predicted underlying move, elapsed holding time, and configured IV shifts.
+remaining predicted underlying move, elapsed holding time, and configured IV
+shifts. At execution, Python keeps the original forecast target and calculates:
+
+```text
+forecast_target = reference_price * (1 + conservative_move_pct)
+remaining_move = forecast_target / current_price - 1
+```
+
+The old forecast is never re-anchored to the current price. If price has already
+moved through the conservative target, the adverse remaining scenario normally
+causes the executable hurdle to reject the trade.
+
+When a desired-direction option quote has IV, the allocation also records the
+nearest-strike candidate's horizon-scaled market-implied move
+(`IV * sqrt(horizon_days / 365)`), the remaining-forecast/implied-move ratio,
+and whether the remaining forecast exceeds that move. This is an explicit
+market comparison diagnostic, not a probability EV or an independent model
+probability.
+
 Delta, Gamma, Theta, and Vega explain sensitivity; they are not substituted for
 multi-day repricing. Final comparison uses conservative repriced net return,
 break-even move, spread, slippage, and tick cost. Calibration completion does
@@ -122,7 +150,9 @@ events.
 Allocator state and logs stay under the namespaced directories. Decisions save
 decision/data-cutoff timestamps, model/prompt usage, raw signed buckets, and
 calibration metadata. Allocations save all considered executable scenarios,
-the selected instrument, `$2,000` affordability, and separate short benchmark.
+the fixed forecast reference and target, realized and remaining move, market
+implied-move comparison, the selected instrument, `$2,000` affordability, and
+separate short benchmark.
 
 Closed-trade accounting verifies:
 

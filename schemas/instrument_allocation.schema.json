@@ -26,6 +26,52 @@
     "short_equity_counterfactual": {"type": ["object", "null"]},
     "probability_ev_available": {"const": false},
     "probability_ev_usd": {"type": "null"},
-    "raw_probability_used_for_ev": {"const": false}
-  }
+    "raw_probability_used_for_ev": {"const": false},
+    "forecast_reference_price": {"type": "number", "exclusiveMinimum": 0},
+    "forecast_reference_time": {"type": "string", "format": "date-time"},
+    "forecast_conservative_move_pct": {"type": "number"},
+    "forecast_target_price": {"type": "number", "minimum": 0},
+    "realized_move_since_reference_pct": {"type": "number"},
+    "remaining_move_pct": {"type": "number"},
+    "market_implied_move_pct": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "forecast_to_implied_move_ratio": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "market_implied_move_method": {
+      "enum": ["nearest_candidate_iv_sqrt_t", null]
+    },
+    "market_implied_move_option_id": {"type": ["string", "null"]},
+    "market_implied_volatility": {
+      "type": ["number", "null"],
+      "exclusiveMinimum": 0
+    },
+    "forecast_exceeds_market_implied_move": {
+      "type": ["boolean", "null"]
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "selected"}}},
+      "then": {
+        "required": [
+          "forecast_reference_price",
+          "forecast_reference_time",
+          "forecast_conservative_move_pct",
+          "forecast_target_price",
+          "realized_move_since_reference_pct",
+          "remaining_move_pct",
+          "market_implied_move_pct",
+          "forecast_to_implied_move_ratio",
+          "market_implied_move_method",
+          "market_implied_move_option_id",
+          "market_implied_volatility",
+          "forecast_exceeds_market_implied_move"
+        ]
+      }
+    }
+  ]
 }

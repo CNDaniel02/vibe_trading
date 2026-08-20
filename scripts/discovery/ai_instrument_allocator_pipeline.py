@@ -357,6 +357,8 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                     snapshot,
                     ranking,
                     stage="premarket_update",
+                    prior_signal=dict(prior_plan["signal"]),
+                    new_events=new_events,
                 )
             except Exception as exc:
                 reason = f"premarket model revalidation failed closed: {type(exc).__name__}: {exc}"
@@ -375,6 +377,8 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                 "data_cutoff_time": snapshot["data_cutoff_time"],
                 "evidence_snapshot": evidence_snapshot,
                 "prior_plan_id": prior_plan["plan_id"],
+                "incremental_update": True,
+                "incremental_event_count": len(new_events),
                 **uncalibrated_metadata(str(signal["horizon"])),
             }
             actionable = not analysis.get("fail_closed") and signal.get(

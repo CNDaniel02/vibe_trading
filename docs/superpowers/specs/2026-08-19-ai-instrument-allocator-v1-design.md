@@ -83,6 +83,8 @@ flowchart TD
   plans. Thinking is enabled only for the overnight Challenge and Decision calls.
 - `08:00 ET`: active-plan-only incremental Exa evidence refresh. New evidence
   runs fast News, Challenge, and Decision; discovery and ranking do not rerun.
+  The calls receive the prior signed signal and only newly observed evidence.
+  The original forecast reference and horizon remain immutable.
 - `09:25 ET`: active-plan-only final invalidation pass. New evidence runs fast
   News and Challenge only; the pass can retain or veto, but cannot redirect, the
   existing plan. Successful completion persists a same-session
@@ -139,8 +141,16 @@ are present and their sum is within `1e-6` of 1. The output also contains:
 
 The model does not output a final instrument. Python derives bullish, bearish,
 and neutral mass, the dominant signed bucket, and conservative move scenarios.
-The raw values may be logged and used as ordinal ranking features, but they are
-not treated as true probabilities and are never inserted into an EV formula.
+The conservative magnitude is a weighted multi-scenario estimate over the
+weakest 50% of the chosen directional mass; the dominant bucket remains a
+diagnostic and its boundary is not used as the trade hurdle. The raw values may
+be logged and used as ordinal ranking features, but they are not treated as true
+probabilities and are never inserted into an EV formula.
+
+Forecast reference price/time are deterministic enrichment fields, not API
+output fields. Python fixes them from the first immutable research quote after
+strict schema validation. Incremental updates inherit the same reference and
+horizon. This prevents a prior forecast from being re-anchored to a later quote.
 
 ## 6. Probability Calibration Contract
 
@@ -200,6 +210,23 @@ price is applied around the observed market midpoint. Delta, Gamma, Theta, and
 Vega are retained as sensitivity diagnostics; conservative repriced outcomes,
 break-even move, bid/ask spread, adverse slippage, tick rounding, and commission
 drive comparison.
+
+The derived move is anchored to the original research quote. At execution:
+
+```text
+forecast_target_price = reference_price * (1 + conservative_move_pct)
+remaining_move_pct = forecast_target_price / executable_spot - 1
+```
+
+Only `remaining_move_pct` enters equity and option scenarios. The allocation
+records reference price/time, forecast target, move already realized, and move
+remaining. Missing or future reference metadata fails closed.
+
+For the nearest-strike desired-direction option with observed IV, Python also
+records `IV * sqrt(horizon_days / 365)` as the market-implied move, the absolute
+remaining-forecast/implied-move ratio, the source option id, and a comparison
+flag. These fields are diagnostics only while probabilities remain
+uncalibrated; they are not used to manufacture probability EV.
 
 Until calibration is promoted, outputs use `scenario_net_return` and
 `break_even_move`, while `probability_ev_available` is false and probability EV
@@ -270,8 +297,10 @@ their original exit rules.
 ## 12. Observability and Accounting
 
 New immutable logs include raw signal, evidence snapshot, allocation scenarios,
-risk decision, $2,000 counterfactual, mandate lifecycle, fills, and calibration
-sample metadata. Every record includes decision time and data cutoff time.
+risk decision, fixed forecast reference/target, realized and remaining move,
+market-implied move comparison, $2,000 counterfactual, mandate lifecycle,
+fills, and calibration sample metadata. Every record includes decision time and
+data cutoff time.
 
 Closed-trade reporting decomposes:
 
@@ -295,6 +324,10 @@ Required tests cover:
 - exact $10,000 account initialization and restart recovery
 - exact same-instrument $2,000 counterfactual with no reselection
 - complete signed buckets, sum-to-one validation, and Python-derived direction
+- fixed forecast reference with execution-time remaining-move calculation
+- multi-scenario directional conservative magnitude instead of one bucket bound
+- prior-plan plus incremental-evidence update without reference re-anchoring
+- explicit market-implied move comparison in allocation audit
 - raw probabilities never used in probability EV
 - horizon-separated, maturity-safe walk-forward splits
 - option repricing responds to spot, time, IV, and Vega diagnostics

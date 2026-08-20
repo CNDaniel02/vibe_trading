@@ -4,7 +4,7 @@ import math
 from typing import Any
 from uuid import uuid4
 
-from scripts.core.models import Quote
+from scripts.core.models import Quote, parse_ts
 from scripts.decision.signed_return_signal import derive_signal_summary
 from scripts.options.models import OptionContract, OptionQuote
 from scripts.options.scenario_pricing import reprice_option_scenarios
@@ -76,6 +76,7 @@ def _equity_candidate(
         "entry_price": round(entry, 6),
         "scenario_exit_price": round(exit_price, 6),
         "conservative_move_pct": move_pct,
+        "forecast_remaining_move_pct": move_pct,
         "conservative_net_return_pct": round(net_return, 8),
         "break_even_move_pct": round((entry / quote.last - 1) * 100, 6),
         "planned_stop_price": round(stop_price, 6),
@@ -165,6 +166,7 @@ def _option_candidate(
         "spread_pct": round(quote.spread_pct(), 8),
         "preferred_spread": preferred,
         "conservative_move_pct": move_pct,
+        "forecast_remaining_move_pct": move_pct,
         "conservative_net_return_pct": scenario_return,
         "break_even_move_pct": break_even_move,
         "scenario_repricing": repricing,
@@ -213,12 +215,14 @@ def build_short_equity_counterfactual(
     signal: dict[str, Any],
     quote: Quote,
     costs: dict[str, Any],
+    *,
+    remaining_move_pct: float,
 ) -> dict[str, Any] | None:
     summary = derive_signal_summary(signal)
     if summary["direction"] != "bearish":
         return None
     entry = max(0.0, quote.bid - _slippage(quote.bid, costs, option=False))
-    scenario_mid = quote.last * (1 + float(summary["conservative_move_pct"]) / 100)
+    scenario_mid = quote.last * (1 + remaining_move_pct / 100)
     cover = scenario_mid + (quote.ask - quote.bid) / 2
     cover += _slippage(cover, costs, option=False)
     return {
@@ -226,6 +230,7 @@ def build_short_equity_counterfactual(
         "ticker": quote.symbol,
         "entry_price": round(entry, 6),
         "scenario_cover_price": round(cover, 6),
+        "forecast_remaining_move_pct": remaining_move_pct,
         "scenario_net_return_pct": round((entry - cover) / entry, 8) if entry else None,
         "probability_status": "uncalibrated",
         "creates_order": False,
@@ -310,11 +315,6 @@ def allocate_instrument(
     )
     direction = str(summary["direction"])
     allocation_id = f"aia_{uuid4().hex}"
-    short_benchmark = build_short_equity_counterfactual(
-        signal,
-        underlying_quote,
-        config.get("costs", {}),
-    )
     if (
         signal.get("action") != "propose_trade"
         or direction == "neutral"
@@ -330,25 +330,115 @@ def allocate_instrument(
             "considered": [],
             "selected_instrument": None,
             "counterfactual_2000": None,
-            "short_equity_counterfactual": short_benchmark,
+            "short_equity_counterfactual": None,
             "probability_ev_available": False,
             "probability_ev_usd": None,
             "raw_probability_used_for_ev": False,
         }
 
-    move_pct = float(summary["conservative_move_pct"])
+    reference_price = signal.get("forecast_reference_price")
+    reference_time = signal.get("forecast_reference_time")
+    try:
+        reference_price = float(reference_price)
+        reference_is_valid = (
+            reference_price > 0
+            and isinstance(reference_time, str)
+            and parse_ts(reference_time) <= parse_ts(now)
+        )
+    except (TypeError, ValueError):
+        reference_is_valid = False
+    if not reference_is_valid:
+        return {
+            "allocation_id": allocation_id,
+            "status": "no_trade",
+            "reason": "missing or invalid forecast reference",
+            "signal_summary": summary,
+            "considered": [],
+            "selected_instrument": None,
+            "counterfactual_2000": None,
+            "short_equity_counterfactual": None,
+            "probability_ev_available": False,
+            "probability_ev_usd": None,
+            "raw_probability_used_for_ev": False,
+        }
+
+    forecast_move_pct = float(summary["conservative_move_pct"])
+    forecast_target_price = reference_price * (1 + forecast_move_pct / 100)
+    realized_move_pct = (underlying_quote.last / reference_price - 1) * 100
+    remaining_move_pct = (
+        forecast_target_price / underlying_quote.last - 1
+    ) * 100
+
+    desired_option_type = "call" if direction == "bullish" else "put"
+    implied_candidates = [
+        (contract, option_quote)
+        for contract, option_quote in option_candidates
+        if contract.option_type == desired_option_type
+        and option_quote.implied_volatility is not None
+        and option_quote.implied_volatility > 0
+    ]
+    nearest_implied = (
+        min(
+            implied_candidates,
+            key=lambda item: (
+                abs(item[0].strike_price - underlying_quote.last),
+                item[0].expiration_date,
+                item[0].option_id,
+            ),
+        )
+        if implied_candidates
+        else None
+    )
+    if nearest_implied is None:
+        implied_move_pct = None
+        implied_ratio = None
+        implied_method = None
+        implied_option_id = None
+        implied_volatility = None
+    else:
+        implied_option_id = nearest_implied[0].option_id
+        implied_volatility = float(nearest_implied[1].implied_volatility)
+        implied_move_pct = implied_volatility * math.sqrt(
+            _horizon_days(signal) / 365
+        ) * 100
+        implied_ratio = abs(remaining_move_pct) / implied_move_pct
+        implied_method = "nearest_candidate_iv_sqrt_t"
+
+    forecast_context = {
+        "forecast_reference_price": reference_price,
+        "forecast_reference_time": reference_time,
+        "forecast_conservative_move_pct": forecast_move_pct,
+        "forecast_target_price": forecast_target_price,
+        "realized_move_since_reference_pct": realized_move_pct,
+        "remaining_move_pct": remaining_move_pct,
+        "market_implied_move_pct": implied_move_pct,
+        "forecast_to_implied_move_ratio": implied_ratio,
+        "market_implied_move_method": implied_method,
+        "market_implied_move_option_id": implied_option_id,
+        "market_implied_volatility": implied_volatility,
+        "forecast_exceeds_market_implied_move": (
+            abs(remaining_move_pct) >= implied_move_pct
+            if implied_move_pct is not None
+            else None
+        ),
+    }
+    short_benchmark = build_short_equity_counterfactual(
+        signal,
+        underlying_quote,
+        config.get("costs", {}),
+        remaining_move_pct=remaining_move_pct,
+    )
     considered: list[dict[str, Any]] = []
     if direction == "bullish":
         considered.append(
             _equity_candidate(
                 underlying_quote,
-                move_pct,
+                remaining_move_pct,
                 account_state,
                 config,
                 profile,
             )
         )
-    desired_option_type = "call" if direction == "bullish" else "put"
     for contract, option_quote in option_candidates:
         if contract.option_type != desired_option_type:
             continue
@@ -358,7 +448,7 @@ def allocate_instrument(
                 option_quote,
                 signal=signal,
                 spot=underlying_quote.last,
-                move_pct=move_pct,
+                move_pct=remaining_move_pct,
                 account_state=account_state,
                 config=config,
                 profile=profile,
@@ -383,6 +473,7 @@ def allocate_instrument(
         "probability_ev_available": False,
         "probability_ev_usd": None,
         "raw_probability_used_for_ev": False,
+        **forecast_context,
     }
     if selected is not None:
         result["counterfactual_2000"] = build_same_instrument_counterfactual(

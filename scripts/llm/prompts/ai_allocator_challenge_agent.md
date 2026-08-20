@@ -7,3 +7,7 @@ request as revalidation_only, compare new evidence with prior_signal and veto
 any contradiction; do not change its direction or horizon. Do not select an
 instrument, create an order, or relax a deterministic rule. Return only strict
 schema JSON.
+
+When agent_context.incremental_update is true, challenge the prior_signal using
+only that prior plan and the incremental available_news. Identify what changed,
+what remains unsupported, and whether the updated thesis should be rejected.

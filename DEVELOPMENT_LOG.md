@@ -50,6 +50,14 @@
 - `$2,000` 股票 counterfactual 的 `proposed_risk_usd` 和 `risk_pct_of_nav` 改为按该账户实际可买的缩放后股数计算，不再错误复用 `$10,000` sleeve 的整笔风险。期权仍以同一离散 contract 的一张实际 premium 风险判断可负担性。
 - EOD guard 会调用 allocator monitor，因此 supervisor 的 EOD worker 资源集合补上 `allocator_account`；它现在不会与独立 allocator stage/monitor 并发写同一账户。完整 mock 流程覆盖 overnight、premarket、pre-open、open execution、monitor 和 restart，且确认 research-only 阶段 0 paper order、09:32 为 0 模型调用、所有结果 `live_order_tools_called=false`。
 
+### Forecast anchoring 与 conservative hurdle review 修复
+
+- 首次完整研究后由 Python 固定 `forecast_reference_price/time`；08:00 更新继承同一 reference 和 horizon。09:32 只计算原目标相对最新价的 `remaining_move_pct`，缺失或未来 reference 会 fail closed，不再把旧预测重锚定到最新报价。
+- conservative magnitude 改为所选方向内最弱 50% 概率质量的多场景加权结果，dominant bucket 只保留为诊断。股票、long call、long put 和看跌 shadow benchmark 均使用 remaining move；期权继续跨 IV contraction/base/expansion 做重新定价。
+- 08:00 fast News、Challenge、Decision 明确接收 prior signal 和仅新增 evidence。Decision 可修订 signed buckets 或 no-trade，但不得改变 ticker、horizon 或 forecast reference；旧证据 URL 仅能从已验证 prior signal 继承。
+- allocation 显式记录 nearest desired-direction option 的 horizon-scaled market-implied move、forecast/implied 比率、IV、option id 和比较标志；这些字段只作市场诊断，不形成未校准 probability EV。
+- 新增 GitHub Actions Windows/Python 3.13 `pytest` workflow；本地 `compileall` 通过。仅包含本次提交的 staged tree 为 `248 passed`；叠加独立未提交 dashboard 工作线的完整工作区为 `258 passed`，两者都只有 4 条既有上游 deprecation warning。
+
 ## 2026-08-16 (America/Los_Angeles) - 亏损根因修复、DeepSeek V4 Flash 迁移与方向性评估
 
 ### 运行和亏损证据

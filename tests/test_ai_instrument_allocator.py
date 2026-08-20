@@ -256,6 +256,15 @@ def _signed_signal(**overrides):
     return signal
 
 
+def _anchored_signal(**overrides):
+    return {
+        **_signed_signal(),
+        "forecast_reference_price": 100.0,
+        "forecast_reference_time": REGULAR_NOW,
+        **overrides,
+    }
+
+
 def test_signed_return_signal_requires_complete_sum_to_one_uncalibrated_buckets() -> None:
     from scripts.decision.signed_return_signal import validate_signed_return_signal
 
@@ -286,11 +295,17 @@ def test_python_derives_direction_and_conservative_magnitude_from_signed_buckets
     assert summary["neutral_probability"] == pytest.approx(0.15)
     assert summary["direction"] == "bullish"
     assert summary["dominant_signed_bucket"] == "return_plus_0_5_to_plus_2_pct"
-    assert summary["conservative_move_pct"] == 0.5
+    assert summary["conservative_move_pct"] == pytest.approx(0.7142857143)
+    assert summary["conservative_move_method"] == "directional_lower_tail_mean"
+    assert summary["conservative_tail_fraction"] == 0.5
+    assert [item["bucket"] for item in summary["conservative_scenarios"]] == [
+        "return_plus_0_5_to_plus_2_pct",
+        "return_plus_2_to_plus_5_pct",
+    ]
     assert summary["probability_status"] == "uncalibrated"
 
 
-def test_derived_magnitude_uses_dominant_bucket_inside_derived_direction() -> None:
+def test_derived_magnitude_uses_directional_lower_tail_scenarios() -> None:
     from scripts.decision.signed_return_signal import derive_signal_summary
 
     buckets = {
@@ -309,7 +324,7 @@ def test_derived_magnitude_uses_dominant_bucket_inside_derived_direction() -> No
 
     assert summary["direction"] == "bullish"
     assert summary["dominant_signed_bucket"] == "return_plus_0_5_to_plus_2_pct"
-    assert summary["conservative_move_pct"] == 0.5
+    assert summary["conservative_move_pct"] == pytest.approx(1.0)
 
 
 def test_allocator_signal_schema_has_no_model_selected_instrument() -> None:
@@ -411,6 +426,8 @@ def test_allocator_team_uses_stage_specific_agents_and_never_selects_instrument(
     assert "instrument" not in ranking["ranked_candidates"][0]
     assert "instrument" not in analysis["signal"]
     assert analysis["signal"]["action"] == "propose_trade"
+    assert analysis["signal"]["forecast_reference_price"] == 100.02
+    assert analysis["signal"]["forecast_reference_time"] == REGULAR_NOW
     assert analysis["fail_closed"] is False
     assert [record.agent_name for record in tracker.records] == [
         "ai_allocator_ranker",
@@ -675,7 +692,7 @@ def test_allocator_selects_equity_for_bullish_signal_when_no_option_clears_hurdl
 
     config = load_runtime_config(paper_root)
     allocation = allocate_instrument(
-        _signed_signal(),
+        _anchored_signal(),
         _underlying_quote(),
         [],
         _account_state(),
@@ -700,7 +717,11 @@ def test_allocator_uses_put_only_for_bearish_executable_direction(
     put = _option_contract("aapl-put", "2026-08-21", "put")
     quote = _option_quote("aapl-put", bid=4.95, ask=5.05)
     allocation = allocate_instrument(
-        _bearish_signal(),
+        {
+            **_bearish_signal(),
+            "forecast_reference_price": 100.0,
+            "forecast_reference_time": REGULAR_NOW,
+        },
         _underlying_quote(),
         [(put, quote)],
         _account_state(),
@@ -716,13 +737,115 @@ def test_allocator_uses_put_only_for_bearish_executable_direction(
     assert "account" not in allocation["short_equity_counterfactual"]
 
 
+def test_allocator_uses_remaining_move_from_fixed_forecast_reference(
+    paper_root: Path,
+) -> None:
+    from scripts.core.models import Quote
+    from scripts.decision.instrument_allocator import allocate_instrument
+
+    quote = Quote(
+        "AAPL",
+        bid=101.99,
+        ask=102.01,
+        last=102.0,
+        asof=REGULAR_NOW,
+        source="fixture",
+        avg_daily_volume_usd=500_000_000,
+    )
+    allocation = allocate_instrument(
+        _anchored_signal(),
+        quote,
+        [],
+        _account_state(),
+        load_runtime_config(paper_root),
+        REGULAR_NOW,
+    )
+
+    assert allocation["forecast_reference_price"] == 100.0
+    assert allocation["forecast_target_price"] == pytest.approx(100.7142857143)
+    assert allocation["realized_move_since_reference_pct"] == pytest.approx(2.0)
+    assert allocation["remaining_move_pct"] == pytest.approx(-1.2605042017)
+    assert allocation["status"] == "no_trade"
+
+
+def test_allocator_fails_closed_without_forecast_reference(
+    paper_root: Path,
+) -> None:
+    from scripts.decision.instrument_allocator import allocate_instrument
+
+    allocation = allocate_instrument(
+        _signed_signal(),
+        _underlying_quote(),
+        [],
+        _account_state(),
+        load_runtime_config(paper_root),
+        REGULAR_NOW,
+    )
+
+    assert allocation["status"] == "no_trade"
+    assert allocation["reason"] == "missing or invalid forecast reference"
+    assert allocation["considered"] == []
+
+
+def test_allocator_records_market_implied_move_comparison(
+    paper_root: Path,
+) -> None:
+    import math
+
+    from scripts.decision.instrument_allocator import allocate_instrument
+
+    allocation = allocate_instrument(
+        _anchored_signal(),
+        _underlying_quote(),
+        [(_option_contract("aapl-call", "2026-08-21"), _option_quote("aapl-call"))],
+        _account_state(),
+        load_runtime_config(paper_root),
+        REGULAR_NOW,
+    )
+
+    implied = 0.30 * math.sqrt(1 / 365) * 100
+    assert allocation["market_implied_move_pct"] == pytest.approx(implied)
+    assert allocation["forecast_to_implied_move_ratio"] == pytest.approx(
+        abs(allocation["remaining_move_pct"]) / implied
+    )
+    assert allocation["market_implied_move_method"] == "nearest_candidate_iv_sqrt_t"
+
+
+def test_instrument_allocation_schema_accepts_forecast_and_implied_move_audit(
+    paper_root: Path,
+) -> None:
+    from jsonschema import Draft202012Validator, FormatChecker
+
+    from scripts.decision.instrument_allocator import allocate_instrument
+
+    allocation = allocate_instrument(
+        _anchored_signal(),
+        _underlying_quote(),
+        [(_option_contract("aapl-call", "2026-08-21"), _option_quote("aapl-call"))],
+        _account_state(),
+        load_runtime_config(paper_root),
+        REGULAR_NOW,
+    )
+    schema = json.loads(
+        (Path(__file__).resolve().parents[1] / "schemas" / "instrument_allocation.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    Draft202012Validator(schema, format_checker=FormatChecker()).validate(allocation)
+
+
 def test_allocator_rejects_neutral_signal_before_instrument_comparison(
     paper_root: Path,
 ) -> None:
     from scripts.decision.instrument_allocator import allocate_instrument
 
     allocation = allocate_instrument(
-        _neutral_signal(),
+        {
+            **_neutral_signal(),
+            "forecast_reference_price": 100.0,
+            "forecast_reference_time": REGULAR_NOW,
+        },
         _underlying_quote(),
         [],
         _account_state(),
@@ -1250,7 +1373,10 @@ def test_open_execution_uses_saved_conditional_plan_without_llm_and_only_new_nam
             "status": "active",
             "stage": "overnight",
             "preopen_revalidated_at": "2026-07-13T13:25:00+00:00",
-            "signal": _signed_signal(entry_now=False),
+            "signal": _anchored_signal(
+                entry_now=False,
+                forecast_reference_time="2026-07-13T13:27:00+00:00",
+            ),
             "snapshot": {"snapshot_id": "allocator-open-snapshot"},
         }
     )
@@ -1259,7 +1385,7 @@ def test_open_execution_uses_saved_conditional_plan_without_llm_and_only_new_nam
 
     assert result["event"] == "ai_instrument_allocator_stage_complete"
     assert result["model_calls"] == 0
-    assert result["paper_orders_created"] == 1
+    assert result["paper_orders_created"] == 1, result
     assert result["executions"][0]["order"]["status"] == "filled"
     assert result["live_order_tools_called"] is False
     assert pipeline.broker.store.account().initial_cash == 10_000
@@ -1464,13 +1590,23 @@ def test_premarket_research_replaces_older_plan_for_same_ticker(
         AiInstrumentAllocatorPipeline,
     )
 
+    class RecordingMockProvider(MockProvider):
+        def __init__(self, tracker):
+            super().__init__(tracker)
+            self.requests = []
+
+        def generate(self, request):
+            self.requests.append(request)
+            return super().generate(request)
+
     config = load_runtime_config(paper_root)
     tracker = UsageTracker()
+    provider = RecordingMockProvider(tracker)
     news = _AllocatorResearchNews()
     pipeline = AiInstrumentAllocatorPipeline(
         paper_root,
         config,
-        MockProvider(tracker),
+        provider,
         tracker,
         discovery_adapter=_AllocatorResearchDiscovery(),
         news_adapter=news,
@@ -1479,9 +1615,11 @@ def test_premarket_research_replaces_older_plan_for_same_ticker(
 
     overnight = pipeline.run_stage("overnight", "2026-07-13T00:00:00+00:00")
     old_plan_id = overnight["plans"][0]["plan_id"]
+    old_signal = dict(overnight["plans"][0]["signal"])
     news.direction = "negative"
     pipeline.discovery = _MustNotDiscover()
     calls_before = len(tracker.records)
+    requests_before = len(provider.requests)
     plan_writes = 0
     write_json = pipeline.plans.store.write_json
 
@@ -1508,10 +1646,27 @@ def test_premarket_research_replaces_older_plan_for_same_ticker(
         "ai_allocator_fast_decision_manager",
     ]
     assert updated["paper_orders_created"] == 0
+    incremental_requests = provider.requests[requests_before:]
+    assert all(
+        [event["headline"] for event in request.input_payload["available_news"]]
+        == ["Company withdraws full-year guidance"]
+        for request in incremental_requests
+    )
+    assert all(
+        request.input_payload["agent_context"]["prior_signal"] == old_signal
+        and request.input_payload["agent_context"]["incremental_update"] is True
+        for request in incremental_requests
+    )
     assert plan_writes == 1
     assert len(active) == 1
     assert active[0]["plan_id"] != old_plan_id
     assert derive_signal_summary(active[0]["signal"])["direction"] == "bearish"
+    assert active[0]["signal"]["forecast_reference_price"] == old_signal[
+        "forecast_reference_price"
+    ]
+    assert active[0]["signal"]["forecast_reference_time"] == old_signal[
+        "forecast_reference_time"
+    ]
     assert pipeline.plans.plans()[old_plan_id]["status"] == "superseded"
 
 
@@ -1853,7 +2008,11 @@ def test_allocator_execution_advances_to_latest_observed_option_quote(
             "status": "active",
             "stage": "overnight",
             "preopen_revalidated_at": "2026-07-13T13:25:00+00:00",
-            "signal": _bearish_signal(),
+            "signal": {
+                **_bearish_signal(),
+                "forecast_reference_price": 100.0,
+                "forecast_reference_time": "2026-07-13T13:27:00+00:00",
+            },
             "snapshot": {"snapshot_id": "future-option-quote-snapshot"},
         }
     )
@@ -1930,11 +2089,14 @@ def test_allocator_missing_mandate_exits_after_restart(paper_root: Path) -> None
             "status": "active",
             "stage": "overnight",
             "preopen_revalidated_at": "2026-07-13T13:25:00+00:00",
-            "signal": _signed_signal(),
+            "signal": _anchored_signal(
+                forecast_reference_time="2026-07-13T13:27:00+00:00",
+            ),
             "snapshot": {"snapshot_id": "missing-mandate-snapshot"},
         }
     )
-    assert pipeline.run_stage("open_execution", OPEN_EXECUTION_NOW)["paper_orders_created"] == 1
+    opened = pipeline.run_stage("open_execution", OPEN_EXECUTION_NOW)
+    assert opened["paper_orders_created"] == 1, opened
     pipeline.mandates.store.write_json("position_mandates.json", {})
 
     restarted = AiInstrumentAllocatorPipeline(

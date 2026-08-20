@@ -69,6 +69,8 @@ class AiInstrumentAllocatorTeam:
         ranking: dict[str, Any],
         *,
         stage: str,
+        prior_signal: dict[str, Any] | None = None,
+        new_events: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         calls_before = len(self.tracker.records)
         fast = stage != "overnight"
@@ -86,31 +88,44 @@ class AiInstrumentAllocatorTeam:
             ),
         }
         try:
-            validate_agent_input(snapshot)
-            news_payload = dict(snapshot)
-            news_payload["agent_context"] = {"ranking": ranking, "stage": stage}
+            model_snapshot = dict(snapshot)
+            incremental_update = prior_signal is not None
+            if incremental_update:
+                validate_signed_return_signal(prior_signal)
+                model_snapshot["available_news"] = list(new_events or [])
+            validate_agent_input(model_snapshot)
+            base_context = {
+                "ranking": ranking,
+                "stage": stage,
+                "incremental_update": incremental_update,
+            }
+            if prior_signal is not None:
+                base_context["prior_signal"] = prior_signal
+                base_context["prior_direction"] = derive_signal_summary(prior_signal)[
+                    "direction"
+                ]
+            news_payload = dict(model_snapshot)
+            news_payload["agent_context"] = dict(base_context)
             news = self._call(
                 names["news"],
                 news_payload,
                 AI_ALLOCATOR_RESEARCH_OUTPUT_SCHEMA,
             )
-            challenge_payload = dict(snapshot)
+            challenge_payload = dict(model_snapshot)
             challenge_payload["agent_context"] = {
-                "ranking": ranking,
+                **base_context,
                 "bull_news": news,
-                "stage": stage,
             }
             challenge = self._call(
                 names["challenge"],
                 challenge_payload,
                 CHALLENGE_OUTPUT_SCHEMA,
             )
-            decision_payload = dict(snapshot)
+            decision_payload = dict(model_snapshot)
             decision_payload["agent_context"] = {
-                "ranking": ranking,
+                **base_context,
                 "bull_news": news,
                 "challenge": challenge,
-                "stage": stage,
             }
             signal = self._call(
                 names["decision"],
@@ -118,22 +133,58 @@ class AiInstrumentAllocatorTeam:
                 AI_ALLOCATOR_SIGNAL_OUTPUT_SCHEMA,
             )
             validate_signed_return_signal(signal)
+            if prior_signal is not None:
+                raw_reference_price = prior_signal.get("forecast_reference_price")
+                reference_time = str(
+                    prior_signal.get("forecast_reference_time") or ""
+                )
+            else:
+                quote = snapshot.get("market_data", {}).get("quote", {})
+                raw_reference_price = quote.get("last")
+                reference_time = str(quote.get("asof") or "")
+            try:
+                reference_price = float(raw_reference_price)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("forecast reference price must be positive") from exc
+            if reference_price <= 0:
+                raise ValueError("forecast reference price must be positive")
+            if not reference_time or parse_ts(reference_time) > parse_ts(
+                str(snapshot["data_cutoff_time"])
+            ):
+                raise ValueError("forecast reference time exceeds data cutoff")
+            signal = {
+                **signal,
+                "forecast_reference_price": reference_price,
+                "forecast_reference_time": reference_time,
+            }
         except (ProviderError, ValueError) as exc:
             return self._failed(snapshot, f"structured model failure: {exc}", calls_before)
 
         ticker = str(snapshot["ticker"])
         guardrails: list[str] = []
-        allowed_urls = {
+        incremental_urls = {
             str(item.get("url"))
-            for item in snapshot.get("available_news", [])
+            for item in model_snapshot.get("available_news", [])
             if item.get("url")
         }
+        prior_urls = (
+            {str(url) for url in prior_signal.get("source_urls", [])}
+            if prior_signal is not None
+            else set()
+        )
         if news["ticker"] != ticker or signal["ticker"] != ticker:
             guardrails.append("model attempted to change immutable ticker")
             signal = self._no_trade(signal, ticker, "Model ticker did not match immutable input.")
-        if set(news.get("source_urls", [])) - allowed_urls or set(
+        if prior_signal is not None and signal["horizon"] != prior_signal["horizon"]:
+            guardrails.append("incremental update attempted to change immutable horizon")
+            signal = self._no_trade(
+                signal,
+                ticker,
+                "Incremental update cannot change the prior forecast horizon.",
+            )
+        if set(news.get("source_urls", [])) - incremental_urls or set(
             signal.get("source_urls", [])
-        ) - allowed_urls:
+        ) - (incremental_urls | prior_urls):
             guardrails.append("model cited evidence absent from immutable snapshot")
             signal = self._no_trade(signal, ticker, "Model cited unsupported evidence.")
         if challenge["veto_recommended"] and signal["action"] != "no_trade":

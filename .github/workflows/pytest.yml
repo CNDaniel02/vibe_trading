@@ -1,0 +1,31 @@
+name: pytest
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Fetch pinned Vibe-Trading reference
+        shell: pwsh
+        run: |
+          $repo = Join-Path $env:GITHUB_WORKSPACE "..\references\repos\Vibe-Trading"
+          New-Item -ItemType Directory -Force -Path $repo | Out-Null
+          git -C $repo init
+          git -C $repo remote add origin https://github.com/HKUDS/Vibe-Trading.git
+          git -C $repo fetch --depth 1 origin 6fc038d37f1767ae429bab435654b9b425ae66f4
+          git -C $repo checkout --detach FETCH_HEAD
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -r requirements.txt
+      - run: python -m pytest -q
