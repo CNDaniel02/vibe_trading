@@ -9,7 +9,7 @@ description: Build, run, test, and review an equity plus long-call/long-put pape
 
 Default to `paper` mode. Treat `live_trading` as disabled unless a human explicitly changes configuration and asks for a separate live-trading implementation. In paper mode, never call live order tools such as `place_equity_order`, `place_option_order`, or cancellation tools.
 
-Use real market data only as observations. Route enabled equity orders through `scripts/simulation/paper_broker.py` and long-premium option orders through `scripts/options/paper_broker.py`. The weighted equity line is currently shadow-only; do not silently restore its broker execution. Equity and options share cash within each virtual account. The AI-gated strategy uses a separate namespaced account so its statistics cannot contaminate the deterministic account.
+Use real market data only as observations. Route enabled equity orders through `scripts/simulation/paper_broker.py` and long-premium option orders through `scripts/options/paper_broker.py`. The weighted equity line is currently shadow-only; do not silently restore its broker execution. Equity and options share cash within each virtual account. The legacy AI-gated sleeve is entry-frozen. The new allocator uses a separate namespaced `$10,000` account so no statistics or state contaminate either historical `$2,000` ledger.
 
 ## Workflow
 
@@ -19,13 +19,13 @@ Use real market data only as observations. Route enabled equity orders through `
 4. For baseline-screened candidates, run provider-neutral News, Challenge, and Decision agents with strict JSON Schema outputs.
 5. Independently run `exa_deepseek_catalyst_v1`: read-only market discovery, Exa evidence, low-cost ranking, non-thinking Bull/News and Challenge, thinking Decision, and deterministic risk veto.
 6. Keep `relative_strength_v1` and `long_directional_options_v1` unchanged as deterministic shadow baselines.
-7. Run `ai_gated_technical_v1` only against a bounded technical top set. Exa and DeepSeek may propose a trade, but execution requires a short-lived numeric entry contract, is restricted to the isolated paper sleeve, and remains subject to deterministic risk veto.
+7. Keep `ai_gated_technical_v1` and `long_directional_options_v2_weighted` entry-frozen while continuing their existing monitor and exit paths. Run new AI entries only through `ai_instrument_allocator_v1`: bounded candidates, immutable Exa evidence, signed-return buckets, fresh scenario repricing, position mandate, and deterministic risk veto.
 8. Independently run `llm_news_drift_v1`: market-wide Exa discovery, one price-blind headline classification, then deterministic ticker/tradability checks. It is shadow-only and has no broker.
 9. Run deterministic risk checks after model synthesis; risk retains final veto authority.
 10. Let the fill model decide `open`, `filled`, `rejected`, `expired`, or `cancelled`; never fill through a limit.
 11. Persist account, positions, orders, counters, decisions, fills, model usage, evidence snapshots, outcomes, and audit events.
 12. Monitor all paper sleeves and evaluate exits, including an independent EOD/overnight-recovery guard.
-13. Compare active, baseline-shadow, AI-sleeve, and news-drift results before any strategy promotion.
+13. Compare legacy, baseline-shadow, old AI sleeve, new allocator sleeve, same-instrument `$2,000` affordability, `short_equity_counterfactual`, and news-drift results without merging their PnL.
 14. Require the forward-evaluation thresholds in `config/evaluation.yaml`; do not promote from replay or backtest evidence alone.
 15. For options, permit only buy-to-open long calls/puts and sell-to-close. Reject sell-to-open, short contracts, spreads, margin, 0DTE, exercise, and assignment.
 
@@ -96,5 +96,6 @@ Read only what is needed:
 - `references/vibe_integration.md` for the exact Vibe isolation boundary.
 - `references/catalyst_strategy_policy.md` for discovery limits, evidence deduplication, cooldowns, and promotion boundaries.
 - `references/weighted_and_ai_gated_strategy.md` for weighted scoring, adaptive labels, company-specific puts, and AI paper-sleeve isolation.
+- `references/ai_instrument_allocator_policy.md` for signed buckets, scenario repricing, account isolation, counterfactuals, mandates, calibration, and risk.
 - `references/llm_news_drift_policy.md` for the news-first shadow lane, paper-replication boundary, and isolated P2 experiments.
 - `references/hawkes_process_assessment.md` for why Hawkes is not currently implemented and the future data/readiness contract.

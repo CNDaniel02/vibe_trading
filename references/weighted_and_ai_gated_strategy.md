@@ -19,25 +19,27 @@ regular hours are not scheduled, and quotes arriving more than 15 minutes after
 the target expire. The strategy cannot return to `paper_broker` until new
 out-of-sample labels show a positive edge after spread and slippage.
 
-## Active deterministic options strategy
+## Entry-frozen deterministic options strategy
 
-`long_directional_options_v2_weighted` permits only fully paid long calls and
-long puts. Company-specific negative evidence and downside technical strength
-can support a put in neutral or risk-on broad-market regimes. Broad-market
-regime is a soft feature, not a mandatory direction switch.
+`long_directional_options_v2_weighted` has `new_entries_enabled: false`.
+Existing open orders and positions remain under its original monitor and exit
+logic until flat. Its scores remain available for comparison, but it cannot
+create another entry.
 
 Earnings exclusion, contract liquidity, spread, DTE, Greeks, IV, premium,
 position count, cash, and shared deployment caps remain deterministic vetoes.
-Entry spread may not exceed 4%. Every contract-selection rejection category is logged. When no directional
+Entry spread may not exceed 2%, with 1.5% treated as preferred. Every contract-selection rejection category is logged. When no directional
 event exists, technical scores retain their full weight; missing news is
 neutral rather than an automatic 30% score penalty.
 
-## AI-gated executable paper strategy
+## Entry-frozen AI-gated paper strategy
 
-`ai_gated_technical_v1` has an isolated `$2,000` virtual account. It does not
+`ai_gated_technical_v1` has an isolated historical `$2,000` virtual account. It does not
 share positions, orders, daily counters, or performance statistics with the
 active deterministic account. Equity and options inside the AI sleeve do share
-that sleeve's cash and risk limits.
+that sleeve's cash and risk limits. New entries are disabled; only open-order
+processing, position monitoring, and exits continue. Historical state and logs
+are not migrated into the new allocator.
 
 The cycle is:
 
@@ -64,14 +66,27 @@ the balanced `auto` search mode. Exa Agent and Monitors are not used because
 DeepSeek and APScheduler already own those responsibilities; full deep search
 is deferred until measured evidence-grounding evals justify its added cost.
 
-Within 90 minutes before the open, the same pipeline may create a research-only
-plan. It cannot create an order, publish an executable signal, or consume event
-cooldown state. A separate 09:32 New York job repeats the analysis with a fresh
-regular-session quote and all deterministic checks before any local paper order.
+The historical workflow below explains prior orders only. The entry-frozen
+runtime returns before discovery, Exa, DeepSeek, or order creation.
 
 No model may call broker tools, change configuration, add an unvalidated ticker,
 or emit a live order. The only permitted option actions are buy-to-open and
 sell-to-close for one long call or put.
+
+## AI instrument allocator V1
+
+`ai_instrument_allocator_v1` replaces new AI entry generation without touching
+either legacy ledger. It has an isolated `$10,000` paper sleeve. The model emits
+one complete signed-return bucket distribution for `intraday_close`,
+`next_close`, or `two_to_five_days`; Python derives direction and magnitude.
+Raw values remain uncalibrated and do not produce probability EV.
+
+Python compares long equity and long calls for bullish signals, or long puts for
+bearish signals. Multi-day option comparison uses underlying/time/IV scenario
+repricing with Vega diagnostics, not a local Delta/Gamma/Theta approximation.
+Every selected instrument then passes the same deterministic broker risk gate.
+The `$2,000` counterfactual checks that exact selected instrument only.
+`short_equity_counterfactual` remains a no-account, no-order shadow benchmark.
 
 ## Runtime and promotion
 

@@ -39,7 +39,9 @@
     "thesis_valid_until": {"type": "string", "format": "date-time"},
     "invalidation_condition": {"type": "string"},
     "invalidation_triggered": {"type": "boolean"},
+    "invalidation_reason": {"type": "string"},
     "planned_stop_price": {"type": ["number", "null"]},
+    "updated_at": {"type": "string", "format": "date-time"},
     "closed_at": {"type": ["string", "null"], "format": "date-time"},
     "close_reason": {"type": ["string", "null"]}
   }

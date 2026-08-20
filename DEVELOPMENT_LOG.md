@@ -1,5 +1,27 @@
 # Development Log
 
+## 2026-08-19 (America/Los_Angeles) - AI Instrument Allocator V1 与旧策略有序退出
+
+### 变更原因和账户边界
+
+- 用户已停止连续服务；本次没有启动 supervisor、连接真实下单工具，也没有修改任何现有 `state/`、`logs/`、订单、成交、PnL 或 OAuth 文件。
+- `long_directional_options_v2_weighted` 和历史 `ai_gated_technical_v1` 现在停止创建新 entry；每次旧 AI cycle 仍先运行原 monitor，旧主账户的 open option order 和 position 仍由原 forward monitor/exit logic 处理，直到全部清仓。
+- 历史主账户和旧 AI sleeve 的 `$2,000` 账本原地保留。新增 `ai_instrument_allocator_v1` 使用独立 `$10,000` state/log namespace；首次运行只在该 namespace 不存在时初始化，重启时以已有状态为准。
+
+### 新决策、工具分配和风险流程
+
+- DeepSeek 不再输出彼此独立的方向概率和无符号幅度分布。最终信号必须为指定 horizon 下 7 个互斥 signed-return buckets，总和在 `1e-6` 内等于 1；bullish、bearish、neutral、dominant bucket 和保守 move 全部由 Python 派生，原始值固定标记 `uncalibrated`。
+- 新 pipeline 采用两速时钟：20:00 ET 完整研究、08:00 盘前更新、09:25 证据失效复核、09:32 仅刷新报价并执行有效计划、正常时段有限频率研究；09:32 不重复调用 LLM。每个持仓都有 restart-safe mandate，按 `intraday_close`、`next_close` 或 `two_to_five_days` 管理；缺失或失效 mandate 会 fail closed 退出。
+- Python allocator 比较 bullish 的 long equity/long call 或 bearish 的 long put。期权使用 underlying move、剩余时间和多组 IV 情景重新定价，纳入 Vega、spread、slippage、tick 和 break-even；Delta/Gamma/Theta/Vega 只作 sensitivity 解释，不替代多日 payoff 重新定价。
+- 股票限制为 25% NAV notional，并要求计划止损风险不超过 1% NAV。期权保持单笔 premium 3%、aggregate 8%；股票和期权合计最多 3 个 executable position、每日最多 3 次 entry，同一 underlying 同时只能存在一个 equity 或 option exposure。同日 stop-loss/thesis invalidation 后仍禁止重新入场。
+- `$2,000` counterfactual 只检查 `$10,000` allocator 已选中的同一股票或同一 option contract，记录可负担性、最大数量、风险比例和拒绝原因，不重新选择工具。看跌 shadow benchmark 统一命名为 `short_equity_counterfactual`，不创建账户或订单，且 PnL 不与 long put 合并。
+
+### 评估、可视化和文档
+
+- 新增按 horizon 隔离、label maturity 安全的 expanding walk-forward split，主要指标为 out-of-sample multiclass Brier score 和 log loss；ECE/reliability curve 仅作诊断。当前不拟合 calibrator，不显示 probability EV，每条记录保留 calibration version、training cutoff、sample size 和 horizon。
+- 绩效增加 round-trip 成本恒等式：midpoint gross PnL 减 spread、slippage/tick 和 commission 必须等于 executable net PnL。dashboard 新增独立 `$10,000` allocator、同工具 `$2,000` 对照、看跌影子基准、mandate 和未校准概率边界，并对 `null`/损坏状态降级显示而不返回 HTTP 500。
+- 正式规范见 `references/ai_instrument_allocator_policy.md`；README、SKILL、options/news policy、JSON Schema 和中文 Mermaid 架构图已同步。最终全量测试、只读 readiness、视觉检查、敏感信息扫描和 graphify 结果记录在本次提交验证中。
+
 ## 2026-08-16 (America/Los_Angeles) - 亏损根因修复、DeepSeek V4 Flash 迁移与方向性评估
 
 ### 运行和亏损证据
@@ -158,7 +180,7 @@
 - `EvidenceSnapshotStore` 增加向后兼容的 namespace 参数；catalyst 默认路径不变，news-drift 使用自己的 snapshots 和 cooldown state。
 - 新增 `references/llm_news_drift_policy.md`，并同步 README、SKILL、data-source policy 和完整架构文档。
   - 当前 Exa 使用 Search + inline `contents.highlights`；Deep Search、Agent、Monitors 和独立 Contents endpoint 不进入一分钟关键路径。
-  - P1 exact replication、`synthetic_short_equity`、`negative_news_long_put` 和 adaptive event calibration 被明确列为隔离后续实验，不与 base shadow PnL 混合。
+  - P1 exact replication、`short_equity_counterfactual`、`negative_news_long_put` 和 adaptive event calibration 被明确列为隔离后续实验，不与 base shadow PnL 混合。
 
 ### 安全影响
 
@@ -180,7 +202,7 @@
 - 当前 service 未运行。代码验证完成后，需要用户在自己的终端重新启动 continuous service；新 scheduler 只有重启后才会加载。
 - 进入设定窗口前可先执行 `--readiness`；实际新闻发现只在 regular、开盘前 120 分钟和收盘后 120 分钟运行。
 - 论文 502 MB replication package 尚未下载、解压、阅读 README 或复现原表；当前只完成与其聚合和成本概念兼容的 forward 指标。
-- P2 三条实验尚未实现交易或收益合并。必须先积累基础事件样本，再分别建立 synthetic short、long put 和 walk-forward calibration，避免后验选择方向或污染主账户。
+- P2 三条实验尚未实现交易或收益合并。必须先积累基础事件样本，再分别建立 direct-short counterfactual、long put 和 walk-forward calibration，避免后验选择方向或污染主账户。
 
 ## 2026-08-03 (America/Los_Angeles) - 连续运行检修、期权可交易性和指标口径修复
 

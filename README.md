@@ -6,6 +6,7 @@ Detailed Chinese documentation:
 
 - [`PROJECT_ARCHITECTURE.md`](PROJECT_ARCHITECTURE.md): complete architecture, account isolation, runtime, equity/options/AI pipelines, state, evaluation, and known limitations.
 - [`DEVELOPMENT_LOG.md`](DEVELOPMENT_LOG.md): append-only development and runtime repair history. Every behavior-changing update must add a new entry at the top.
+- [`references/ai_instrument_allocator_policy.md`](references/ai_instrument_allocator_policy.md): normative allocator account, model, repricing, risk, mandate, counterfactual, calibration, and logging policy.
 
 The paper broker supports fractional equity quantities in increments of `0.001` shares. Position and order caps still apply before an order is created.
 
@@ -15,12 +16,13 @@ The paper broker supports fractional equity quantities in increments of `0.001` 
 - `live_readonly: false`
 - `live_trading: false`
 - `weighted_relative_strength_v2` is shadow-only while its net-of-cost forward edge is negative.
-- `long_directional_options_v2_weighted` is the active long-call/long-put paper strategy.
+- `long_directional_options_v2_weighted` no longer opens new entries; its existing orders and positions remain under the legacy monitor and exit logic until flat.
 - `relative_strength_v1` and `long_directional_options_v1` remain unchanged deterministic shadow baselines.
 - `multi_agent_relative_strength_v2_candidate` and Vibe Swarm are shadow/research only.
 - `exa_deepseek_catalyst_v1` independently discovers candidates but remains shadow-only and creates no orders.
 - `llm_news_drift_v1` discovers market-wide news before any technical screen and remains an isolated long-equity shadow experiment.
-- `ai_gated_technical_v1` researches the deterministic technical top set and may trade only in its own isolated `$2,000` paper sleeve.
+- `ai_gated_technical_v1` no longer opens new entries; its existing `$2,000` sleeve is preserved byte-for-byte and remains exit-managed until flat.
+- `ai_instrument_allocator_v1` is the only new AI executable experiment. It uses a separate `$10,000` paper sleeve and compares long equity, long call, and long put after deterministic scenario repricing and risk veto.
 - No adapter exposes create, submit, place, or cancel methods for a real broker.
 - Options sell-to-open, short contracts, spreads, margin, 0DTE, exercise, and assignment are rejected.
 
@@ -64,6 +66,21 @@ read-only watchlist/scans/earnings -> deterministic technical top 5-8
         -> thinking Decision + executable price/time contract
         -> deterministic equity/options/shared-risk veto
         -> isolated local paper sleeve, monitor, exit, journal, and metrics
+```
+
+That lane is now entry-frozen. Its monitor stays active solely to close legacy
+orders and positions. New AI research and entries use `ai_instrument_allocator_v1`:
+
+```text
+read-only scans and technical top 8 + Exa evidence
+        -> low-cost ranker -> News -> Challenge -> signed-return buckets
+        -> Python derives direction and conservative move (raw probabilities remain uncalibrated)
+        -> fresh stock quote + bounded option candidates across expirations
+        -> stock/IV/time scenario repricing and executable-cost comparison
+        -> deterministic shared risk veto
+        -> isolated $10,000 paper sleeve + horizon-aware position mandate
+        -> separate $2,000 same-instrument affordability check
+        -> separate short_equity_counterfactual shadow benchmark
 ```
 
 `llm_news_drift_v1` is a faster, price-blind experiment:
@@ -166,6 +183,18 @@ each data-collection stage are written to append-only runtime logs.
 # Monitor and exit the isolated AI paper sleeve without starting discovery
 .\.venv\Scripts\python.exe -m scripts.orchestrator.forward_paper_service --ai-monitor-once
 
+# New allocator conditional research stages (no order before open_execution)
+.\.venv\Scripts\python.exe -m scripts.orchestrator.forward_paper_service --allocator-stage overnight
+.\.venv\Scripts\python.exe -m scripts.orchestrator.forward_paper_service --allocator-stage premarket_update
+.\.venv\Scripts\python.exe -m scripts.orchestrator.forward_paper_service --allocator-stage preopen_revalidation
+
+# 09:32-style fresh-quote execution; this stage makes zero LLM calls
+.\.venv\Scripts\python.exe -m scripts.orchestrator.forward_paper_service --allocator-stage open_execution
+
+# Bounded regular-session fast research and horizon-aware monitor
+.\.venv\Scripts\python.exe -m scripts.orchestrator.forward_paper_service --allocator-stage intraday
+.\.venv\Scripts\python.exe -m scripts.orchestrator.forward_paper_service --allocator-monitor-once
+
 # EOD/overnight recovery guard
 .\.venv\Scripts\python.exe -m scripts.orchestrator.forward_paper_service --eod-once
 
@@ -188,7 +217,8 @@ each data-collection stage are written to append-only runtime logs.
 # each cycle. Press Ctrl+C to stop it gracefully and release its process lock.
 # Standalone state-mutating commands fail closed while this service owns the
 # lock. Stop the service before running --once, --catalyst-once,
-# --ai-gated-once, --ai-monitor-once, --news-drift-once, or --eod-once manually.
+# --ai-gated-once, --ai-monitor-once, --allocator-stage,
+# --allocator-monitor-once, --news-drift-once, or --eod-once manually.
 
 # Read-only local GUI (run in a separate terminal while the service is running)
 .\.venv\Scripts\python.exe -m scripts.dashboard.paper_dashboard
@@ -230,18 +260,15 @@ non-thinking mode is used for structured news extraction, while thinking mode
 is enabled only for its final Decision Manager. The dashboard displays
 structured evidence and verdicts, never raw private chain-of-thought.
 
-The independent catalyst lane remains shadow-only. The executable AI-gated
-lane starts from the technical top set rather than waiting for an active buy
-signal. Exa uses a 48-hour window, immutable evidence snapshots, URL/event/content
-deduplication, primary-source verification for deep candidates, a two-hour ticker
-cooldown, and a 24-hour event cooldown. DeepSeek ranks the bounded set cheaply;
-up to three candidates receive deep research, with two available slots reserved
-for ranked bearish candidates. Thinking is enabled only for final Decision.
-Every trade action must include immediate authorization, numeric entry bounds,
-and an expiry of at most five minutes; a refreshed quote must satisfy them.
-The AI sleeve has
-independent cash, orders, positions, journals, and metrics so its return can be
-compared without contaminating the deterministic account.
+The independent catalyst lane remains shadow-only. The old executable AI-gated
+lane is entry-frozen and retains only monitoring and exits. The new allocator
+starts from a deterministic top-eight set rather than waiting for another
+strategy to emit `buy`. DeepSeek emits one complete seven-bucket signed-return
+distribution for a specified horizon. Python derives bullish, bearish, neutral,
+and magnitude fields; raw values remain `uncalibrated` and never produce a
+displayed probability EV. Overnight Challenge and Decision may use thinking;
+fast stages do not. At 09:32 the system makes no model call: it reuses an active
+conditional plan, refreshes quotes, reprices instruments, and reruns risk.
 
 The news-drift lane does not wait for a technical buy candidate. DeepSeek sees
 only headline and source fields; ticker validation and all price, liquidity,
@@ -258,8 +285,8 @@ company-level catalyst evidence. A strong company-specific negative event or
 clear relative weakness can support a long put even when SPY is neutral or
 risk-on. Contract selection still requires 21-45 DTE, delta, spread, volume,
 open interest, IV, Greeks, premium budget, and earnings-event checks, and now
-rejects spreads above 4% while recording exact rejection counts. One contract may be opened, premium risk is
-capped at 10% of account equity, and the full options line is capped at 20%.
+rejects spreads above 2% while treating 1.5% as the preferred ceiling and recording exact rejection counts. One contract may be opened, premium risk is
+capped at 3% of account equity, and aggregate option premium is capped at 8%.
 Fills use bid/ask plus adverse slippage and can never violate the agent's limit.
 
-Equity and options have separate orders, fills, positions, journals, win rates, and PnL. They share cash, a 60% total deployed-risk cap, and a combined daily-entry cap. These defaults are intentionally conservative for a `$2,000` evaluation account.
+Equity and options have separate orders, fills, positions, journals, win rates, and PnL. Inside each executable sleeve they share cash, a 60% total deployment cap, at most three total positions, at most three daily entries, and one executable exposure per underlying. Allocator equity positions also require a planned stop with at most 1% NAV planned loss, while the 25% single-stock limit remains a notional cap.

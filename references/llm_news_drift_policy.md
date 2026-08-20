@@ -114,8 +114,9 @@ Official sources:
 The following are future, separately identified experiments and must never be
 merged into base-lane results:
 
-- `synthetic_short_equity`: negative-news synthetic stock short with no access
-  to an executable account;
+- `short_equity_counterfactual`: hypothetical direct underlying short with no
+  executable account or orders; the name avoids confusion with option-based
+  stock-replication terminology;
 - `negative_news_long_put`: fully paid long-put shadow simulation using the
   existing option quote, Greeks, liquidity, expiry, and premium-risk checks;
 - `adaptive_event_type_calibration`: walk-forward calibration by event type,

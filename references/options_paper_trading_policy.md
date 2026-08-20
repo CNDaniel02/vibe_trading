@@ -20,14 +20,16 @@
 ## Risk
 
 Maximum loss for a permitted entry is premium plus configured costs. Default
-limits are one contract, 10% of account equity per option entry, 20%
-options-line deployment, 60% total equity/options deployment, and one open
-option position. Equity and options debit the same local cash account inside
-each strategy account; the AI-gated sleeve is separate from the active account.
+limits are one contract, 3% of account equity per option entry, 8% aggregate
+option premium, 60% total equity/options deployment, three total executable
+positions, three daily entries, and one exposure per underlying across equity
+and options. Equity and options debit the same local cash account inside each
+strategy account. Legacy sleeves remain separate; the new allocator uses an
+isolated `$10,000` sleeve.
 
 ## Pricing and Greeks
 
-Robinhood top-of-book controls paper fills and liquidation value. Robinhood Greeks are the primary live observations. `scripts/options/greeks.py` is an independent European Black-Scholes reasonableness reference only; US equity options are American-style, so it is not an exercise model or fill source.
+Robinhood top-of-book controls paper fills and liquidation value. Robinhood Greeks are the primary live observations. For instrument comparison, `scripts/options/scenario_pricing.py` anchors to the observed midpoint and reprices underlying-move, remaining-time, and IV contraction/unchanged/expansion scenarios. Delta, Gamma, Theta, and Vega are sensitivity diagnostics. The scenario model is not a fill source, exercise model, or claim of exact American-option valuation.
 
 ## Historical replay limitation
 

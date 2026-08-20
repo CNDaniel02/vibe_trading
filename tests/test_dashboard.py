@@ -33,6 +33,7 @@ def test_dashboard_state_explains_deterministic_rejection_and_paper_boundary(pap
     assert state["safety"]["allow_fractional_shares"] is True
     assert state["candidates"][0]["ticker"] == "AAPL"
     assert "5-day price change is below 0.5" in state["candidates"][0]["reasons"]
+    assert state["ai_instrument_allocator"]["metrics"] is None
 
 
 def test_dashboard_handler_exposes_only_read_routes(paper_root):
@@ -209,3 +210,150 @@ def test_dashboard_handles_failed_forward_job_without_output(paper_root):
     summary = build_dashboard_state(paper_root)["beginner_summary"]
 
     assert summary["service"]["market_session"] == "after_hours"
+
+
+def test_dashboard_handles_null_runtime_payload_and_allocator_state(paper_root):
+    (paper_root / "state" / "runtime_heartbeat.json").write_text(
+        json.dumps({"payload": None}),
+        encoding="utf-8",
+    )
+    state_dir = (
+        paper_root
+        / "state"
+        / "strategy_sleeves"
+        / "ai_instrument_allocator_v1"
+    )
+    state_dir.mkdir(parents=True)
+    (state_dir / "paper_account.json").write_text("null", encoding="utf-8")
+
+    state = build_dashboard_state(paper_root)
+
+    assert state["beginner_summary"]["service"]["market_session"] is None
+    assert state["ai_instrument_allocator"]["account"] is None
+    assert (
+        state["ai_instrument_allocator"]["metrics"]["metrics_available"]
+        is False
+    )
+
+
+def test_dashboard_separates_ten_thousand_allocator_and_counterfactual(
+    paper_root,
+):
+    namespace = "ai_instrument_allocator_v1"
+    state_dir = paper_root / "state" / "strategy_sleeves" / namespace
+    log_dir = paper_root / "logs" / "strategy_sleeves" / namespace
+    state_dir.mkdir(parents=True)
+    log_dir.mkdir(parents=True)
+    (state_dir / "paper_account.json").write_text(
+        json.dumps(
+            {
+                "cash": 9749.95,
+                "initial_cash": 10000,
+                "realized_pnl": 0,
+                "updated_at": "2026-07-13T15:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    for name in (
+        "paper_positions.json",
+        "paper_orders.json",
+        "paper_option_positions.json",
+        "paper_option_orders.json",
+    ):
+        (state_dir / name).write_text("{}", encoding="utf-8")
+    (state_dir / "daily_counters.json").write_text(
+        json.dumps({"date": "2026-07-13", "trades": 0}),
+        encoding="utf-8",
+    )
+    (state_dir / "allocator_plans.json").write_text(
+        json.dumps(
+            {
+                "plan-aapl": {
+                    "plan_id": "plan-aapl",
+                    "ticker": "AAPL",
+                    "status": "active",
+                    "signal": {"horizon": "next_close"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (state_dir / "position_mandates.json").write_text(
+        json.dumps(
+            {
+                "equity:AAPL": {
+                    "exposure_id": "equity:AAPL",
+                    "ticker": "AAPL",
+                    "instrument_type": "equity",
+                    "horizon": "next_close",
+                    "status": "open",
+                    "planned_exit_at": "2026-07-14T19:50:00+00:00",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    allocation = {
+        "allocation_id": "allocation-aapl",
+        "decision_time": "2026-07-13T15:00:00+00:00",
+        "status": "selected",
+        "selected_instrument": {
+            "instrument_type": "equity",
+            "ticker": "AAPL",
+            "quantity": 2.5,
+            "entry_price": 100.02,
+            "conservative_net_return_pct": 0.01,
+        },
+        "counterfactual_2000": {
+            "affordable": True,
+            "max_affordable_quantity": 4.999,
+            "risk_pct_of_nav": 0.01,
+            "rejection_reason": None,
+            "alternative_instrument_considered": False,
+        },
+        "probability_ev_available": False,
+    }
+    (log_dir / "allocations.jsonl").write_text(
+        json.dumps(allocation) + "\n",
+        encoding="utf-8",
+    )
+    (log_dir / "decisions.jsonl").write_text(
+        json.dumps(
+            {
+                "ticker": "AAPL",
+                "stage": "overnight",
+                "signal": {
+                    "horizon": "next_close",
+                    "probability_status": "uncalibrated",
+                    "thesis": "Fixture thesis",
+                },
+                "reasoning_content": "must never be exposed",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (log_dir / "short_equity_counterfactual.jsonl").write_text(
+        json.dumps(
+            {
+                "benchmark_name": "short_equity_counterfactual",
+                "ticker": "MSFT",
+                "creates_order": False,
+                "enters_account": False,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    allocator = build_dashboard_state(paper_root)["ai_instrument_allocator"]
+
+    assert allocator["account"]["initial_cash"] == 10000
+    assert allocator["metrics"]["initial_cash"] == 10000
+    assert allocator["latest_allocation"]["selected_instrument"]["ticker"] == "AAPL"
+    assert allocator["latest_allocation"]["counterfactual_2000"]["affordable"] is True
+    assert allocator["latest_allocation"]["probability_ev_available"] is False
+    assert allocator["mandates"][0]["horizon"] == "next_close"
+    assert allocator["short_equity_counterfactual"]["creates_order"] is False
+    assert "reasoning_content" not in allocator["decisions"][0]

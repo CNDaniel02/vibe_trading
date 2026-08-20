@@ -30,6 +30,32 @@ def _read_json(path: Path, default: Any) -> Any:
         return default
 
 
+def _dict_values(value: Any) -> list[Any]:
+    return list(value.values()) if isinstance(value, dict) else []
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _safe_metrics(root: Path, namespace: str | None = None) -> dict[str, Any]:
+    try:
+        return calculate_metrics(root, namespace=namespace)
+    except (
+        OSError,
+        json.JSONDecodeError,
+        AttributeError,
+        TypeError,
+        ValueError,
+        KeyError,
+    ) as exc:
+        return {
+            "namespace": namespace,
+            "metrics_available": False,
+            "error": f"metrics unavailable: {type(exc).__name__}",
+        }
+
+
 def _read_jsonl(path: Path, limit: int = 400) -> list[dict[str, Any]]:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -243,6 +269,62 @@ def _safe_ai_record(record: dict[str, Any]) -> dict[str, Any]:
         },
         "model_calls": record.get("model_calls", 0),
         "fail_closed": bool(record.get("fail_closed", False)),
+    }
+
+
+def _safe_allocator_decision(record: dict[str, Any]) -> dict[str, Any]:
+    signal = dict(record.get("signal") or {})
+    ranking = dict(record.get("ranking") or {})
+    challenge = dict(record.get("challenge") or {})
+    return {
+        "asof": record.get("ts", record.get("decision_time")),
+        "ticker": record.get("ticker"),
+        "stage": record.get("stage"),
+        "ranking": {
+            key: ranking.get(key)
+            for key in ("score", "rationale", "risk_flags")
+        },
+        "signal": {
+            key: signal.get(key)
+            for key in (
+                "action",
+                "horizon",
+                "probability_status",
+                "thesis",
+                "entry_condition",
+                "invalidation_condition",
+                "max_holding_trading_days",
+                "no_trade_reason",
+            )
+        },
+        "challenge": {
+            key: challenge.get(key)
+            for key in ("recommendation", "veto_recommended", "objections")
+        },
+        "fail_closed": bool(record.get("fail_closed", False)),
+    }
+
+
+def _safe_allocator_allocation(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: record.get(key)
+        for key in (
+            "allocation_id",
+            "plan_id",
+            "decision_time",
+            "data_cutoff_time",
+            "status",
+            "reason",
+            "signal_summary",
+            "considered",
+            "selected_instrument",
+            "counterfactual_2000",
+            "short_equity_counterfactual",
+            "probability_ev_available",
+            "probability_ev_usd",
+            "raw_probability_used_for_ev",
+            "option_candidate_diagnostics",
+        )
     }
 
 
@@ -477,7 +559,7 @@ def _build_beginner_summary(
         )
 
     session_usage = _session_records(llm_usage_records, session_date)
-    regular_clock = (
+    regular_clock = _as_dict(
         latest_regular_cycle.get("clock", {})
         if isinstance(latest_regular_cycle, dict)
         else {}
@@ -521,25 +603,19 @@ def _build_beginner_summary(
     minimum_trades = int(
         evidence_thresholds.get("minimum_closed_trades", 30)
     )
-    current_session = (
-        (
-            heartbeat.get("payload", {})
-            .get("latest_jobs", {})
-            .get("forward", {})
-            .get("output")
-            or {}
-        )
-        .get("clock", {})
-        .get("market_session")
-    )
+    heartbeat_payload = _as_dict(heartbeat.get("payload"))
+    latest_jobs = _as_dict(heartbeat_payload.get("latest_jobs"))
+    forward_job = _as_dict(latest_jobs.get("forward"))
+    forward_output = _as_dict(forward_job.get("output"))
+    current_session = _as_dict(forward_output.get("clock")).get("market_session")
     if current_session is None:
         latest_clock_record = _last(
             session_audit,
             lambda record: isinstance(record.get("clock"), dict),
         )
-        current_session = (
-            (latest_clock_record or {}).get("clock", {}).get("market_session")
-        )
+        current_session = _as_dict(
+            (latest_clock_record or {}).get("clock")
+        ).get("market_session")
 
     return {
         "session_date": session_date,
@@ -740,7 +816,7 @@ def build_dashboard_state(root: str | Path) -> dict[str, Any]:
     paper = runtime["paper"]
     risk = runtime["risk"]
     thinking = runtime["llm"].get("api", {}).get("thinking")
-    heartbeat = _read_json(state_dir / "runtime_heartbeat.json", {})
+    heartbeat = _as_dict(_read_json(state_dir / "runtime_heartbeat.json", {}))
     heartbeat_age = None
     if heartbeat.get("last_heartbeat_at"):
         heartbeat_age = max(
@@ -762,9 +838,43 @@ def build_dashboard_state(root: str | Path) -> dict[str, Any]:
     ai_account_exists = (ai_state_dir / "paper_account.json").exists()
     ai_orders_raw = _read_json(ai_state_dir / "paper_orders.json", {}) if ai_account_exists else {}
     ai_option_orders_raw = _read_json(ai_state_dir / "paper_option_orders.json", {}) if ai_account_exists else {}
-    account = _read_json(state_dir / "paper_account.json", {})
-    counters = _read_json(state_dir / "daily_counters.json", {})
-    metrics = calculate_metrics(root_path)
+    allocator_namespace = str(
+        runtime.get("strategies", {})
+        .get("ai_instrument_allocator_v1", {})
+        .get("state_namespace", "ai_instrument_allocator_v1")
+    )
+    allocator_state_dir = state_dir / "strategy_sleeves" / allocator_namespace
+    allocator_log_dir = logs_dir / "strategy_sleeves" / allocator_namespace
+    allocator_account_exists = (allocator_state_dir / "paper_account.json").exists()
+    allocator_orders_raw = (
+        _read_json(allocator_state_dir / "paper_orders.json", {})
+        if allocator_account_exists
+        else {}
+    )
+    allocator_option_orders_raw = (
+        _read_json(allocator_state_dir / "paper_option_orders.json", {})
+        if allocator_account_exists
+        else {}
+    )
+    allocator_allocations = _read_jsonl(
+        allocator_log_dir / "allocations.jsonl",
+        limit=100,
+    )
+    allocator_decisions = _read_jsonl(
+        allocator_log_dir / "decisions.jsonl",
+        limit=100,
+    )
+    allocator_cycles = _read_jsonl(
+        allocator_log_dir / "cycles.jsonl",
+        limit=50,
+    )
+    short_counterfactuals = _read_jsonl(
+        allocator_log_dir / "short_equity_counterfactual.jsonl",
+        limit=100,
+    )
+    account = _as_dict(_read_json(state_dir / "paper_account.json", {}))
+    counters = _as_dict(_read_json(state_dir / "daily_counters.json", {}))
+    metrics = _safe_metrics(root_path)
     beginner_summary = _build_beginner_summary(
         heartbeat=heartbeat,
         account=account,
@@ -802,6 +912,21 @@ def build_dashboard_state(root: str | Path) -> dict[str, Any]:
                 .get("long_directional_options_v2_weighted", {})
                 .get("execution", "shadow_only")
             ),
+            "ai_gated_technical_v1_new_entries": bool(
+                runtime.get("strategies", {})
+                .get("ai_gated_technical_v1", {})
+                .get("new_entries_enabled", False)
+            ),
+            "long_directional_options_v2_weighted_new_entries": bool(
+                runtime.get("strategies", {})
+                .get("long_directional_options_v2_weighted", {})
+                .get("new_entries_enabled", False)
+            ),
+            "ai_instrument_allocator_v1": str(
+                runtime.get("strategies", {})
+                .get("ai_instrument_allocator_v1", {})
+                .get("execution", "disabled")
+            ),
         },
         "candidates": candidates,
         "option_decisions": option_decisions,
@@ -828,13 +953,60 @@ def build_dashboard_state(root: str | Path) -> dict[str, Any]:
         "ai_gated": {
             "namespace": ai_namespace,
             "account": _read_json(ai_state_dir / "paper_account.json", {}),
-            "positions": list(_read_json(ai_state_dir / "paper_positions.json", {}).values()) if ai_account_exists else [],
-            "option_positions": list(_read_json(ai_state_dir / "paper_option_positions.json", {}).values()) if ai_account_exists else [],
+            "positions": _dict_values(_read_json(ai_state_dir / "paper_positions.json", {})) if ai_account_exists else [],
+            "option_positions": _dict_values(_read_json(ai_state_dir / "paper_option_positions.json", {})) if ai_account_exists else [],
             "orders": list(ai_orders_raw.values()) if isinstance(ai_orders_raw, dict) else [],
             "option_orders": list(ai_option_orders_raw.values()) if isinstance(ai_option_orders_raw, dict) else [],
-            "metrics": calculate_metrics(root_path, namespace=ai_namespace) if ai_account_exists else None,
+            "metrics": _safe_metrics(root_path, namespace=ai_namespace)
+            if ai_account_exists
+            else None,
             "latest_cycle": ai_cycle_records[-1] if ai_cycle_records else None,
             "decisions": [_safe_ai_record(record) for record in ai_decision_records[-20:]],
+        },
+        "ai_instrument_allocator": {
+            "namespace": allocator_namespace,
+            "account": _read_json(
+                allocator_state_dir / "paper_account.json",
+                {},
+            ),
+            "positions": _dict_values(
+                _read_json(allocator_state_dir / "paper_positions.json", {})
+            )
+            if allocator_account_exists
+            else [],
+            "option_positions": _dict_values(
+                _read_json(allocator_state_dir / "paper_option_positions.json", {})
+            )
+            if allocator_account_exists
+            else [],
+            "orders": list(allocator_orders_raw.values())
+            if isinstance(allocator_orders_raw, dict)
+            else [],
+            "option_orders": list(allocator_option_orders_raw.values())
+            if isinstance(allocator_option_orders_raw, dict)
+            else [],
+            "metrics": _safe_metrics(root_path, namespace=allocator_namespace)
+            if allocator_account_exists
+            else None,
+            "latest_cycle": allocator_cycles[-1] if allocator_cycles else None,
+            "latest_allocation": _safe_allocator_allocation(
+                allocator_allocations[-1]
+            )
+            if allocator_allocations
+            else None,
+            "decisions": [
+                _safe_allocator_decision(record)
+                for record in allocator_decisions[-20:]
+            ],
+            "plans": _dict_values(
+                _read_json(allocator_state_dir / "allocator_plans.json", {})
+            ),
+            "mandates": _dict_values(
+                _read_json(allocator_state_dir / "position_mandates.json", {})
+            ),
+            "short_equity_counterfactual": short_counterfactuals[-1]
+            if short_counterfactuals
+            else None,
         },
         "news_drift": {
             "metrics": calculate_news_drift_metrics(root_path),
@@ -1134,6 +1306,27 @@ function strategies(d){
     <article class="strategy"><div class="strategy-top"><h3>AI 独立模拟策略</h3><span class="pill ${ai.status==="failed_closed"?"bad":"good"}">${esc(statusLabel[ai.status]||ai.status)}</span></div><div class="strategy-number">${ai.completed||0} 次完成</div><p class="strategy-copy">${esc(aiCopy)}</p></article>
   </div></div></section>`;
 }
+function allocator(d){
+  const a=d.ai_instrument_allocator||{},m=a.metrics||{},allocation=a.latest_allocation||{},selected=allocation.selected_instrument||{},cf=allocation.counterfactual_2000||{},short=a.short_equity_counterfactual||{},mandates=a.mandates||[],plans=a.plans||[],costs=m.execution_cost_decomposition||{};
+  const instrument=selected.instrument_type==="equity"?"股票":selected.instrument_type==="call"?"看涨 Call":selected.instrument_type==="put"?"看跌 Put":"尚未选中";
+  const affordability=allocation.counterfactual_2000==null?"尚无可比较的已选工具":cf.affordable?`同一工具可负担，最多 ${esc(cf.max_affordable_quantity)} 单位`:`同一工具不可负担：${esc(cf.rejection_reason||"超过风险预算")}`;
+  const rows=(a.decisions||[]).slice().reverse().slice(0,6).map(x=>{const s=x.signal||{};return `<tr><td>${localTime(x.asof)}</td><td><strong>${esc(x.ticker)}</strong></td><td>${esc(x.stage)}</td><td>${esc(s.horizon||"—")}</td><td>${esc(s.action||"—")}</td><td class="reason">${esc(s.thesis||s.no_trade_reason||"—")}</td></tr>`}).join("");
+  return `<section class="band"><div class="band-head"><div><h2>AI Instrument Allocator · 独立 $10,000 模拟账户</h2><p class="muted">先预测指定时间范围的涨跌区间，再由 Python 比较股票、Call 或 Put；模型不能直接下单。</p></div><span class="pill good">独立纸面账户</span></div><div class="band-body">
+    <div class="metrics">
+      <div class="metric"><div class="metric-name">当前净值</div><div class="metric-value">${m.ending_equity==null?"尚未初始化":money(m.ending_equity)}</div><div class="metric-note">初始假钱 $10,000</div></div>
+      <div class="metric"><div class="metric-name">累计结果</div><div class="metric-value ${tone(m.realized_pnl)}">${m.realized_pnl==null?"—":signedMoney(m.realized_pnl)}</div><div class="metric-note">独立于旧 $2,000 账本</div></div>
+      <div class="metric"><div class="metric-name">最近选中的工具</div><div class="metric-value">${esc(selected.ticker||"—")} ${esc(instrument)}</div><div class="metric-note">${selected.quantity==null?"没有订单":`${esc(selected.quantity)} 单位，计划价 ${money(selected.entry_price)}`}</div></div>
+      <div class="metric"><div class="metric-name">执行成本核对</div><div class="metric-value">${costs.closed_round_trip_count||0} 笔闭环</div><div class="metric-note">恒等式残差 ${number(costs.identity_residual_usd).toFixed(6)}</div></div>
+    </div>
+    <div class="advanced-grid" style="margin-top:14px">
+      <div><h3>$2,000 可负担性对照</h3><p>${affordability}</p><p class="small muted">只检查 $10,000 分配器已经选中的同一工具，不会重选股票、行权价或到期日。</p></div>
+      <div><h3>看跌影子基准</h3><p>${short.benchmark_name?`${esc(short.ticker)} 的假设直接做空结果只单独记录。`:"最近没有看跌影子记录。"}</p><p class="small muted">不会进入账户、不会创建订单，也不会与 Long Put PnL 合并。</p></div>
+      <div><h3>持仓期限与恢复</h3><p>${mandates.filter(x=>x.status==="open").length} 个有效 mandate · ${plans.filter(x=>x.status==="active").length} 个待执行计划</p><p class="small muted">intraday 当日平仓；next_close 次日平仓；two_to_five_days 按计划持有。缺失 mandate 会安全平仓。</p></div>
+      <div><h3>概率使用边界</h3><p>${allocation.probability_ev_available?"已校准后可显示概率 EV":"原始概率尚未校准，不显示概率 EV"}</p><p class="small muted">当前只把 signed return buckets 当作排序和情景输入。</p></div>
+    </div>
+    <div class="table-wrap" style="margin-top:14px"><table><thead><tr><th>时间</th><th>股票</th><th>阶段</th><th>期限</th><th>结论</th><th>简要论点</th></tr></thead><tbody>${rows||'<tr><td colspan="6" class="muted">尚无 allocator 模型决策。</td></tr>'}</tbody></table></div>
+  </div></section>`;
+}
 function newsDrift(d){
   const lane=d.news_drift||{},m=lane.metrics||{},c=lane.latest_cycle||{},h=(m.horizons||{}).next_close||{},p=h.portfolio_day||{};
   const signals=(c.signals||[]).slice(0,8);
@@ -1171,7 +1364,7 @@ function render(d){
   const b=d.beginner_summary||{};
   serviceHeader(b);
   document.getElementById("updated").textContent=`数据刷新 ${new Date().toLocaleTimeString("zh-CN",{hour12:false})} · 最近交易日 ${b.session_date||"—"}`;
-  document.getElementById("app").innerHTML=overview(d)+issues(d)+tradeTable(d)+strategies(d)+newsDrift(d)+candidates(d)+advanced(d);
+  document.getElementById("app").innerHTML=overview(d)+issues(d)+tradeTable(d)+strategies(d)+allocator(d)+newsDrift(d)+candidates(d)+advanced(d);
 }
 async function refresh(){
   try{
