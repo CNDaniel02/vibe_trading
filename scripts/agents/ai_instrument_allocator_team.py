@@ -7,6 +7,7 @@ from typing import Any
 from scripts.core.models import parse_ts
 from scripts.decision.signed_return_signal import (
     derive_signal_summary,
+    validate_actionable_signal,
     validate_signed_return_signal,
 )
 from scripts.llm.base_provider import LLMProvider, ProviderError, ProviderRequest
@@ -91,7 +92,10 @@ class AiInstrumentAllocatorTeam:
             model_snapshot = dict(snapshot)
             incremental_update = prior_signal is not None
             if incremental_update:
-                validate_signed_return_signal(prior_signal)
+                validate_actionable_signal(
+                    prior_signal,
+                    str(snapshot["decision_time"]),
+                )
                 model_snapshot["available_news"] = list(new_events or [])
             validate_agent_input(model_snapshot)
             base_context = {
@@ -157,6 +161,7 @@ class AiInstrumentAllocatorTeam:
                 "forecast_reference_price": reference_price,
                 "forecast_reference_time": reference_time,
             }
+            validate_actionable_signal(signal, str(snapshot["decision_time"]))
         except (ProviderError, ValueError) as exc:
             return self._failed(snapshot, f"structured model failure: {exc}", calls_before)
 
@@ -217,6 +222,7 @@ class AiInstrumentAllocatorTeam:
         ticker = str(snapshot.get("ticker", "UNKNOWN"))
         try:
             validate_agent_input(snapshot)
+            validate_actionable_signal(prior_signal, str(snapshot["decision_time"]))
             incremental_news = list(new_events)
             news_payload = dict(snapshot)
             news_payload["available_news"] = incremental_news

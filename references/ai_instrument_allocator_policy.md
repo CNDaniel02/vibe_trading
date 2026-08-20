@@ -78,6 +78,14 @@ model validation, Python fixes `forecast_reference_price` and
 snapshot. An 08:00 incremental update preserves both fields and the original
 horizon. Missing or future reference data fails closed.
 
+Before any `propose_trade` signal can be saved as an actionable plan, Python
+also requires a non-empty thesis, entry condition, and invalidation condition;
+a non-null `thesis_valid_until` strictly after decision time; and a holding-day
+value consistent with the named horizon (`0`, `1`, or `2..5`). Null, missing,
+expired, malformed, or inconsistent values become a structured fail-closed
+`no_trade`. The allocator repeats this check when consuming persisted state, so
+an invalid historical plan cannot reach order creation through a parse error.
+
 ## Instrument allocation
 
 Bullish signals compare long equity and eligible long calls. Bearish signals
@@ -98,17 +106,39 @@ The old forecast is never re-anchored to the current price. If price has already
 moved through the conservative target, the adverse remaining scenario normally
 causes the executable hurdle to reject the trade.
 
+`planned_exit_at` is calculated once from the XNYS exchange calendar before
+allocation and is reused unchanged by both option repricing and the persisted
+position mandate. Black-Scholes time decay subtracts the actual elapsed
+calendar duration between decision and planned exit, including weekends and
+exchange holidays. It does not substitute a one-day trading-session count for
+a Friday-to-Monday or holiday-weekend hold.
+
 When a desired-direction option quote has IV, the allocation also records the
 nearest-strike candidate's horizon-scaled market-implied move
-(`IV * sqrt(horizon_days / 365)`), the remaining-forecast/implied-move ratio,
+(`IV * sqrt(elapsed_calendar_days / 365)`), the remaining-forecast/implied-move ratio,
 and whether the remaining forecast exceeds that move. This is an explicit
 market comparison diagnostic, not a probability EV or an independent model
 probability.
 
 Delta, Gamma, Theta, and Vega explain sensitivity; they are not substituted for
-multi-day repricing. Final comparison uses conservative repriced net return,
-break-even move, spread, slippage, and tick cost. Calibration completion does
-not change paper fill rules.
+multi-day repricing. Each candidate records conservative `scenario_pnl_usd`,
+`scenario_return_on_account_nav`, `deterministic_risk_usd`, and deterministic
+risk as a share of the same `$10,000` sleeve. The frozen
+`deterministic_risk_adjusted_v1` selector ranks eligible candidates by:
+
+```text
+selection_score = conservative scenario PnL / deterministic capital at risk
+```
+
+For equity, deterministic risk is planned-stop loss; for a long option it is
+the full premium. This prevents an option's premium return percentage from
+being compared directly with an equity notional return percentage. Raw model
+probabilities remain excluded from EV and selection. Scenario pricing and the
+paper fill model share the same contract cutoff/tick rounding functions, so a
+price above the `$3` cutoff cannot be rounded on two different tick schedules.
+Final eligibility still uses conservative repriced return, break-even move,
+spread, slippage, and tick cost. Calibration completion does not change paper
+fill rules.
 
 ## Deterministic risk
 
@@ -166,3 +196,9 @@ gross midpoint PnL
 
 The identity residual must remain near zero. Forward paper results, not replay,
 are the primary promotion evidence.
+
+## Revision record
+
+- 2026-08-20: added actionable-signal fail-closed semantics, account-risk
+  normalized cross-instrument selection, exchange-calendar elapsed option
+  repricing, and shared scenario/fill tick rounding.

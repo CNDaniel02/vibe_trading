@@ -474,12 +474,18 @@ dashboard 是只读视图。它不启动服务、不修改策略、不下单，�
 dashboard 使用五个相互隔离的客户端视图：
 
 1. `总览`：先显示 service、market session 和 freshness，再并列显示旧 `$2,000` 账本与 `$10,000 ai_instrument_allocator_v1` sleeve。两套账户的 cash、positions、orders 和 PnL 不合并。
-2. `持仓与订单`：分别收集主账户、旧 AI sleeve 和 allocator sleeve 的 equity/option position 与 order。`created`、`submitted_to_paper_broker`、`open`、`partially_filled` 只属于未完成订单，不能显示为持仓；已结束订单默认折叠。
-3. `策略表现`：按行显示策略的 execution mode、账户归属、决策、入场、平仓、PnL、胜率和最近结论。`shadow_only`、`只管理旧仓` 和 `模拟交易` 不混淆。
+2. `持仓与订单`：分别收集主账户、旧 AI sleeve 和 allocator sleeve 的 equity/option position 与 order。只有 `filled`、`cancelled`、`expired` 和 `rejected` 视为已结束；`created`、`submitted_to_paper_broker`、`open`、`partially_filled` 以及未知状态都保留为未完成订单，不能显示为持仓。已结束订单默认折叠。
+3. `策略表现`：按行显示策略的 execution mode、账户归属、决策、入场、平仓、PnL、胜率和最近结论。`shadow_only`、`只管理旧仓`、`影子研究 / 管理旧仓` 和 `模拟交易` 不混淆。
 4. `AI 决策`：展示候选、Exa 证据、DeepSeek 结构化结果、Challenge 和 deterministic Python risk veto。长证据默认折叠，`reasoning_content` 和 API key 不进入 dashboard state 或页面。
 5. `系统健康`：当前 heartbeat、scheduler、market data、paper boundary、Exa、DeepSeek 和 audit 状态优先；最近交易日累计错误另列为历史事件，避免把历史 390 次失败误读成当前仍有 390 个故障。
 
 页面使用 URL hash 保存当前 tab，支持左右方向键、Home/End 和 ARIA tab semantics。浏览器每 15 秒刷新，在 `document.hidden=true` 时暂停；服务端 `_read_jsonl` 从文件尾部按块读取最后 N 条有效记录，不再为每次页面刷新整文件加载几十 MB 的 audit/decision/runtime log。HTTP handler 只实现 `GET`、`HEAD` 和 `OPTIONS`，且 dashboard 模块不导入 broker adapter。
+
+安全带不是静态声明：runtime 启动与 healthcheck 都调用 `assert_paper_mode`，只有 `paper=true`、`live_readonly=false`、`live_trading=false` 才能继续；API 返回配置中的真实三态值，dashboard 也只在 `true / false / false` 时显示纯模拟状态。顶部把 forward heartbeat、heartbeat 中的市场状态和最新股票报价分开；健康页再分别显示股票与期权报价观察时间。损坏、未来或过期 heartbeat 以及未来报价均按 stale fail-closed 展示，旧 market session 不能继续显示成当前正常交易。没有最近作业状态时 scheduler 保持中性，不得显示绿色正常。
+
+订单 payload 会忽略损坏的 null 记录、保留并显示所有未完成订单，并在每个账户/工具组中独立选择最近完成记录；未知订单状态按未完成告警，不会被误计为历史完成。页面显示最近 20 笔和真实完成总数。主账户、旧 AI sleeve 和 allocator sleeve 的 metrics 使用状态文件与日志签名缓存，任何相关文件变化都会失效重算；News Drift 的签名覆盖 SQLite、WAL、SHM、`llm_usage.jsonl` 和 `news_drift_cycles.jsonl`，旧 AI directional metrics 还覆盖 `ai_gated_decisions.jsonl`。News Drift 数据库或 JSON 指标异常被限制在该组件内，返回 `metrics_available=false`，不会中断整个只读页面。
+
+日报 session 以 heartbeat 中最近一次 forward exchange session 为优先来源，`daily_counters.date` 只作回退，避免无新入场时把当天作业、模型调用和异常计数归到前一日。策略页的 sleeve 累计 PnL 使用当前净值减初始资金；News Drift 的收益标签与真实平仓分开，达到最小样本数但尚未盈利也不会显示成正面结论。
 
 ## 15. Historical Replay 和 Forward Evaluation
 

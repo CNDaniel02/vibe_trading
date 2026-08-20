@@ -9,7 +9,10 @@ from scripts.agents.ai_instrument_allocator_team import AiInstrumentAllocatorTea
 from scripts.core.audit import append_jsonl
 from scripts.core.models import Quote, parse_ts, utc_now
 from scripts.decision.instrument_allocator import allocate_instrument
-from scripts.decision.signed_return_signal import derive_signal_summary
+from scripts.decision.signed_return_signal import (
+    derive_signal_summary,
+    validate_actionable_signal,
+)
 from scripts.discovery.ai_gated_pipeline import AiGatedPaperPipeline
 from scripts.discovery.evidence_store import EvidenceSnapshotStore
 from scripts.exit.evaluate_exit import evaluate_position_exit
@@ -775,8 +778,19 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
     ) -> dict[str, Any]:
         if stage not in self.EXECUTION_STAGES:
             return {"status": "no_trade", "reason": "research stage cannot create orders", "order": None}
-        ticker = str(plan["ticker"]).upper()
-        signal = dict(plan["signal"])
+        try:
+            ticker = str(plan["ticker"]).upper()
+            raw_signal = plan["signal"]
+            if not isinstance(raw_signal, dict):
+                raise TypeError("plan signal must be an object")
+            signal = dict(raw_signal)
+            validate_actionable_signal(signal, now)
+        except (KeyError, TypeError, ValueError) as exc:
+            return {
+                "status": "no_trade",
+                "reason": f"invalid actionable signal: {exc}",
+                "order": None,
+            }
         conditional_plan = plan.get("stage") in self.RESEARCH_STAGES - {"intraday"}
         if stage == "open_execution" and not conditional_plan:
             return {
@@ -831,16 +845,33 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                 "reason": f"fresh executable data failed closed: {type(exc).__name__}: {exc}",
                 "order": None,
             }
-        execution_now = max(
-            [
-                parse_ts(now),
-                parse_ts(quote.asof),
-                *(
-                    parse_ts(option_quote.updated_at)
-                    for _, option_quote in option_candidates
+        try:
+            execution_now = max(
+                [
+                    parse_ts(now),
+                    parse_ts(quote.asof),
+                    *(
+                        parse_ts(option_quote.updated_at)
+                        for _, option_quote in option_candidates
+                    ),
+                ]
+            ).isoformat()
+            planned_exit_at = planned_exit_time(
+                execution_now,
+                signal["horizon"],
+                max_holding_trading_days=int(
+                    signal.get("max_holding_trading_days", 1)
                 ),
-            ]
-        ).isoformat()
+                minutes_before_close=int(
+                    self.config["paper"].get("exit_before_close_minutes", 10)
+                ),
+            )
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            return {
+                "status": "no_trade",
+                "reason": f"fresh executable data failed closed: {type(exc).__name__}: {exc}",
+                "order": None,
+            }
         allocation = allocate_instrument(
             signal,
             quote,
@@ -848,6 +879,7 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
             account_state,
             self.config,
             execution_now,
+            planned_exit_at=planned_exit_at,
         )
         allocation.update(
             {
@@ -883,12 +915,6 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
         if allocation.get("status") != "selected" or not isinstance(selected, dict):
             return {"status": "no_trade", "reason": allocation.get("reason"), "allocation": allocation, "order": None}
 
-        planned_exit_at = planned_exit_time(
-            execution_now,
-            signal["horizon"],
-            max_holding_trading_days=int(signal.get("max_holding_trading_days", 1)),
-            minutes_before_close=int(self.config["paper"].get("exit_before_close_minutes", 10)),
-        )
         if selected["instrument_type"] == "equity":
             order = self.broker.create_order(
                 decision_id=allocation["allocation_id"],

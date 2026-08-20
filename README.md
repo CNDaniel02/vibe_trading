@@ -256,8 +256,18 @@ The dashboard is a five-view read-only control center:
 
 The browser polls every 15 seconds and pauses while its tab is hidden. The
 server reads bounded JSONL tails instead of loading complete growing logs on
-every refresh. It exposes only `GET`, `HEAD`, and `OPTIONS`, imports no broker
-adapter, and has no order, restart, or configuration endpoint.
+every refresh. Metrics are cached by the signatures of their config, account,
+and log inputs and are recomputed after any input changes, including SQLite WAL
+updates and the News Drift/AI logs used by derived metrics. Equity quote age,
+option quote age, and the service heartbeat are reported separately; malformed
+or future timestamps fail closed as stale. The latest forward exchange session
+takes precedence over a daily counter that has not rolled because no entry was
+placed. Paper-only status requires `paper=true`, `live_readonly=false`, and
+`live_trading=false`; runtime startup and healthcheck reject any other mode.
+Malformed null order/position records are ignored, while unknown order statuses
+remain visible as unfinished instead of being counted as completed history.
+The server exposes only `GET`, `HEAD`, and `OPTIONS`, imports no broker adapter,
+and has no order, restart, or configuration endpoint.
 
 ## Promotion Gate
 

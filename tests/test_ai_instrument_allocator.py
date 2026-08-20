@@ -20,6 +20,7 @@ from scripts.simulation.paper_broker import PaperBroker
 
 REGULAR_NOW = "2026-07-13T15:00:00+00:00"
 OPEN_EXECUTION_NOW = "2026-07-13T13:32:00+00:00"
+NEXT_CLOSE_EXIT = "2026-07-14T19:50:00+00:00"
 
 SIGNED_BUCKETS = {
     "return_lt_minus_5_pct": 0.02,
@@ -459,6 +460,62 @@ def test_allocator_team_enforces_challenge_veto_as_no_trade(paper_root: Path) ->
     ]
 
 
+def test_signed_return_signal_rejects_non_finite_probability() -> None:
+    from scripts.decision.signed_return_signal import validate_signed_return_signal
+
+    signal = _signed_signal()
+    signal["signed_return_probability_buckets"][
+        "return_plus_0_5_to_plus_2_pct"
+    ] = float("nan")
+
+    with pytest.raises(ValueError, match="finite"):
+        validate_signed_return_signal(signal)
+
+
+@pytest.mark.parametrize(
+    "invalid_case",
+    ["null_valid_until", "missing_invalidation", "expired", "horizon_mismatch"],
+)
+def test_allocator_team_fails_closed_for_invalid_actionable_mandate(
+    paper_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_case: str,
+) -> None:
+    from scripts.agents.ai_instrument_allocator_team import AiInstrumentAllocatorTeam
+
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    team = AiInstrumentAllocatorTeam(config, MockProvider(tracker), tracker)
+    original_call = team._call
+
+    def invalidating_call(agent_name, payload, schema):
+        value = original_call(agent_name, payload, schema)
+        if agent_name.endswith("decision_manager"):
+            value = dict(value)
+            if invalid_case == "null_valid_until":
+                value["thesis_valid_until"] = None
+            elif invalid_case == "missing_invalidation":
+                value.pop("invalidation_condition", None)
+            elif invalid_case == "expired":
+                value["thesis_valid_until"] = "2026-07-13T14:59:59+00:00"
+            else:
+                value["horizon"] = "next_close"
+                value["max_holding_trading_days"] = 2
+        return value
+
+    monkeypatch.setattr(team, "_call", invalidating_call)
+    analysis = team.analyze(
+        _allocator_snapshot(),
+        {"ticker": "AAPL", "score": 0.8, "rationale": "fixture", "risk_flags": []},
+        stage="fast",
+    )
+
+    assert analysis["fail_closed"] is True
+    assert analysis["signal"]["action"] == "no_trade"
+    assert analysis["signal"]["entry_now"] is False
+    assert "actionable signal" in analysis["signal"]["no_trade_reason"]
+
+
 def _option_contract(option_id: str, expiration: str, option_type: str = "call"):
     from scripts.options.models import OptionContract
 
@@ -607,7 +664,7 @@ def test_option_scenario_repricing_uses_spot_time_iv_and_reports_vega() -> None:
         quote,
         spot=100,
         now=REGULAR_NOW,
-        horizon_days=1,
+        elapsed_calendar_days=1,
         move_pct=3.0,
         iv_shifts=[-0.05, 0.0, 0.05],
         costs=costs,
@@ -617,7 +674,7 @@ def test_option_scenario_repricing_uses_spot_time_iv_and_reports_vega() -> None:
         quote,
         spot=100,
         now=REGULAR_NOW,
-        horizon_days=5,
+        elapsed_calendar_days=5,
         move_pct=0.0,
         iv_shifts=[0.0],
         costs=costs,
@@ -630,6 +687,74 @@ def test_option_scenario_repricing_uses_spot_time_iv_and_reports_vega() -> None:
     assert up["conservative_exit_bid"] > flat_later["conservative_exit_bid"]
     assert up["probability_ev_available"] is False
     assert up["probability_ev_usd"] is None
+
+
+def test_option_scenario_and_fill_use_the_same_tick_side_of_cutoff() -> None:
+    from scripts.options.fill_model import simulate_option_fill
+    from scripts.options.models import OptionOrder
+    from scripts.options.scenario_pricing import reprice_option_scenarios
+
+    contract = _option_contract("call-tick-cutoff", "2026-08-21")
+    quote = _option_quote("call-tick-cutoff", bid=3.00, ask=3.01)
+    costs = {
+        "slippage_bps": 0,
+        "minimum_slippage_usd_per_contract": 0.01,
+        "commission_per_contract_usd": 0,
+        "price_tick_usd": 0.01,
+    }
+    repricing = reprice_option_scenarios(
+        contract,
+        quote,
+        spot=100,
+        now=REGULAR_NOW,
+        elapsed_calendar_days=1,
+        move_pct=1.0,
+        iv_shifts=[0.0],
+        costs=costs,
+    )
+    buy = simulate_option_fill(
+        OptionOrder(
+            order_id="buy-tick-cutoff",
+            decision_id="decision-tick-cutoff",
+            contract=contract,
+            intent="buy_to_open",
+            quantity=1,
+            order_type="market",
+            limit_price=None,
+        ),
+        quote,
+        costs,
+        REGULAR_NOW,
+    )
+
+    assert buy.status == "filled"
+    assert repricing["entry_executable_ask"] == buy.fill.price == 3.05
+
+    scenario = repricing["scenarios"][0]
+    projected_bid = scenario["repriced_mid"] - (quote.ask - quote.bid) / 2
+    exit_quote = replace(
+        quote,
+        bid=projected_bid,
+        ask=projected_bid + 0.01,
+        mark=projected_bid + 0.005,
+    )
+    sell = simulate_option_fill(
+        OptionOrder(
+            order_id="sell-tick-cutoff",
+            decision_id="decision-tick-cutoff",
+            contract=contract,
+            intent="sell_to_close",
+            quantity=1,
+            order_type="market",
+            limit_price=None,
+        ),
+        exit_quote,
+        costs,
+        REGULAR_NOW,
+    )
+
+    assert sell.status == "filled"
+    assert scenario["executable_exit_bid"] == sell.fill.price
 
 
 def _bearish_signal() -> dict:
@@ -698,6 +823,7 @@ def test_allocator_selects_equity_for_bullish_signal_when_no_option_clears_hurdl
         _account_state(),
         config,
         REGULAR_NOW,
+        planned_exit_at=NEXT_CLOSE_EXIT,
     )
 
     assert allocation["status"] == "selected"
@@ -706,6 +832,273 @@ def test_allocator_selects_equity_for_bullish_signal_when_no_option_clears_hurdl
     assert allocation["probability_ev_available"] is False
     assert allocation["probability_ev_usd"] is None
     assert allocation["raw_probability_used_for_ev"] is False
+
+
+def test_allocator_compares_equity_and_option_on_frozen_deterministic_risk_score(
+    paper_root: Path,
+) -> None:
+    from scripts.decision.instrument_allocator import allocate_instrument
+
+    buckets = {
+        "return_lt_minus_5_pct": 0.02,
+        "return_minus_5_to_minus_2_pct": 0.01,
+        "return_minus_2_to_minus_0_5_pct": 0.02,
+        "return_minus_0_5_to_plus_0_5_pct": 0.05,
+        "return_plus_0_5_to_plus_2_pct": 0.0,
+        "return_plus_2_to_plus_5_pct": 0.50,
+        "return_gt_plus_5_pct": 0.40,
+    }
+    allocation = allocate_instrument(
+        _anchored_signal(signed_return_probability_buckets=buckets),
+        _underlying_quote(),
+        [
+            (
+                _option_contract("aapl-call-risk-score", "2026-08-21"),
+                _option_quote("aapl-call-risk-score", bid=2.78, ask=2.82),
+            )
+        ],
+        _account_state(),
+        load_runtime_config(paper_root),
+        REGULAR_NOW,
+        planned_exit_at=NEXT_CLOSE_EXIT,
+    )
+
+    by_type = {item["instrument_type"]: item for item in allocation["considered"]}
+    assert by_type["call"]["conservative_net_return_pct"] > by_type["equity"][
+        "conservative_net_return_pct"
+    ]
+    assert by_type["equity"]["selection_score"] > by_type["call"]["selection_score"]
+    assert allocation["selected_instrument"]["instrument_type"] == "equity"
+    assert allocation["selection_policy_version"] == "deterministic_risk_adjusted_v1"
+    for candidate in by_type.values():
+        assert candidate["scenario_pnl_usd"] > 0
+        assert candidate["scenario_return_on_account_nav"] > 0
+        assert candidate["deterministic_risk_usd"] > 0
+        assert candidate["deterministic_risk_pct_of_nav"] > 0
+        assert candidate["selection_score"] == pytest.approx(
+            candidate["scenario_return_on_account_nav"]
+            / candidate["deterministic_risk_pct_of_nav"]
+        )
+        assert candidate["selection_score_method"] == (
+            "conservative_scenario_pnl_over_deterministic_risk_v1"
+        )
+
+
+@pytest.mark.parametrize(
+    "invalid_case",
+    ["null_valid_until", "missing_invalidation", "expired", "horizon_mismatch"],
+)
+def test_allocator_returns_structured_no_trade_for_invalid_actionable_mandate(
+    paper_root: Path,
+    invalid_case: str,
+) -> None:
+    from scripts.decision.instrument_allocator import allocate_instrument
+
+    signal = _anchored_signal()
+    if invalid_case == "null_valid_until":
+        signal["thesis_valid_until"] = None
+    elif invalid_case == "missing_invalidation":
+        signal.pop("invalidation_condition")
+    elif invalid_case == "expired":
+        signal["thesis_valid_until"] = "2026-07-13T14:59:59+00:00"
+    else:
+        signal["max_holding_trading_days"] = 2
+
+    allocation = allocate_instrument(
+        signal,
+        _underlying_quote(),
+        [],
+        _account_state(),
+        load_runtime_config(paper_root),
+        REGULAR_NOW,
+        planned_exit_at=NEXT_CLOSE_EXIT,
+    )
+
+    assert allocation["status"] == "no_trade"
+    assert allocation["selected_instrument"] is None
+    assert allocation["considered"] == []
+    assert allocation["reason"].startswith("invalid actionable signal:")
+
+
+def test_allocator_execution_rejects_invalid_persisted_signal_before_market_data(
+    paper_root: Path,
+) -> None:
+    from scripts.discovery.ai_instrument_allocator_pipeline import (
+        AiInstrumentAllocatorPipeline,
+    )
+
+    class MustNotFetchExecutionData(_AllocatorExecutionDiscovery):
+        def fetch_current_quote(self, *_args, **_kwargs):
+            raise AssertionError("invalid persisted signal must fail before market data")
+
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    pipeline = AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=MustNotFetchExecutionData(),
+        news_adapter=_NoNews(),
+        option_data=_NoOptions(),
+    )
+    invalid_signal = _anchored_signal()
+    invalid_signal["max_holding_trading_days"] = None
+    result = pipeline._execute_plan(
+        {
+            "plan_id": "invalid-persisted-plan",
+            "strategy": "ai_instrument_allocator_v1",
+            "ticker": "AAPL",
+            "stage": "intraday",
+            "signal": invalid_signal,
+            "snapshot": {"snapshot_id": "invalid-persisted-snapshot"},
+        },
+        REGULAR_NOW,
+        stage="intraday",
+    )
+
+    assert result["status"] == "no_trade"
+    assert result["order"] is None
+    assert result["reason"].startswith("invalid actionable signal:")
+
+
+def test_allocator_execution_rejects_null_persisted_signal_before_market_data(
+    paper_root: Path,
+) -> None:
+    from scripts.discovery.ai_instrument_allocator_pipeline import (
+        AiInstrumentAllocatorPipeline,
+    )
+
+    class MustNotFetchExecutionData(_AllocatorExecutionDiscovery):
+        def fetch_current_quote(self, *_args, **_kwargs):
+            raise AssertionError("null persisted signal must fail before market data")
+
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    pipeline = AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=MustNotFetchExecutionData(),
+        news_adapter=_NoNews(),
+        option_data=_AllocatorNoOptions(),
+    )
+
+    result = pipeline._execute_plan(
+        {
+            "plan_id": "null-signal-plan",
+            "strategy": "ai_instrument_allocator_v1",
+            "ticker": "AAPL",
+            "stage": "intraday",
+            "signal": None,
+            "snapshot": {"snapshot_id": "null-signal-snapshot"},
+        },
+        REGULAR_NOW,
+        stage="intraday",
+    )
+
+    assert result["status"] == "no_trade"
+    assert result["order"] is None
+    assert result["reason"].startswith("invalid actionable signal:")
+
+
+def test_allocator_execution_rejects_invalid_quote_timestamp(
+    paper_root: Path,
+) -> None:
+    from scripts.discovery.ai_instrument_allocator_pipeline import (
+        AiInstrumentAllocatorPipeline,
+    )
+
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    pipeline = AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=_AllocatorExecutionDiscovery("not-a-time"),
+        news_adapter=_NoNews(),
+        option_data=_AllocatorNoOptions(),
+    )
+
+    result = pipeline._execute_plan(
+        {
+            "plan_id": "invalid-quote-time-plan",
+            "strategy": "ai_instrument_allocator_v1",
+            "ticker": "AAPL",
+            "stage": "intraday",
+            "signal": _anchored_signal(),
+            "snapshot": {"snapshot_id": "invalid-quote-time-snapshot"},
+        },
+        REGULAR_NOW,
+        stage="intraday",
+    )
+
+    assert result["status"] == "no_trade"
+    assert result["order"] is None
+    assert result["reason"].startswith("fresh executable data failed closed:")
+
+
+@pytest.mark.parametrize(
+    ("now", "expected_exit_date", "minimum_elapsed_days"),
+    [
+        ("2026-07-17T15:00:00+00:00", "2026-07-20", 3.0),
+        ("2026-09-04T15:00:00+00:00", "2026-09-08", 4.0),
+    ],
+)
+def test_allocator_option_repricing_uses_calendar_elapsed_time_to_next_session(
+    paper_root: Path,
+    now: str,
+    expected_exit_date: str,
+    minimum_elapsed_days: float,
+) -> None:
+    from scripts.core.models import Quote, parse_ts
+    from scripts.decision.instrument_allocator import allocate_instrument
+    from scripts.exit.position_mandates import planned_exit_time
+
+    planned_exit_at = planned_exit_time(
+        now,
+        "next_close",
+        max_holding_trading_days=1,
+        minutes_before_close=10,
+    )
+    signal = _anchored_signal(
+        forecast_reference_time=now,
+        thesis_valid_until=planned_exit_at,
+    )
+    quote = Quote(
+        "AAPL",
+        bid=100.0,
+        ask=100.05,
+        last=100.02,
+        asof=now,
+        source="fixture",
+        avg_daily_volume_usd=500_000_000,
+    )
+    allocation = allocate_instrument(
+        signal,
+        quote,
+        [
+            (
+                _option_contract("aapl-calendar-call", "2026-10-16"),
+                replace(_option_quote("aapl-calendar-call"), updated_at=now),
+            )
+        ],
+        _account_state(),
+        load_runtime_config(paper_root),
+        now,
+        planned_exit_at=planned_exit_at,
+    )
+
+    elapsed = (parse_ts(planned_exit_at) - parse_ts(now)).total_seconds() / 86_400
+    option = next(
+        item for item in allocation["considered"] if item["instrument_type"] == "call"
+    )
+    assert parse_ts(planned_exit_at).date().isoformat() == expected_exit_date
+    assert elapsed > minimum_elapsed_days
+    assert allocation["scenario_elapsed_calendar_days"] == pytest.approx(elapsed)
+    assert option["scenario_repricing"]["elapsed_calendar_days"] == pytest.approx(elapsed)
 
 
 def test_allocator_uses_put_only_for_bearish_executable_direction(
@@ -727,6 +1120,7 @@ def test_allocator_uses_put_only_for_bearish_executable_direction(
         _account_state(),
         config,
         REGULAR_NOW,
+        planned_exit_at=NEXT_CLOSE_EXIT,
     )
 
     considered = {item["instrument_type"] for item in allocation["considered"]}
@@ -759,6 +1153,7 @@ def test_allocator_uses_remaining_move_from_fixed_forecast_reference(
         _account_state(),
         load_runtime_config(paper_root),
         REGULAR_NOW,
+        planned_exit_at=NEXT_CLOSE_EXIT,
     )
 
     assert allocation["forecast_reference_price"] == 100.0
@@ -780,6 +1175,7 @@ def test_allocator_fails_closed_without_forecast_reference(
         _account_state(),
         load_runtime_config(paper_root),
         REGULAR_NOW,
+        planned_exit_at=NEXT_CLOSE_EXIT,
     )
 
     assert allocation["status"] == "no_trade"
@@ -792,6 +1188,7 @@ def test_allocator_records_market_implied_move_comparison(
 ) -> None:
     import math
 
+    from scripts.core.models import parse_ts
     from scripts.decision.instrument_allocator import allocate_instrument
 
     allocation = allocate_instrument(
@@ -801,14 +1198,20 @@ def test_allocator_records_market_implied_move_comparison(
         _account_state(),
         load_runtime_config(paper_root),
         REGULAR_NOW,
+        planned_exit_at=NEXT_CLOSE_EXIT,
     )
 
-    implied = 0.30 * math.sqrt(1 / 365) * 100
+    elapsed_days = (
+        parse_ts(NEXT_CLOSE_EXIT) - parse_ts(REGULAR_NOW)
+    ).total_seconds() / 86_400
+    implied = 0.30 * math.sqrt(elapsed_days / 365) * 100
     assert allocation["market_implied_move_pct"] == pytest.approx(implied)
     assert allocation["forecast_to_implied_move_ratio"] == pytest.approx(
         abs(allocation["remaining_move_pct"]) / implied
     )
-    assert allocation["market_implied_move_method"] == "nearest_candidate_iv_sqrt_t"
+    assert allocation["market_implied_move_method"] == (
+        "nearest_candidate_iv_sqrt_calendar_time"
+    )
 
 
 def test_instrument_allocation_schema_accepts_forecast_and_implied_move_audit(
@@ -825,6 +1228,7 @@ def test_instrument_allocation_schema_accepts_forecast_and_implied_move_audit(
         _account_state(),
         load_runtime_config(paper_root),
         REGULAR_NOW,
+        planned_exit_at=NEXT_CLOSE_EXIT,
     )
     schema = json.loads(
         (Path(__file__).resolve().parents[1] / "schemas" / "instrument_allocation.schema.json").read_text(
@@ -851,6 +1255,7 @@ def test_allocator_rejects_neutral_signal_before_instrument_comparison(
         _account_state(),
         load_runtime_config(paper_root),
         REGULAR_NOW,
+        planned_exit_at=NEXT_CLOSE_EXIT,
     )
 
     assert allocation["status"] == "no_trade"
@@ -1178,6 +1583,18 @@ def test_allocator_plan_and_position_mandate_survive_restart(
     assert restarted_plans.allocations()["allocation-aapl"]["plan_id"] == "plan-aapl"
     assert restarted_mandates.for_exposure("equity:AAPL")["horizon"] == "next_close"
     assert (paper_root / "state" / "paper_account.json").read_bytes() == legacy_account_before
+
+
+def test_allocator_state_skips_corrupt_null_records(paper_root: Path) -> None:
+    from scripts.strategies.allocator_state import AllocatorStateStore
+
+    state = AllocatorStateStore(paper_root)
+    state.store.write_json("allocator_plans.json", {"corrupt": None})
+    state.store.write_json("allocator_allocations.json", {"corrupt": None})
+
+    assert state.plans() == {}
+    assert state.active_plans(REGULAR_NOW) == []
+    assert state.allocations() == {}
 
 
 def test_position_mandate_exit_is_horizon_aware_and_fails_closed() -> None:

@@ -5,9 +5,16 @@ from typing import Any
 from uuid import uuid4
 
 from scripts.core.models import Quote, parse_ts
-from scripts.decision.signed_return_signal import derive_signal_summary
+from scripts.decision.signed_return_signal import (
+    derive_signal_summary,
+    validate_actionable_signal,
+)
 from scripts.options.models import OptionContract, OptionQuote
 from scripts.options.scenario_pricing import reprice_option_scenarios
+
+
+_SELECTION_POLICY_VERSION = "deterministic_risk_adjusted_v1"
+_SELECTION_SCORE_METHOD = "conservative_scenario_pnl_over_deterministic_risk_v1"
 
 
 def _slippage(price: float, config: dict[str, Any], *, option: bool) -> float:
@@ -26,13 +33,23 @@ def _fractional_floor(value: float, increment: float) -> float:
     return math.floor((value + 1e-12) / increment) * increment
 
 
-def _horizon_days(signal: dict[str, Any]) -> float:
-    horizon = signal["horizon"]
-    if horizon == "intraday_close":
-        return 0.25
-    if horizon == "next_close":
-        return 1.0
-    return float(max(2, min(5, int(signal.get("max_holding_trading_days", 3)))))
+def _risk_adjusted_metrics(
+    *,
+    scenario_pnl_usd: float,
+    deterministic_risk_usd: float,
+    nav_usd: float,
+) -> dict[str, Any]:
+    return_on_nav = scenario_pnl_usd / nav_usd if nav_usd > 0 else 0.0
+    risk_pct = deterministic_risk_usd / nav_usd if nav_usd > 0 else 0.0
+    score = return_on_nav / risk_pct if risk_pct > 0 else None
+    return {
+        "scenario_pnl_usd": round(scenario_pnl_usd, 6),
+        "scenario_return_on_account_nav": round(return_on_nav, 10),
+        "deterministic_risk_usd": round(deterministic_risk_usd, 6),
+        "deterministic_risk_pct_of_nav": round(risk_pct, 10),
+        "selection_score": round(score, 10) if score is not None else None,
+        "selection_score_method": _SELECTION_SCORE_METHOD,
+    }
 
 
 def _equity_candidate(
@@ -70,6 +87,12 @@ def _equity_candidate(
         capacity_quantity = 0.0
     increment = float(config.get("risk", {}).get("fractional_share_increment", 0.001))
     quantity = _fractional_floor(capacity_quantity, increment)
+    deterministic_risk = quantity * unit_stop_risk
+    metrics = _risk_adjusted_metrics(
+        scenario_pnl_usd=(exit_price - entry) * quantity,
+        deterministic_risk_usd=deterministic_risk,
+        nav_usd=nav,
+    )
     return {
         "instrument_type": "equity",
         "ticker": quote.symbol,
@@ -82,7 +105,8 @@ def _equity_candidate(
         "planned_stop_price": round(stop_price, 6),
         "quantity": round(quantity, 6),
         "notional_usd": round(quantity * entry, 6),
-        "risk_usd": round(quantity * unit_stop_risk, 6),
+        "risk_usd": round(deterministic_risk, 6),
+        **metrics,
         "eligible": quantity > 0
         and net_return
         >= float(profile.get("equity_minimum_scenario_return_pct", 0)),
@@ -100,13 +124,13 @@ def _option_candidate(
     contract: OptionContract,
     quote: OptionQuote,
     *,
-    signal: dict[str, Any],
     spot: float,
     move_pct: float,
     account_state: dict[str, Any],
     config: dict[str, Any],
     profile: dict[str, Any],
     now: str,
+    elapsed_calendar_days: float,
 ) -> dict[str, Any]:
     iv_shifts = [
         float(value)
@@ -117,7 +141,7 @@ def _option_candidate(
         quote,
         spot=spot,
         now=now,
-        horizon_days=_horizon_days(signal),
+        elapsed_calendar_days=elapsed_calendar_days,
         move_pct=move_pct,
         iv_shifts=iv_shifts,
         costs=config.get("options_costs", {}),
@@ -149,9 +173,15 @@ def _option_candidate(
         quote,
         spot=spot,
         now=now,
-        horizon_days=_horizon_days(signal),
+        elapsed_calendar_days=elapsed_calendar_days,
         conservative_iv_shift=min(iv_shifts),
         costs=config.get("options_costs", {}),
+    )
+    deterministic_risk = unit_risk * quantity
+    metrics = _risk_adjusted_metrics(
+        scenario_pnl_usd=float(repricing["conservative_net_pnl_usd"]) * quantity,
+        deterministic_risk_usd=deterministic_risk,
+        nav_usd=nav,
     )
     return {
         "instrument_type": contract.option_type,
@@ -162,7 +192,8 @@ def _option_candidate(
         "multiplier": contract.multiplier,
         "entry_price": entry_price,
         "quantity": quantity,
-        "risk_usd": round(unit_risk * quantity, 6),
+        "risk_usd": round(deterministic_risk, 6),
+        **metrics,
         "spread_pct": round(quote.spread_pct(), 8),
         "preferred_spread": preferred,
         "conservative_move_pct": move_pct,
@@ -189,7 +220,7 @@ def _option_break_even_move(
     *,
     spot: float,
     now: str,
-    horizon_days: float,
+    elapsed_calendar_days: float,
     conservative_iv_shift: float,
     costs: dict[str, Any],
 ) -> float | None:
@@ -201,7 +232,7 @@ def _option_break_even_move(
             quote,
             spot=spot,
             now=now,
-            horizon_days=horizon_days,
+            elapsed_calendar_days=elapsed_calendar_days,
             move_pct=move,
             iv_shifts=[conservative_iv_shift],
             costs=costs,
@@ -237,6 +268,35 @@ def build_short_equity_counterfactual(
         "enters_account": False,
         "merged_with_long_put_pnl": False,
     }
+
+
+def _no_trade_allocation(
+    allocation_id: str,
+    reason: str,
+    signal_summary: dict[str, Any],
+    *,
+    planned_exit_at: str | None = None,
+    elapsed_calendar_days: float | None = None,
+) -> dict[str, Any]:
+    result = {
+        "allocation_id": allocation_id,
+        "status": "no_trade",
+        "reason": reason,
+        "signal_summary": signal_summary,
+        "considered": [],
+        "selected_instrument": None,
+        "counterfactual_2000": None,
+        "short_equity_counterfactual": None,
+        "selection_policy_version": _SELECTION_POLICY_VERSION,
+        "probability_ev_available": False,
+        "probability_ev_usd": None,
+        "raw_probability_used_for_ev": False,
+    }
+    if planned_exit_at is not None:
+        result["planned_exit_at"] = planned_exit_at
+    if elapsed_calendar_days is not None:
+        result["scenario_elapsed_calendar_days"] = elapsed_calendar_days
+    return result
 
 
 def build_same_instrument_counterfactual(
@@ -302,9 +362,20 @@ def allocate_instrument(
     account_state: dict[str, Any],
     config: dict[str, Any],
     now: str,
+    *,
+    planned_exit_at: str,
 ) -> dict[str, Any]:
     profile = config.get("strategies", {}).get("ai_instrument_allocator_v1", {})
-    summary = derive_signal_summary(signal)
+    allocation_id = f"aia_{uuid4().hex}"
+    try:
+        validate_actionable_signal(signal, now)
+        summary = derive_signal_summary(signal)
+    except (KeyError, TypeError, ValueError) as exc:
+        return _no_trade_allocation(
+            allocation_id,
+            f"invalid actionable signal: {exc}",
+            {},
+        )
     masses = sorted(
         (
             float(summary["bullish_probability"]),
@@ -314,7 +385,6 @@ def allocate_instrument(
         reverse=True,
     )
     direction = str(summary["direction"])
-    allocation_id = f"aia_{uuid4().hex}"
     if (
         signal.get("action") != "propose_trade"
         or direction == "neutral"
@@ -322,19 +392,28 @@ def allocate_instrument(
         or masses[0] - masses[1]
         < float(profile.get("minimum_direction_margin", 0.15))
     ):
-        return {
-            "allocation_id": allocation_id,
-            "status": "no_trade",
-            "reason": "signed return direction is neutral or insufficiently dominant",
-            "signal_summary": summary,
-            "considered": [],
-            "selected_instrument": None,
-            "counterfactual_2000": None,
-            "short_equity_counterfactual": None,
-            "probability_ev_available": False,
-            "probability_ev_usd": None,
-            "raw_probability_used_for_ev": False,
-        }
+        return _no_trade_allocation(
+            allocation_id,
+            "signed return direction is neutral or insufficiently dominant",
+            summary,
+        )
+
+    try:
+        elapsed_calendar_days = (
+            parse_ts(planned_exit_at) - parse_ts(now)
+        ).total_seconds() / 86_400
+    except (TypeError, ValueError) as exc:
+        return _no_trade_allocation(
+            allocation_id,
+            f"invalid planned exit: {exc}",
+            summary,
+        )
+    if elapsed_calendar_days <= 0:
+        return _no_trade_allocation(
+            allocation_id,
+            "invalid planned exit: planned_exit_at must be after decision time",
+            summary,
+        )
 
     reference_price = signal.get("forecast_reference_price")
     reference_time = signal.get("forecast_reference_time")
@@ -348,19 +427,13 @@ def allocate_instrument(
     except (TypeError, ValueError):
         reference_is_valid = False
     if not reference_is_valid:
-        return {
-            "allocation_id": allocation_id,
-            "status": "no_trade",
-            "reason": "missing or invalid forecast reference",
-            "signal_summary": summary,
-            "considered": [],
-            "selected_instrument": None,
-            "counterfactual_2000": None,
-            "short_equity_counterfactual": None,
-            "probability_ev_available": False,
-            "probability_ev_usd": None,
-            "raw_probability_used_for_ev": False,
-        }
+        return _no_trade_allocation(
+            allocation_id,
+            "missing or invalid forecast reference",
+            summary,
+            planned_exit_at=planned_exit_at,
+            elapsed_calendar_days=elapsed_calendar_days,
+        )
 
     forecast_move_pct = float(summary["conservative_move_pct"])
     forecast_target_price = reference_price * (1 + forecast_move_pct / 100)
@@ -399,10 +472,10 @@ def allocate_instrument(
         implied_option_id = nearest_implied[0].option_id
         implied_volatility = float(nearest_implied[1].implied_volatility)
         implied_move_pct = implied_volatility * math.sqrt(
-            _horizon_days(signal) / 365
+            elapsed_calendar_days / 365
         ) * 100
         implied_ratio = abs(remaining_move_pct) / implied_move_pct
-        implied_method = "nearest_candidate_iv_sqrt_t"
+        implied_method = "nearest_candidate_iv_sqrt_calendar_time"
 
     forecast_context = {
         "forecast_reference_price": reference_price,
@@ -421,6 +494,8 @@ def allocate_instrument(
             if implied_move_pct is not None
             else None
         ),
+        "planned_exit_at": planned_exit_at,
+        "scenario_elapsed_calendar_days": elapsed_calendar_days,
     }
     short_benchmark = build_short_equity_counterfactual(
         signal,
@@ -446,18 +521,27 @@ def allocate_instrument(
             _option_candidate(
                 contract,
                 option_quote,
-                signal=signal,
                 spot=underlying_quote.last,
                 move_pct=remaining_move_pct,
                 account_state=account_state,
                 config=config,
                 profile=profile,
                 now=now,
+                elapsed_calendar_days=elapsed_calendar_days,
             )
         )
     eligible = [item for item in considered if item["eligible"]]
     selected = (
-        max(eligible, key=lambda item: float(item["conservative_net_return_pct"]))
+        max(
+            eligible,
+            key=lambda item: (
+                float(item["selection_score"]),
+                float(item["scenario_return_on_account_nav"]),
+                -float(item["deterministic_risk_pct_of_nav"]),
+                item["instrument_type"] == "equity",
+                str(item.get("option_id", "")),
+            ),
+        )
         if eligible
         else None
     )
@@ -470,6 +554,7 @@ def allocate_instrument(
         "selected_instrument": selected,
         "counterfactual_2000": None,
         "short_equity_counterfactual": short_benchmark,
+        "selection_policy_version": _SELECTION_POLICY_VERSION,
         "probability_ev_available": False,
         "probability_ev_usd": None,
         "raw_probability_used_for_ev": False,

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import math
 from typing import Any
+
+from scripts.core.models import parse_ts
 
 
 SIGNED_RETURN_BUCKETS = (
@@ -43,11 +46,51 @@ def validate_signed_return_signal(signal: dict[str, Any]) -> None:
     buckets = signal.get("signed_return_probability_buckets")
     if not isinstance(buckets, dict) or set(buckets) != set(SIGNED_RETURN_BUCKETS):
         raise ValueError("signal must contain exactly the configured signed buckets")
-    probabilities = [float(buckets[name]) for name in SIGNED_RETURN_BUCKETS]
+    try:
+        probabilities = [float(buckets[name]) for name in SIGNED_RETURN_BUCKETS]
+    except (TypeError, ValueError) as exc:
+        raise ValueError("signed bucket probabilities must be numeric") from exc
+    if any(not math.isfinite(value) for value in probabilities):
+        raise ValueError("signed bucket probabilities must be finite")
     if any(value < 0 or value > 1 for value in probabilities):
         raise ValueError("signed bucket probabilities must be inside [0, 1]")
     if abs(sum(probabilities) - 1.0) > 1e-6:
         raise ValueError("signed bucket probabilities must sum to 1")
+
+
+def validate_actionable_signal(signal: dict[str, Any], decision_time: str) -> None:
+    validate_signed_return_signal(signal)
+    action = signal.get("action")
+    if action not in {"propose_trade", "no_trade"}:
+        raise ValueError("unsupported signal action")
+    if action != "propose_trade":
+        return
+
+    for field in ("thesis", "entry_condition", "invalidation_condition"):
+        if not isinstance(signal.get(field), str) or not signal[field].strip():
+            raise ValueError(f"actionable signal requires non-empty {field}")
+
+    valid_until = signal.get("thesis_valid_until")
+    if not isinstance(valid_until, str) or not valid_until.strip():
+        raise ValueError("actionable signal requires thesis_valid_until")
+    try:
+        valid_until_time = parse_ts(valid_until)
+        current = parse_ts(decision_time)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("actionable signal timestamps must be valid") from exc
+    if valid_until_time <= current:
+        raise ValueError("actionable signal thesis_valid_until must be in the future")
+
+    holding_days = signal.get("max_holding_trading_days")
+    if isinstance(holding_days, bool) or not isinstance(holding_days, int):
+        raise ValueError("actionable signal max_holding_trading_days must be an integer")
+    expected = {
+        "intraday_close": {0},
+        "next_close": {1},
+        "two_to_five_days": {2, 3, 4, 5},
+    }[str(signal["horizon"])]
+    if holding_days not in expected:
+        raise ValueError("actionable signal holding period does not match horizon")
 
 
 def derive_signal_summary(signal: dict[str, Any]) -> dict[str, Any]:

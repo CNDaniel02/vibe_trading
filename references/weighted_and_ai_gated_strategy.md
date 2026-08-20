@@ -86,6 +86,11 @@ Raw values remain uncalibrated and do not produce probability EV.
 Python compares long equity and long calls for bullish signals, or long puts for
 bearish signals. Multi-day option comparison uses underlying/time/IV scenario
 repricing with Vega diagnostics, not a local Delta/Gamma/Theta approximation.
+The executable allocator ranks eligible instruments on conservative scenario
+PnL divided by deterministic capital at risk using the same sleeve NAV, rather
+than directly comparing equity notional return with option premium return.
+Scenario decay uses the exchange-calendar-derived `planned_exit_at`, including
+weekends and holidays, and scenario/fill paths share one contract tick rule.
 Every selected instrument then passes the same deterministic broker risk gate.
 The `$2,000` counterfactual checks that exact selected instrument only.
 `short_equity_counterfactual` remains a no-account, no-order shadow benchmark.

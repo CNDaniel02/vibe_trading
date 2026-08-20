@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
+
+import yaml
+
+import scripts.dashboard.paper_dashboard as dashboard
 
 from scripts.dashboard.paper_dashboard import (
     _BEGINNER_PAGE,
@@ -64,7 +69,11 @@ def test_dashboard_state_explains_deterministic_rejection_and_paper_boundary(pap
     }
     (paper_root / "logs" / "decisions.jsonl").write_text(json.dumps(baseline) + "\n", encoding="utf-8")
     state = build_dashboard_state(paper_root)
-    assert state["mode"] == {"paper": True, "live_trading": False}
+    assert state["mode"] == {
+        "paper": True,
+        "live_readonly": False,
+        "live_trading": False,
+    }
     assert state["strategy_modes"]["weighted_relative_strength_v2"] == "shadow_only"
     assert state["safety"]["allow_options"] is True
     assert state["safety"]["options_risk"]["allow_sell_to_open"] is False
@@ -136,6 +145,8 @@ def test_dashboard_page_keeps_explicit_paper_only_boundary():
     assert "仅使用假钱模拟" in _BEGINNER_PAGE
     assert "不会调用真实下单工具" in _BEGINNER_PAGE
     assert "模拟交易控制台" in _BEGINNER_PAGE
+    assert "function paperOnlyMode(mode)" in _BEGINNER_PAGE
+    assert "live_readonly" in _BEGINNER_PAGE
 
 
 def test_dashboard_page_renders_all_operational_detail_views():
@@ -186,6 +197,38 @@ def test_dashboard_page_keeps_unknown_service_status_neutral():
 def test_dashboard_page_does_not_expose_decorative_arrows_to_accessibility_tree():
     assert 'content:"→"' not in _BEGINNER_PAGE
     assert 'content:"↓"' not in _BEGINNER_PAGE
+
+
+def test_dashboard_scheduler_without_recent_jobs_is_not_marked_healthy():
+    assert "if(!jobValues.length)" in _BEGINNER_PAGE
+    assert 'add("Scheduler","无最近状态"' in _BEGINNER_PAGE
+
+
+def test_dashboard_escapes_allocator_quantity_before_inserting_html():
+    assert '${esc(selected.quantity??"—")}' in _BEGINNER_PAGE
+
+
+def test_dashboard_labels_quote_freshness_separately_from_heartbeat():
+    assert '<span class="runtime-label">股票报价</span>' in _BEGINNER_PAGE
+    assert 'const equityQuote=(state.market_data||{}).equity||{}' in _BEGINNER_PAGE
+    assert "function ageLabel(seconds)" in _BEGINNER_PAGE
+
+
+def test_dashboard_does_not_truncate_open_orders_in_portfolio_table():
+    assert 'orderTable(openOrders,"当前没有等待成交的订单。",null)' in _BEGINNER_PAGE
+    assert "function isUnfinishedOrder(status)" in _BEGINNER_PAGE
+
+
+def test_dashboard_uses_total_sleeve_pnl_and_truthful_shadow_labels():
+    assert "function metricTotalPnl(metrics)" in _BEGINNER_PAGE
+    assert "function metricEntryCount(metrics)" in _BEGINNER_PAGE
+    assert "function evidenceConclusion(evidence)" in _BEGINNER_PAGE
+    assert '"影子研究 / 管理旧仓"' in _BEGINNER_PAGE
+    assert 'closed:"—"' in _BEGINNER_PAGE
+    assert '有效结果标签' in _BEGINNER_PAGE
+    assert "样本数量已达标，但结果未通过盈利门槛" in _BEGINNER_PAGE
+    assert "评估结论" in _BEGINNER_PAGE
+    assert 'add("Broker 写入边界",safe?' in _BEGINNER_PAGE
 
 
 def test_dashboard_ignores_client_disconnect_during_response(paper_root):
@@ -339,6 +382,53 @@ def test_dashboard_beginner_summary_separates_loss_from_runtime_failures(
     }
 
 
+def test_dashboard_uses_latest_forward_exchange_session_over_stale_counters(
+    paper_root,
+):
+    (paper_root / "state" / "daily_counters.json").write_text(
+        json.dumps({"date": "2026-07-29", "trades": 0}),
+        encoding="utf-8",
+    )
+    (paper_root / "state" / "runtime_heartbeat.json").write_text(
+        json.dumps(
+            {
+                "last_heartbeat_at": "2026-07-30T15:00:00+00:00",
+                "status": "ok",
+                "payload": {
+                    "latest_jobs": {
+                        "forward": {
+                            "status": "completed",
+                            "output": {
+                                "clock": {
+                                    "session": "2026-07-30",
+                                    "market_session": "regular",
+                                }
+                            },
+                        }
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (paper_root / "logs" / "llm_usage.jsonl").write_text(
+        json.dumps(
+            {
+                "ts": "2026-07-30T14:30:00+00:00",
+                "agent_name": "decision_manager",
+                "estimated_cost_usd": 0.001,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    summary = build_dashboard_state(paper_root)["beginner_summary"]
+
+    assert summary["session_date"] == "2026-07-30"
+    assert summary["operations"]["llm_calls"] == 1
+
+
 def test_dashboard_handles_failed_forward_job_without_output(paper_root):
     (paper_root / "logs" / "audit.jsonl").write_text(
         json.dumps(
@@ -396,6 +486,382 @@ def test_dashboard_handles_null_runtime_payload_and_allocator_state(paper_root):
         state["ai_instrument_allocator"]["metrics"]["metrics_available"]
         is False
     )
+
+
+def test_dashboard_ignores_null_order_and_position_records(paper_root):
+    for name in (
+        "paper_orders.json",
+        "paper_positions.json",
+        "paper_option_orders.json",
+        "paper_option_positions.json",
+    ):
+        (paper_root / "state" / name).write_text(
+            json.dumps({"corrupt": None}),
+            encoding="utf-8",
+        )
+
+    state = build_dashboard_state(paper_root)
+
+    assert state["orders"] == []
+    assert state["positions"] == []
+    assert state["option_orders"] == []
+    assert state["option_positions"] == []
+
+
+def test_dashboard_treats_unknown_order_status_as_unfinished(paper_root):
+    (paper_root / "state" / "paper_orders.json").write_text(
+        json.dumps(
+            {
+                "unknown": {
+                    "order_id": "unknown",
+                    "symbol": "AAPL",
+                    "status": "unexpected_state",
+                    "created_at": "2026-07-04T14:00:00+00:00",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    state = build_dashboard_state(paper_root)
+
+    assert state["orders"][0]["order_id"] == "unknown"
+    assert state["order_history_summary"] == {
+        "open_total": 1,
+        "completed_total": 0,
+        "completed_included": 0,
+    }
+
+
+def test_dashboard_requires_live_readonly_to_be_disabled_in_paper_mode(
+    paper_root,
+):
+    config_path = paper_root / "config" / "paper_mode.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["mode"] = {
+        "paper": True,
+        "live_readonly": True,
+        "live_trading": False,
+    }
+    config_path.write_text(
+        yaml.safe_dump(config, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    state = build_dashboard_state(paper_root)
+
+    assert state["mode"] == {
+        "paper": True,
+        "live_readonly": True,
+        "live_trading": False,
+    }
+
+
+def test_dashboard_reports_equity_and_option_quote_times_independently(
+    paper_root,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        dashboard,
+        "utc_now",
+        lambda: "2026-07-04T14:00:30+00:00",
+    )
+    decision = {
+        "event": "baseline_decision",
+        "ts": "2026-07-04T14:00:11+00:00",
+        "decision": {
+            "snapshot_id": "freshness-1",
+            "ticker": "AAPL",
+            "action": "no_trade",
+            "regime": {"eligible": True},
+            "technical": {},
+        },
+        "snapshot": {
+            "market_session": "regular",
+            "data_cutoff_time": "2026-07-04T14:00:10+00:00",
+            "market_data": {
+                "quote": {
+                    "symbol": "AAPL",
+                    "asof": "2026-07-04T14:00:10+00:00",
+                    "source": "alpaca:iex",
+                }
+            },
+        },
+    }
+    (paper_root / "logs" / "decisions.jsonl").write_text(
+        json.dumps(decision) + "\n",
+        encoding="utf-8",
+    )
+    option_diagnostic = {
+        "ts": "2026-07-04T14:00:21+00:00",
+        "diagnostics": {
+            "quotes_observed_at": "2026-07-04T14:00:20+00:00",
+        },
+    }
+    (paper_root / "logs" / "option_selection_diagnostics.jsonl").write_text(
+        json.dumps(option_diagnostic) + "\n",
+        encoding="utf-8",
+    )
+
+    market_data = build_dashboard_state(paper_root)["market_data"]
+
+    assert market_data["equity"] == {
+        "observed_at": "2026-07-04T14:00:10+00:00",
+        "age_seconds": 20.0,
+        "stale": False,
+        "source": "alpaca:iex",
+    }
+    assert market_data["options"] == {
+        "observed_at": "2026-07-04T14:00:20+00:00",
+        "age_seconds": 10.0,
+        "stale": False,
+        "source": None,
+    }
+
+
+def test_dashboard_marks_future_quote_timestamp_stale(paper_root, monkeypatch):
+    monkeypatch.setattr(
+        dashboard,
+        "utc_now",
+        lambda: "2026-07-04T14:00:30+00:00",
+    )
+    decision = {
+        "event": "baseline_decision",
+        "snapshot": {
+            "market_data": {
+                "quote": {
+                    "asof": "2026-07-04T14:00:31+00:00",
+                    "source": "alpaca:iex",
+                }
+            }
+        },
+    }
+    (paper_root / "logs" / "decisions.jsonl").write_text(
+        json.dumps(decision) + "\n",
+        encoding="utf-8",
+    )
+
+    observation = build_dashboard_state(paper_root)["market_data"]["equity"]
+
+    assert observation["age_seconds"] == 0.0
+    assert observation["stale"] is True
+
+
+def test_dashboard_fails_closed_for_invalid_or_future_heartbeat_time(
+    paper_root,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        dashboard,
+        "utc_now",
+        lambda: "2026-07-04T14:00:30+00:00",
+    )
+    heartbeat_path = paper_root / "state" / "runtime_heartbeat.json"
+    heartbeat_path.write_text(
+        json.dumps({"last_heartbeat_at": "not-a-time", "status": "ok"}),
+        encoding="utf-8",
+    )
+
+    invalid = build_dashboard_state(paper_root)["heartbeat"]
+
+    assert invalid["age_seconds"] is None
+    assert invalid["stale"] is True
+    assert invalid["effective_status"] == "stale"
+
+    heartbeat_path.write_text(
+        json.dumps(
+            {
+                "last_heartbeat_at": "2026-07-04T14:00:31+00:00",
+                "status": "ok",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    future = build_dashboard_state(paper_root)["heartbeat"]
+
+    assert future["age_seconds"] == 0.0
+    assert future["stale"] is True
+    assert future["effective_status"] == "stale"
+
+
+def test_dashboard_keeps_recent_completed_orders_after_open_order_selection(
+    paper_root,
+):
+    orders = {}
+    for index in range(35):
+        order_id = f"open-{index:02d}"
+        orders[order_id] = {
+            "order_id": order_id,
+            "symbol": "AAPL",
+            "status": "open",
+            "created_at": f"2026-07-04T14:{index:02d}:00+00:00",
+        }
+    orders["filled-old"] = {
+        "order_id": "filled-old",
+        "symbol": "MSFT",
+        "status": "filled",
+        "created_at": "2026-07-04T13:00:00+00:00",
+    }
+    (paper_root / "state" / "paper_orders.json").write_text(
+        json.dumps(orders),
+        encoding="utf-8",
+    )
+
+    state = build_dashboard_state(paper_root)
+
+    assert any(order.get("order_id") == "filled-old" for order in state["orders"])
+    assert state["order_history_summary"] == {
+        "open_total": 35,
+        "completed_total": 1,
+        "completed_included": 1,
+    }
+
+
+def test_dashboard_metrics_cache_invalidates_when_state_changes(
+    paper_root,
+    monkeypatch,
+):
+    calls = []
+
+    def fake_metrics(root, namespace=None):
+        calls.append((str(root), namespace))
+        return {"call_count": len(calls)}
+
+    monkeypatch.setattr(dashboard, "calculate_metrics", fake_metrics)
+    dashboard._cached_metrics.cache_clear()
+
+    first = dashboard._safe_metrics(paper_root)
+    second = dashboard._safe_metrics(paper_root)
+    account_path = paper_root / "state" / "paper_account.json"
+    account = json.loads(account_path.read_text(encoding="utf-8"))
+    account["cache_marker"] = "changed"
+    account_path.write_text(json.dumps(account), encoding="utf-8")
+    third = dashboard._safe_metrics(paper_root)
+
+    assert first == second == {"call_count": 1}
+    assert third == {"call_count": 2}
+    assert len(calls) == 2
+
+
+def test_dashboard_ai_metrics_cache_invalidates_when_decision_log_changes(
+    paper_root,
+    monkeypatch,
+):
+    calls = []
+
+    def fake_metrics(root, namespace=None):
+        calls.append((str(root), namespace))
+        return {"call_count": len(calls)}
+
+    monkeypatch.setattr(dashboard, "calculate_metrics", fake_metrics)
+    dashboard._cached_metrics.cache_clear()
+
+    first = dashboard._safe_metrics(
+        paper_root,
+        namespace="ai_gated_technical_v1",
+    )
+    second = dashboard._safe_metrics(
+        paper_root,
+        namespace="ai_gated_technical_v1",
+    )
+    (paper_root / "logs" / "ai_gated_decisions.jsonl").write_text(
+        '{"event":"decision"}\n',
+        encoding="utf-8",
+    )
+    third = dashboard._safe_metrics(
+        paper_root,
+        namespace="ai_gated_technical_v1",
+    )
+
+    assert first == second == {"call_count": 1}
+    assert third == {"call_count": 2}
+    assert len(calls) == 2
+
+
+def test_dashboard_degrades_only_news_drift_metrics_on_database_error(
+    paper_root,
+    monkeypatch,
+):
+    def fail_metrics(_root):
+        raise sqlite3.DatabaseError("corrupt database")
+
+    monkeypatch.setattr(dashboard, "calculate_news_drift_metrics", fail_metrics)
+
+    state = build_dashboard_state(paper_root)
+
+    assert state["news_drift"]["metrics"] == {
+        "strategy": "llm_news_drift_v1",
+        "metrics_available": False,
+        "error": "metrics unavailable: DatabaseError",
+    }
+
+
+def test_dashboard_news_drift_cache_invalidates_on_sqlite_wal_change(
+    paper_root,
+    monkeypatch,
+):
+    calls = []
+
+    def fake_metrics(_root):
+        calls.append(len(calls) + 1)
+        return {"call_count": calls[-1]}
+
+    monkeypatch.setattr(dashboard, "calculate_news_drift_metrics", fake_metrics)
+    dashboard._cached_news_drift_metrics.cache_clear()
+
+    first = dashboard._safe_news_drift_metrics(paper_root)
+    second = dashboard._safe_news_drift_metrics(paper_root)
+    (paper_root / "state" / "news_events.sqlite-wal").write_bytes(b"wal-update")
+    third = dashboard._safe_news_drift_metrics(paper_root)
+
+    assert first == second == {"metrics_available": True, "call_count": 1}
+    assert third == {"metrics_available": True, "call_count": 2}
+    assert calls == [1, 2]
+
+
+def test_dashboard_news_drift_cache_invalidates_on_usage_log_change(
+    paper_root,
+    monkeypatch,
+):
+    calls = []
+
+    def fake_metrics(_root):
+        calls.append(len(calls) + 1)
+        return {"call_count": calls[-1]}
+
+    monkeypatch.setattr(dashboard, "calculate_news_drift_metrics", fake_metrics)
+    dashboard._cached_news_drift_metrics.cache_clear()
+
+    first = dashboard._safe_news_drift_metrics(paper_root)
+    second = dashboard._safe_news_drift_metrics(paper_root)
+    (paper_root / "logs" / "llm_usage.jsonl").write_text(
+        '{"agent_name":"news_drift_headline_agent"}\n',
+        encoding="utf-8",
+    )
+    third = dashboard._safe_news_drift_metrics(paper_root)
+
+    assert first == second == {"metrics_available": True, "call_count": 1}
+    assert third == {"metrics_available": True, "call_count": 2}
+    assert calls == [1, 2]
+
+
+def test_dashboard_jsonl_tail_handles_large_utf8_crlf_records(tmp_path):
+    path = tmp_path / "large-lines.jsonl"
+    records = [
+        {"index": 1, "payload": "旧" * 40000},
+        {"index": 2, "payload": "中" * 40000},
+        {"index": 3, "payload": "新" * 40000},
+    ]
+    path.write_bytes(
+        b"\r\n".join(
+            json.dumps(record, ensure_ascii=False).encode("utf-8")
+            for record in records
+        )
+        + b'\r\n{"index":4'
+    )
+
+    assert _read_jsonl(path, limit=2) == records[-2:]
 
 
 def test_dashboard_separates_ten_thousand_allocator_and_counterfactual(

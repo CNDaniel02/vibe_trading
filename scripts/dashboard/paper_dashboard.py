@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 from collections import Counter
+from functools import lru_cache
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -23,6 +25,9 @@ from scripts.evaluation.calculate_metrics import calculate_metrics
 from scripts.evaluation.evaluate_news_drift import calculate_news_drift_metrics
 
 
+_COMPLETED_ORDER_STATUSES = {"filled", "cancelled", "expired", "rejected"}
+
+
 def _read_json(path: Path, default: Any) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -30,17 +35,73 @@ def _read_json(path: Path, default: Any) -> Any:
         return default
 
 
-def _dict_values(value: Any) -> list[Any]:
-    return list(value.values()) if isinstance(value, dict) else []
+def _dict_values(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, dict):
+        return []
+    return [item for item in value.values() if isinstance(item, dict)]
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _file_signature(paths: list[Path]) -> tuple[tuple[str, int | None, int | None], ...]:
+    signature: list[tuple[str, int | None, int | None]] = []
+    for path in paths:
+        try:
+            stat = path.stat()
+        except OSError:
+            signature.append((str(path), None, None))
+        else:
+            signature.append((str(path), stat.st_mtime_ns, stat.st_size))
+    return tuple(signature)
+
+
+def _metrics_signature(root: Path, namespace: str | None) -> tuple[tuple[str, int | None, int | None], ...]:
+    state_dir = root / "state"
+    log_dir = root / "logs"
+    if namespace:
+        state_dir = state_dir / "strategy_sleeves" / namespace
+        log_dir = log_dir / "strategy_sleeves" / namespace
+    paths = [
+        *(sorted((root / "config").glob("*.yaml"))),
+        *(state_dir / name for name in (
+            "paper_account.json",
+            "paper_positions.json",
+            "paper_orders.json",
+            "paper_option_positions.json",
+            "paper_option_orders.json",
+        )),
+        *(log_dir / name for name in (
+            "portfolio_snapshots.jsonl",
+            "paper_fills.jsonl",
+            "paper_option_fills.jsonl",
+            "audit.jsonl",
+        )),
+    ]
+    if namespace == "ai_gated_technical_v1":
+        paths.append(root / "logs" / "ai_gated_decisions.jsonl")
+    return _file_signature(paths)
+
+
+@lru_cache(maxsize=16)
+def _cached_metrics(
+    root_text: str,
+    namespace: str | None,
+    signature: tuple[tuple[str, int | None, int | None], ...],
+) -> dict[str, Any]:
+    del signature
+    return calculate_metrics(Path(root_text), namespace=namespace)
+
+
 def _safe_metrics(root: Path, namespace: str | None = None) -> dict[str, Any]:
     try:
-        return calculate_metrics(root, namespace=namespace)
+        resolved = root.resolve()
+        return _cached_metrics(
+            str(resolved),
+            namespace,
+            _metrics_signature(resolved, namespace),
+        )
     except (
         OSError,
         json.JSONDecodeError,
@@ -51,6 +112,48 @@ def _safe_metrics(root: Path, namespace: str | None = None) -> dict[str, Any]:
     ) as exc:
         return {
             "namespace": namespace,
+            "metrics_available": False,
+            "error": f"metrics unavailable: {type(exc).__name__}",
+        }
+
+
+@lru_cache(maxsize=8)
+def _cached_news_drift_metrics(
+    root_text: str,
+    signature: tuple[tuple[str, int | None, int | None], ...],
+) -> dict[str, Any]:
+    del signature
+    return calculate_news_drift_metrics(Path(root_text))
+
+
+def _safe_news_drift_metrics(root: Path) -> dict[str, Any]:
+    try:
+        resolved = root.resolve()
+        signature = _file_signature(
+            [
+                *(sorted((resolved / "config").glob("*.yaml"))),
+                resolved / "state" / "news_events.sqlite",
+                resolved / "state" / "news_events.sqlite-wal",
+                resolved / "state" / "news_events.sqlite-shm",
+                resolved / "logs" / "llm_usage.jsonl",
+                resolved / "logs" / "news_drift_cycles.jsonl",
+            ]
+        )
+        metrics = _cached_news_drift_metrics(str(resolved), signature)
+        if not isinstance(metrics, dict):
+            raise TypeError("news drift metrics must be an object")
+        return {"metrics_available": True, **metrics}
+    except (
+        OSError,
+        sqlite3.Error,
+        json.JSONDecodeError,
+        AttributeError,
+        TypeError,
+        ValueError,
+        KeyError,
+    ) as exc:
+        return {
+            "strategy": "llm_news_drift_v1",
             "metrics_available": False,
             "error": f"metrics unavailable: {type(exc).__name__}",
         }
@@ -97,6 +200,109 @@ def _read_jsonl(path: Path, limit: int = 400) -> list[dict[str, Any]]:
                 break
     records.reverse()
     return records
+
+
+def _bounded_orders(
+    values: list[dict[str, Any]],
+    *,
+    completed_limit: int = 20,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    rows = [value for value in values if isinstance(value, dict)]
+    rows.sort(
+        key=lambda item: str(item.get("submitted_at") or item.get("created_at") or ""),
+        reverse=True,
+    )
+    open_orders = [
+        item for item in rows if item.get("status") not in _COMPLETED_ORDER_STATUSES
+    ]
+    completed = [
+        item for item in rows if item.get("status") in _COMPLETED_ORDER_STATUSES
+    ]
+    included = completed[:completed_limit]
+    return [*open_orders, *included], {
+        "open_total": len(open_orders),
+        "completed_total": len(completed),
+        "completed_included": len(included),
+    }
+
+
+def _quote_observation(
+    observed_at: Any,
+    *,
+    now: str,
+    stale_after_seconds: int,
+    source: Any = None,
+) -> dict[str, Any]:
+    if not observed_at:
+        return {
+            "observed_at": None,
+            "age_seconds": None,
+            "stale": True,
+            "source": source,
+        }
+    try:
+        raw_age = (parse_ts(now) - parse_ts(str(observed_at))).total_seconds()
+        age = max(0.0, raw_age)
+    except (TypeError, ValueError):
+        return {
+            "observed_at": str(observed_at),
+            "age_seconds": None,
+            "stale": True,
+            "source": source,
+        }
+    return {
+        "observed_at": str(observed_at),
+        "age_seconds": round(age, 1),
+        "stale": raw_age < 0 or age > stale_after_seconds,
+        "source": source,
+    }
+
+
+def _market_data_observations(
+    decision_records: list[dict[str, Any]],
+    option_diagnostics: list[dict[str, Any]],
+    *,
+    now: str,
+    equity_stale_after_seconds: int,
+    option_stale_after_seconds: int,
+) -> dict[str, Any]:
+    equity_quote: dict[str, Any] = {}
+    for record in reversed(decision_records):
+        snapshot = _as_dict(record.get("snapshot"))
+        quote = _as_dict(_as_dict(snapshot.get("market_data")).get("quote"))
+        if quote.get("asof"):
+            equity_quote = quote
+            break
+
+    option_observed_at = None
+    option_source = None
+    for record in reversed(option_diagnostics):
+        diagnostics = _as_dict(record.get("diagnostics"))
+        if not diagnostics:
+            diagnostics = _as_dict(
+                _as_dict(record.get("decision")).get(
+                    "contract_selection_diagnostics"
+                )
+            )
+        option_observed_at = diagnostics.get("quotes_observed_at")
+        if option_observed_at:
+            option_source = diagnostics.get("source")
+            break
+
+    return {
+        "equity": _quote_observation(
+            equity_quote.get("asof"),
+            now=now,
+            stale_after_seconds=equity_stale_after_seconds,
+            source=equity_quote.get("source"),
+        ),
+        "options": _quote_observation(
+            option_observed_at,
+            now=now,
+            stale_after_seconds=option_stale_after_seconds,
+            source=option_source,
+        ),
+    }
 
 
 def _last(records: list[dict[str, Any]], predicate: Any) -> dict[str, Any] | None:
@@ -420,7 +626,16 @@ def _build_beginner_summary(
     ai_cycle_records: list[dict[str, Any]],
     llm_usage_records: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    session_date = str(counters.get("date") or "")
+    heartbeat_payload = _as_dict(heartbeat.get("payload"))
+    latest_jobs = _as_dict(heartbeat_payload.get("latest_jobs"))
+    forward_job = _as_dict(latest_jobs.get("forward"))
+    forward_output = _as_dict(forward_job.get("output"))
+    forward_clock = _as_dict(forward_output.get("clock"))
+    session_date = str(
+        forward_clock.get("session")
+        or counters.get("date")
+        or ""
+    )
     if not session_date:
         dated = [
             value
@@ -626,11 +841,7 @@ def _build_beginner_summary(
     minimum_trades = int(
         evidence_thresholds.get("minimum_closed_trades", 30)
     )
-    heartbeat_payload = _as_dict(heartbeat.get("payload"))
-    latest_jobs = _as_dict(heartbeat_payload.get("latest_jobs"))
-    forward_job = _as_dict(latest_jobs.get("forward"))
-    forward_output = _as_dict(forward_job.get("output"))
-    current_session = _as_dict(forward_output.get("clock")).get("market_session")
+    current_session = forward_clock.get("market_session")
     if current_session is None:
         latest_clock_record = _last(
             session_audit,
@@ -678,6 +889,9 @@ def _build_beginner_summary(
         "evidence": {
             "status": metrics.get("profitability"),
             "sufficient": bool(metrics.get("evidence_sufficient", False)),
+            "promotion_eligible": bool(
+                metrics.get("promotion_eligible", False)
+            ),
             "forward_sessions": int(metrics.get("forward_session_count", 0)),
             "minimum_forward_sessions": minimum_sessions,
             "closed_trades": int(metrics.get("closed_trade_count", 0)),
@@ -816,7 +1030,7 @@ def build_dashboard_state(root: str | Path) -> dict[str, Any]:
             shadow_by_snapshot[snapshot_id] = _safe_shadow_record(record)
 
     orders_raw = _read_json(state_dir / "paper_orders.json", {})
-    orders = list(orders_raw.values()) if isinstance(orders_raw, dict) else []
+    orders = _dict_values(orders_raw)
     orders.sort(key=lambda item: str(item.get("submitted_at") or item.get("created_at") or ""), reverse=True)
     for order in orders:
         snapshot_id = str(order.get("decision_id", ""))
@@ -824,31 +1038,42 @@ def build_dashboard_state(root: str | Path) -> dict[str, Any]:
         order["shadow_explanation"] = shadow_by_snapshot.get(snapshot_id)
 
     positions_raw = _read_json(state_dir / "paper_positions.json", {})
-    positions = list(positions_raw.values()) if isinstance(positions_raw, dict) else []
+    positions = _dict_values(positions_raw)
     for position in positions:
         position["exit_evaluation"] = exit_by_symbol.get(str(position.get("symbol", "")))
 
     option_orders_raw = _read_json(state_dir / "paper_option_orders.json", {})
-    option_orders = list(option_orders_raw.values()) if isinstance(option_orders_raw, dict) else []
+    option_orders = _dict_values(option_orders_raw)
     option_orders.sort(key=lambda item: str(item.get("submitted_at") or item.get("created_at") or ""), reverse=True)
     option_positions_raw = _read_json(state_dir / "paper_option_positions.json", {})
-    option_positions = list(option_positions_raw.values()) if isinstance(option_positions_raw, dict) else []
+    option_positions = _dict_values(option_positions_raw)
 
     latest_cycle = _last(audit_records, lambda item: item.get("event") in {"forward_cycle_complete", "forward_cycle_exit_only", "forward_cycle_skipped", "forward_cycle_failed_closed"})
     last_shadow = _safe_shadow_record(shadow_records[-1]) if shadow_records else None
     paper = runtime["paper"]
     risk = runtime["risk"]
     thinking = runtime["llm"].get("api", {}).get("thinking")
+    now = utc_now()
     heartbeat = _as_dict(_read_json(state_dir / "runtime_heartbeat.json", {}))
     heartbeat_age = None
+    heartbeat_time_valid = False
     if heartbeat.get("last_heartbeat_at"):
-        heartbeat_age = max(
-            0.0,
-            (parse_ts(utc_now()) - parse_ts(str(heartbeat["last_heartbeat_at"]))).total_seconds(),
-        )
+        try:
+            raw_heartbeat_age = (
+                parse_ts(now) - parse_ts(str(heartbeat["last_heartbeat_at"]))
+            ).total_seconds()
+        except (TypeError, ValueError):
+            pass
+        else:
+            heartbeat_age = max(0.0, raw_heartbeat_age)
+            heartbeat_time_valid = raw_heartbeat_age >= 0
     stale_after = int(runtime.get("integrations", {}).get("runtime", {}).get("watchdog_max_age_seconds", 900))
     heartbeat["age_seconds"] = round(heartbeat_age, 1) if heartbeat_age is not None else None
-    heartbeat["stale"] = heartbeat_age is None or heartbeat_age > stale_after
+    heartbeat["stale"] = (
+        not heartbeat_time_valid
+        or heartbeat_age is None
+        or heartbeat_age > stale_after
+    )
     heartbeat["service_lock"] = ProcessLock.inspect(state_dir / "forward_service.lock")
     if heartbeat["stale"]:
         heartbeat["effective_status"] = "stale"
@@ -914,15 +1139,62 @@ def build_dashboard_state(root: str | Path) -> dict[str, Any]:
         ai_cycle_records=ai_cycle_records,
         llm_usage_records=llm_usage_records,
     )
+    market_data = _market_data_observations(
+        decision_records,
+        option_diagnostics,
+        now=now,
+        equity_stale_after_seconds=int(paper.get("quote_stale_after_seconds", 60)),
+        option_stale_after_seconds=int(
+            runtime.get("options_costs", {}).get("quote_stale_after_seconds", 30)
+        ),
+    )
+    display_orders, main_order_counts = _bounded_orders(orders)
+    display_option_orders, main_option_order_counts = _bounded_orders(option_orders)
+    ai_orders = _dict_values(ai_orders_raw)
+    ai_option_orders = _dict_values(ai_option_orders_raw)
+    display_ai_orders, ai_order_counts = _bounded_orders(ai_orders)
+    display_ai_option_orders, ai_option_order_counts = _bounded_orders(
+        ai_option_orders
+    )
+    allocator_orders = _dict_values(allocator_orders_raw)
+    allocator_option_orders = _dict_values(allocator_option_orders_raw)
+    display_allocator_orders, allocator_order_counts = _bounded_orders(
+        allocator_orders
+    )
+    display_allocator_option_orders, allocator_option_order_counts = _bounded_orders(
+        allocator_option_orders
+    )
+    order_count_groups = (
+        main_order_counts,
+        main_option_order_counts,
+        ai_order_counts,
+        ai_option_order_counts,
+        allocator_order_counts,
+        allocator_option_order_counts,
+    )
+    order_history_summary = {
+        key: sum(group[key] for group in order_count_groups)
+        for key in ("open_total", "completed_total", "completed_included")
+    }
     return {
-        "mode": {"paper": bool(paper.get("mode", {}).get("paper", False)), "live_trading": bool(paper.get("mode", {}).get("live_trading", False))},
+        "mode": {
+            "paper": bool(paper.get("mode", {}).get("paper", False)),
+            "live_readonly": bool(
+                paper.get("mode", {}).get("live_readonly", False)
+            ),
+            "live_trading": bool(
+                paper.get("mode", {}).get("live_trading", False)
+            ),
+        },
         "heartbeat": heartbeat,
+        "market_data": market_data,
         "account": account,
         "daily_counters": counters,
         "positions": positions,
         "option_positions": option_positions,
-        "orders": orders[:30],
-        "option_orders": option_orders[:30],
+        "orders": display_orders,
+        "option_orders": display_option_orders,
+        "order_history_summary": order_history_summary,
         "latest_cycle": latest_cycle,
         "strategy_modes": {
             "weighted_relative_strength_v2": str(
@@ -978,8 +1250,8 @@ def build_dashboard_state(root: str | Path) -> dict[str, Any]:
             "account": _read_json(ai_state_dir / "paper_account.json", {}),
             "positions": _dict_values(_read_json(ai_state_dir / "paper_positions.json", {})) if ai_account_exists else [],
             "option_positions": _dict_values(_read_json(ai_state_dir / "paper_option_positions.json", {})) if ai_account_exists else [],
-            "orders": list(ai_orders_raw.values()) if isinstance(ai_orders_raw, dict) else [],
-            "option_orders": list(ai_option_orders_raw.values()) if isinstance(ai_option_orders_raw, dict) else [],
+            "orders": display_ai_orders,
+            "option_orders": display_ai_option_orders,
             "metrics": _safe_metrics(root_path, namespace=ai_namespace)
             if ai_account_exists
             else None,
@@ -1002,12 +1274,8 @@ def build_dashboard_state(root: str | Path) -> dict[str, Any]:
             )
             if allocator_account_exists
             else [],
-            "orders": list(allocator_orders_raw.values())
-            if isinstance(allocator_orders_raw, dict)
-            else [],
-            "option_orders": list(allocator_option_orders_raw.values())
-            if isinstance(allocator_option_orders_raw, dict)
-            else [],
+            "orders": display_allocator_orders,
+            "option_orders": display_allocator_option_orders,
             "metrics": _safe_metrics(root_path, namespace=allocator_namespace)
             if allocator_account_exists
             else None,
@@ -1032,7 +1300,7 @@ def build_dashboard_state(root: str | Path) -> dict[str, Any]:
             else None,
         },
         "news_drift": {
-            "metrics": calculate_news_drift_metrics(root_path),
+            "metrics": _safe_news_drift_metrics(root_path),
             "latest_cycle": news_drift_cycles[-1] if news_drift_cycles else None,
         },
         "safety": {
@@ -1434,6 +1702,7 @@ button{font:inherit;letter-spacing:0}
 .dot{width:8px;height:8px;border-radius:50%;background:var(--neutral)}
 .dot.good{background:var(--green)}.dot.bad{background:var(--red)}.dot.warn{background:#c18110}.dot.info{background:var(--blue)}
 .paper-boundary{background:var(--green-soft);color:#235b42;border-bottom:1px solid #cce4d7}
+.paper-boundary.bad{background:var(--red-soft);color:#8c2532;border-bottom-color:#efc4ca}
 .paper-boundary-inner{max-width:1420px;margin:0 auto;padding:8px 24px;display:flex;align-items:center;justify-content:space-between;gap:16px}
 .paper-boundary strong{font-size:13px}.paper-boundary span{font-size:12px}
 .tabbar{position:sticky;top:0;z-index:20;background:rgba(255,255,255,.97);border-bottom:1px solid var(--line)}
@@ -1519,11 +1788,11 @@ tbody tr:last-child td{border-bottom:0}.num{font-variant-numeric:tabular-nums;wh
     <div class="runtime-strip" aria-label="当前运行状态">
       <div class="runtime-item"><span id="service-dot" class="dot"></span><span><span class="runtime-label">服务</span><br><span id="service-value" class="runtime-value">读取中</span></span></div>
       <div class="runtime-item"><span id="market-dot" class="dot info"></span><span><span class="runtime-label">市场</span><br><span id="market-value" class="runtime-value">读取中</span></span></div>
-      <div class="runtime-item"><span id="fresh-dot" class="dot"></span><span><span class="runtime-label">数据</span><br><span id="fresh-value" class="runtime-value">读取中</span></span></div>
+      <div class="runtime-item"><span id="fresh-dot" class="dot"></span><span><span class="runtime-label">股票报价</span><br><span id="fresh-value" class="runtime-value">读取中</span></span></div>
     </div>
   </div>
 </header>
-<div class="paper-boundary"><div class="paper-boundary-inner"><strong>Paper only · 仅使用假钱模拟</strong><span>Robinhood 行情只读 · 不会调用真实下单工具</span></div></div>
+<div class="paper-boundary" id="paper-boundary"><div class="paper-boundary-inner"><strong id="paper-boundary-label">正在验证模拟安全边界</strong><span id="paper-boundary-detail">尚未读取运行模式</span></div></div>
 <nav class="tabbar" aria-label="控制台视图">
   <div class="tabs" role="tablist" aria-label="模拟交易控制台">
     <button class="tab" id="tab-overview" data-tab="overview" role="tab" aria-controls="panel-overview" aria-selected="true" tabindex="0">总览</button>
@@ -1550,9 +1819,18 @@ const money=value=>value===undefined||value===null?"—":"$"+Math.abs(number(val
 const signedMoney=value=>(number(value)>0?"+":number(value)<0?"-":"")+money(value);
 const pct=value=>value===undefined||value===null?"—":number(value).toFixed(2)+"%";
 const tone=value=>number(value)>0?"good-text":number(value)<0?"bad-text":"";
+function ageLabel(seconds){
+  if(seconds===undefined||seconds===null)return "无时间戳";
+  const value=Math.max(0,number(seconds));
+  if(value<60)return `${value.toFixed(0)} 秒前`;
+  if(value<3600)return `${(value/60).toFixed(value<600?1:0)} 分钟前`;
+  if(value<86400)return `${(value/3600).toFixed(1)} 小时前`;
+  return `${(value/86400).toFixed(1)} 天前`;
+}
 const serviceLabels={ok:"运行中",stale:"心跳过期",stopped:"已停止",degraded:"部分降级",unknown:"未知"};
 const marketLabels={pre_market:"盘前",regular:"正常交易",post_market:"盘后",after_hours:"盘后",closed:"休市"};
-const openOrderStatuses=new Set(["created","submitted_to_paper_broker","open","partially_filled"]);
+const completedOrderStatuses=new Set(["filled","cancelled","expired","rejected"]);
+function isUnfinishedOrder(status){return !completedOrderStatuses.has(status)}
 function statusBadge(label,kind=""){
   return `<span class="status-badge ${kind}">${esc(label)}</span>`;
 }
@@ -1563,11 +1841,34 @@ function serviceStatusKind(status){
   return ["stale","stopped"].includes(status)?"bad":"";
 }
 function setDot(id,kind){document.getElementById(id).className="dot "+kind}
+function paperOnlyMode(mode){return mode.paper===true&&mode.live_readonly===false&&mode.live_trading===false}
+function metricTotalPnl(metrics){
+  const value=metrics||{};
+  if(value.ending_equity!=null&&value.initial_cash!=null)return number(value.ending_equity)-number(value.initial_cash);
+  return value.realized_pnl??null;
+}
+function metricEntryCount(metrics){
+  const value=metrics||{};
+  if(value.closed_trade_count==null&&value.open_position_count==null)return null;
+  return number(value.closed_trade_count)+number(value.open_position_count);
+}
+function evidenceConclusion(evidence){
+  const value=evidence||{};
+  if(value.promotion_eligible===true)return "已通过当前盈利与风控门槛";
+  if(value.sufficient!==true)return "样本数量或质量仍不足";
+  return "样本数量已达标，但结果未通过盈利门槛";
+}
+function renderBoundary(state){
+  const mode=state.mode||{},safe=paperOnlyMode(mode),boundary=document.getElementById("paper-boundary");
+  boundary.classList.toggle("bad",!safe);
+  document.getElementById("paper-boundary-label").textContent=safe?"Paper only · 仅使用假钱模拟":"安全模式异常 · 不能视为纯模拟";
+  document.getElementById("paper-boundary-detail").textContent=safe?"Robinhood 行情只读 · 不会调用真实下单工具":`paper=${mode.paper===true} · live_readonly=${mode.live_readonly===true} · live_trading=${mode.live_trading===true}`;
+}
 function currentAlerts(state){
   const alerts=[];
   const heartbeat=state.heartbeat||{},status=heartbeat.effective_status||"unknown";
   if(status!=="ok")alerts.push({kind:serviceStatusKind(status),text:`主服务${serviceLabels[status]||status}`});
-  if(!((state.mode||{}).paper) || (state.mode||{}).live_trading)alerts.push({kind:"bad",text:"Paper-only 安全边界不符合预期"});
+  if(!paperOnlyMode(state.mode||{}))alerts.push({kind:"bad",text:"Paper-only 三元安全边界不符合预期"});
   const jobs=(((heartbeat.payload||{}).latest_jobs)||{});
   Object.entries(jobs).forEach(([name,job])=>{
     const jobStatus=(job||{}).status;
@@ -1581,12 +1882,11 @@ function renderHeader(state){
   document.getElementById("service-value").textContent=serviceLabels[status]||status;
   setDot("service-dot",serviceStatusKind(status));
   const session=service.market_session||"unknown";
-  document.getElementById("market-value").textContent=marketLabels[session]||"未识别";
-  setDot("market-dot",session==="regular"?"good":"info");
-  const age=heartbeat.age_seconds;
-  const fresh=!heartbeat.stale;
-  document.getElementById("fresh-value").textContent=age==null?"无时间戳":fresh?`${number(age).toFixed(0)} 秒前`:`${number(age).toFixed(0)} 秒前`;
-  setDot("fresh-dot",fresh?"good":"bad");
+  document.getElementById("market-value").textContent=heartbeat.stale?"状态已过期":marketLabels[session]||"未识别";
+  setDot("market-dot",heartbeat.stale?"warn":session==="regular"?"good":"info");
+  const equityQuote=(state.market_data||{}).equity||{},age=equityQuote.age_seconds;
+  document.getElementById("fresh-value").textContent=ageLabel(age);
+  setDot("fresh-dot",age==null?"":equityQuote.stale?"bad":"good");
 }
 function systemActivity(state){
   const b=state.beginner_summary||{},service=b.service||{},account=b.account||{};
@@ -1612,24 +1912,24 @@ function accountCard({title,subtitle,equity,initial,pnl,cash,positions,orders,ba
 }
 function strategySummaryRows(state){
   const b=state.beginner_summary||{},lines=b.strategy_lines||{},metrics=state.metrics||{},metricLines=metrics.lines||{};
-  const equity=lines.equity||{},options=lines.options||{},ai=lines.ai||{},allocator=state.ai_instrument_allocator||{},allocatorMetrics=allocator.metrics||{};
+  const equity=lines.equity||{},options=lines.options||{},ai=lines.ai||{},aiMetrics=((state.ai_gated||{}).metrics)||{},allocator=state.ai_instrument_allocator||{},allocatorMetrics=allocator.metrics||{};
   const rows=[
     {name:"股票加权",mode:(state.strategy_modes||{}).weighted_relative_strength_v2==="shadow_only"?"只观察":"模拟交易",kind:"info",pnl:(metricLines.equity||{}).net_pnl,activity:`监控 ${equity.watchlist_count||0} 个标的`},
     {name:"方向期权",mode:(state.strategy_modes||{}).long_directional_options_v2_weighted_new_entries?"模拟交易":"只管理旧仓",kind:"warn",pnl:(metricLines.options||{}).net_pnl,activity:`${options.direction_evaluations||0} 次方向评估`},
-    {name:"旧 AI Gated",mode:(state.strategy_modes||{}).ai_gated_technical_v1_new_entries?"模拟交易":"只管理旧仓",kind:"warn",pnl:((state.ai_gated||{}).metrics||{}).net_pnl,activity:`${ai.completed||0} 次完成`},
-    {name:"AI 工具分配器",mode:String((state.strategy_modes||{}).ai_instrument_allocator_v1||"").includes("paper")?"模拟交易":"未启用",kind:"good",pnl:allocatorMetrics.realized_pnl,activity:`${array(allocator.positions).length+array(allocator.option_positions).length} 个持仓`},
+    {name:"旧 AI Gated",mode:(state.strategy_modes||{}).ai_gated_technical_v1_new_entries?"模拟交易":"影子研究 / 管理旧仓",kind:"warn",pnl:metricTotalPnl(aiMetrics),activity:`${ai.completed||0} 次完成`},
+    {name:"AI 工具分配器",mode:String((state.strategy_modes||{}).ai_instrument_allocator_v1||"").includes("paper")?"模拟交易":"未启用",kind:"good",pnl:metricTotalPnl(allocatorMetrics),activity:`${array(allocator.positions).length+array(allocator.option_positions).length} 个持仓`},
   ];
   return rows.map(row=>`<tr><td data-label="策略"><strong>${esc(row.name)}</strong></td><td data-label="状态">${statusBadge(row.mode,row.kind)}</td><td data-label="累计 PnL" class="num ${tone(row.pnl)}">${signedMoney(row.pnl)}</td><td data-label="最近活动" class="muted">${esc(row.activity)}</td></tr>`).join("");
 }
 function renderOverview(state){
   const b=state.beginner_summary||{},day=b.day||{},legacy=b.account||{},allocator=state.ai_instrument_allocator||{},allocatorAccount=allocator.account||{},allocatorMetrics=allocator.metrics||{};
   const activity=systemActivity(state),alerts=currentAlerts(state);
-  const legacyOrders=array(state.orders).filter(order=>openOrderStatuses.has(order.status)).length+array(state.option_orders).filter(order=>openOrderStatuses.has(order.status)).length;
-  const allocatorOrders=array(allocator.orders).filter(order=>openOrderStatuses.has(order.status)).length+array(allocator.option_orders).filter(order=>openOrderStatuses.has(order.status)).length;
+  const legacyOrders=array(state.orders).filter(order=>isUnfinishedOrder(order.status)).length+array(state.option_orders).filter(order=>isUnfinishedOrder(order.status)).length;
+  const allocatorOrders=array(allocator.orders).filter(order=>isUnfinishedOrder(order.status)).length+array(allocator.option_orders).filter(order=>isUnfinishedOrder(order.status)).length;
   const legacyCard=accountCard({title:"旧 $2,000 模拟账本",subtitle:"历史交易与旧策略持仓",equity:legacy.ending_equity,initial:legacy.initial_cash,pnl:legacy.cumulative_pnl,cash:(state.account||{}).cash,positions:number(legacy.open_equity_positions)+number(legacy.open_option_positions),orders:legacyOrders,badge:"独立账本",badgeKind:"info"});
   const allocatorInitial=allocatorAccount.initial_cash||allocatorMetrics.initial_cash||10000;
   const allocatorEquity=allocatorMetrics.ending_equity??allocatorAccount.cash;
-  const allocatorPnl=allocatorMetrics.realized_pnl??(allocatorEquity==null?null:number(allocatorEquity)-number(allocatorInitial));
+  const allocatorPnl=metricTotalPnl(allocatorMetrics)??(allocatorEquity==null?null:number(allocatorEquity)-number(allocatorInitial));
   const allocatorCard=accountCard({title:"$10,000 AI 分配账户",subtitle:"ai_instrument_allocator_v1",equity:allocatorEquity,initial:allocatorInitial,pnl:allocatorPnl,cash:allocatorAccount.cash,positions:array(allocator.positions).length+array(allocator.option_positions).length,orders:allocatorOrders,badge:"独立账户",badgeKind:"good"});
   const alertHtml=alerts.length?alerts.map(item=>`<div class="alert-row ${item.kind}"><span class="alert-mark"></span><span>${esc(item.text)}</span></div>`).join(""):'<div class="clear-state">当前没有检测到阻塞运行的故障</div>';
   document.getElementById("view-overview").innerHTML=`
@@ -1640,7 +1940,7 @@ function renderOverview(state){
     </div>
     <div class="account-grid">${legacyCard}${allocatorCard}</div>
     <section class="section-block"><div class="section-head"><div><h3>最近交易日结果</h3><p>只把已完成买入和卖出的闭环计入当日结果。</p></div><strong class="num ${tone(day.realized_pnl)}">${signedMoney(day.realized_pnl)}</strong></div>
-      <div class="table-wrap"><table class="mobile-table"><thead><tr><th>已平仓</th><th>盈利</th><th>亏损</th><th>当前持仓</th><th>盈利证据</th></tr></thead><tbody><tr><td data-label="已平仓" class="num">${day.closed_trades||0} 笔</td><td data-label="盈利" class="num good-text">${day.wins||0} 笔</td><td data-label="亏损" class="num bad-text">${day.losses||0} 笔</td><td data-label="当前持仓" class="num">${number(legacy.open_equity_positions)+number(legacy.open_option_positions)} 个</td><td data-label="盈利证据">${esc((b.evidence||{}).sufficient?"达到最低样本线，仍需继续前向验证":"样本或质量仍不足")}</td></tr></tbody></table></div>
+      <div class="table-wrap"><table class="mobile-table"><thead><tr><th>已平仓</th><th>盈利</th><th>亏损</th><th>当前持仓</th><th>评估结论</th></tr></thead><tbody><tr><td data-label="已平仓" class="num">${day.closed_trades||0} 笔</td><td data-label="盈利" class="num good-text">${day.wins||0} 笔</td><td data-label="亏损" class="num bad-text">${day.losses||0} 笔</td><td data-label="当前持仓" class="num">${number(legacy.open_equity_positions)+number(legacy.open_option_positions)} 个</td><td data-label="评估结论">${esc(evidenceConclusion(b.evidence))}</td></tr></tbody></table></div>
     </section>
     <section class="section-block"><div class="section-head"><div><h3>策略状态速览</h3><p>每条策略的账户和交易权限相互区分。</p></div></div><div class="table-wrap"><table class="mobile-table"><thead><tr><th>策略</th><th>当前模式</th><th>累计 PnL</th><th>最近活动</th></tr></thead><tbody>${strategySummaryRows(state)}</tbody></table></div></section>`;
 }
@@ -1685,7 +1985,7 @@ function orderStatusLabel(status){
 function orderStatusKind(status){
   if(status==="filled")return "good";
   if(["rejected","expired","cancelled"].includes(status))return status==="cancelled"?"":"bad";
-  return openOrderStatuses.has(status)?"warn":"";
+  return isUnfinishedOrder(status)?"warn":"";
 }
 function collectPositions(state){
   const rows=[];
@@ -1720,29 +2020,32 @@ function positionTable(rows){
   const body=rows.map(row=>`<tr data-record-type="position"><td data-label="账户"><strong>${esc(row.account)}</strong><div class="small muted">${esc(row.strategy)}</div></td><td data-label="标的"><strong>${esc(row.symbol)}</strong><div class="small muted">${esc(row.instrument)} · ${esc(row.direction)}</div></td><td data-label="数量" class="num">${esc(row.quantity)}</td><td data-label="平均成本" class="num">${money(row.average)}<div class="small muted">占用 ${money(row.cost)}</div></td><td data-label="未实现 PnL" class="num ${tone(row.pnl)}">${row.pnl==null?"暂无估值":signedMoney(row.pnl)}</td><td data-label="状态">${statusBadge(row.status,"good")}</td><td data-label="退出计划" class="reason">${esc(row.exit)}<div class="small muted">开仓 ${localDateTime(row.opened)}</div></td></tr>`).join("");
   return `<div class="table-wrap"><table class="mobile-table"><thead><tr><th>账户</th><th>标的与方向</th><th>数量</th><th>平均成本</th><th>未实现 PnL</th><th>状态</th><th>退出计划</th></tr></thead><tbody>${body||'<tr><td colspan="7" class="muted">当前没有持仓。</td></tr>'}</tbody></table></div>`;
 }
-function orderTable(rows,emptyText){
-  const body=rows.slice(0,20).map(row=>`<tr data-record-type="order"><td data-label="账户"><strong>${esc(row.account)}</strong><div class="small muted">${esc(row.strategy)}</div></td><td data-label="标的"><strong>${esc(row.symbol)}</strong><div class="small muted">${esc(row.instrument)}</div></td><td data-label="动作">${esc(row.action)}</td><td data-label="数量" class="num">${esc(row.quantity)}</td><td data-label="价格" class="num">${money(row.price)}</td><td data-label="状态">${statusBadge(orderStatusLabel(row.status),orderStatusKind(row.status))}</td><td data-label="时间与原因" class="reason">${expandableEvidence(humanReason(row.reason))}<div class="small muted">${localDateTime(row.time)}</div></td></tr>`).join("");
+function orderTable(rows,emptyText,limit=20){
+  const displayed=limit==null?rows:rows.slice(0,limit);
+  const body=displayed.map(row=>`<tr data-record-type="order"><td data-label="账户"><strong>${esc(row.account)}</strong><div class="small muted">${esc(row.strategy)}</div></td><td data-label="标的"><strong>${esc(row.symbol)}</strong><div class="small muted">${esc(row.instrument)}</div></td><td data-label="动作">${esc(row.action)}</td><td data-label="数量" class="num">${esc(row.quantity)}</td><td data-label="价格" class="num">${money(row.price)}</td><td data-label="状态">${statusBadge(orderStatusLabel(row.status),orderStatusKind(row.status))}</td><td data-label="时间与原因" class="reason">${expandableEvidence(humanReason(row.reason))}<div class="small muted">${localDateTime(row.time)}</div></td></tr>`).join("");
   return `<div class="table-wrap"><table class="mobile-table"><thead><tr><th>账户</th><th>标的</th><th>动作</th><th>数量</th><th>价格</th><th>状态</th><th>时间与原因</th></tr></thead><tbody>${body||`<tr><td colspan="7" class="muted">${esc(emptyText)}</td></tr>`}</tbody></table></div>`;
 }
 function renderPortfolio(state){
-  const positions=collectPositions(state),orders=collectOrders(state),openOrders=orders.filter(order=>openOrderStatuses.has(order.status)),history=orders.filter(order=>!openOrderStatuses.has(order.status));
+  const positions=collectPositions(state),orders=collectOrders(state),openOrders=orders.filter(order=>isUnfinishedOrder(order.status)),history=orders.filter(order=>!isUnfinishedOrder(order.status));
+  const historySummary=state.order_history_summary||{},historyTotal=historySummary.completed_total??history.length,historyShown=Math.min(history.length,20);
   document.getElementById("view-portfolio").className="";
   document.getElementById("view-portfolio").innerHTML=`<div class="page-heading"><div><h2>持仓与订单</h2><p>订单只有成交后才会成为持仓；两套账户不会合并。</p></div><div class="asof">${positions.length} 个持仓 · ${openOrders.length} 笔未完成订单</div></div>
     <section class="section-block"><div class="section-head"><div><h3>当前持仓</h3><p>股票和期权统一展示，账户归属保持独立。</p></div>${statusBadge(positions.length+" 个",positions.length?"info":"")}</div>${positionTable(positions)}</section>
-    <section class="section-block"><div class="section-head"><div><h3>未完成订单</h3><p>已创建、已提交、等待成交和部分成交均不计为完整持仓。</p></div>${statusBadge(openOrders.length+" 笔",openOrders.length?"warn":"good")}</div>${orderTable(openOrders,"当前没有等待成交的订单。")}</section>
-    <section class="section-block"><details class="history-details"><summary>最近订单记录 · ${history.length} 笔<span>展开查看最近 20 笔已成交、拒绝、取消或过期订单。</span></summary>${orderTable(history,"尚无已结束订单。")}</details></section>`;
+    <section class="section-block"><div class="section-head"><div><h3>未完成订单</h3><p>已创建、已提交、等待成交和部分成交均不计为完整持仓。</p></div>${statusBadge(openOrders.length+" 笔",openOrders.length?"warn":"good")}</div>${orderTable(openOrders,"当前没有等待成交的订单。",null)}</section>
+    <section class="section-block"><details class="history-details"><summary>最近订单记录 · ${historyShown} / ${historyTotal} 笔<span>展开查看最近 ${historyShown} 笔已成交、拒绝、取消或过期订单。</span></summary>${orderTable(history,"尚无已结束订单。")}</details></section>`;
 }
 function strategyDetailRows(state){
   const b=state.beginner_summary||{},lines=b.strategy_lines||{},metrics=state.metrics||{},metricLines=metrics.lines||{},ai=state.ai_gated||{},allocator=state.ai_instrument_allocator||{},news=state.news_drift||{};
+  const aiMetrics=ai.metrics||{},allocatorMetrics=allocator.metrics||{};
   const latestCandidate=array(state.candidates).slice().sort((a,b)=>number(b.score)-number(a.score))[0]||{};
   const latestOption=array(state.option_decisions).slice().sort((a,b)=>Math.max(number(b.call_score),number(b.put_score))-Math.max(number(a.call_score),number(a.put_score)))[0]||{};
   const latestAi=array(ai.decisions).slice(-1)[0]||{},latestAllocation=allocator.latest_allocation||{},newsMetrics=news.metrics||{},newsNext=(((newsMetrics.horizons||{}).next_close||{}).portfolio_day)||{};
   return [
     {name:"weighted_relative_strength_v2",label:"股票加权",mode:(state.strategy_modes||{}).weighted_relative_strength_v2==="shadow_only"?"只观察":"模拟交易",kind:"info",account:"旧 $2,000",decisions:(lines.equity||{}).watchlist_count,entries:(lines.equity||{}).entries,closed:(metricLines.equity||{}).closed_trade_count,pnl:(metricLines.equity||{}).net_pnl,win:(metricLines.equity||{}).win_rate,reason:firstReason(latestCandidate.reasons,latestCandidate.action==="buy"?"最近候选达到技术门槛":"暂无候选")},
     {name:"long_directional_options_v2_weighted",label:"方向期权",mode:(state.strategy_modes||{}).long_directional_options_v2_weighted_new_entries?"模拟交易":"只管理旧仓",kind:"warn",account:"旧 $2,000",decisions:(lines.options||{}).direction_evaluations,entries:(lines.options||{}).orders,closed:(metricLines.options||{}).closed_trade_count,pnl:(metricLines.options||{}).net_pnl,win:(metricLines.options||{}).win_rate,reason:firstReason(latestOption.reasons,"最近没有通过合约筛选")},
-    {name:"ai_gated_technical_v1",label:"旧 AI Gated",mode:(state.strategy_modes||{}).ai_gated_technical_v1_new_entries?"模拟交易":"只管理旧仓",kind:"warn",account:"旧 AI sleeve",decisions:(lines.ai||{}).cycles,entries:(ai.metrics||{}).entry_count,closed:(ai.metrics||{}).closed_trade_count,pnl:(ai.metrics||{}).net_pnl,win:(ai.metrics||{}).win_rate,reason:humanReason((latestAi.execution||{}).reason||(latestAi.decision||{}).no_trade_reason||(latestAi.decision||{}).thesis||"暂无最近决策")},
-    {name:"ai_instrument_allocator_v1",label:"AI 工具分配器",mode:String((state.strategy_modes||{}).ai_instrument_allocator_v1||"").includes("paper")?"模拟交易":"未启用",kind:"good",account:"$10,000 allocator",decisions:array(allocator.decisions).length,entries:(allocator.metrics||{}).entry_count,closed:(allocator.metrics||{}).closed_trade_count,pnl:(allocator.metrics||{}).net_pnl??(allocator.metrics||{}).realized_pnl,win:(allocator.metrics||{}).win_rate,reason:humanReason(latestAllocation.reason||((latestAllocation.selected_instrument||{}).ticker?"已选择工具，等待执行或持仓管理":"最近没有选择可执行工具"))},
-    {name:"llm_news_drift_v1",label:"新闻漂移实验",mode:"只观察",kind:"info",account:"不进入账户",decisions:newsMetrics.proposal_count,entries:0,closed:newsMetrics.valid_return_label_count,pnl:null,win:newsNext.hit_rate,reason:newsMetrics.profitability||"insufficient_forward_evidence"},
+    {name:"ai_gated_technical_v1",label:"旧 AI Gated",mode:(state.strategy_modes||{}).ai_gated_technical_v1_new_entries?"模拟交易":"影子研究 / 管理旧仓",kind:"warn",account:"旧 AI sleeve",decisions:(lines.ai||{}).cycles,entries:metricEntryCount(aiMetrics),closed:aiMetrics.closed_trade_count,pnl:metricTotalPnl(aiMetrics),win:aiMetrics.win_rate,reason:humanReason((latestAi.execution||{}).reason||(latestAi.decision||{}).no_trade_reason||(latestAi.decision||{}).thesis||"暂无最近决策")},
+    {name:"ai_instrument_allocator_v1",label:"AI 工具分配器",mode:String((state.strategy_modes||{}).ai_instrument_allocator_v1||"").includes("paper")?"模拟交易":"未启用",kind:"good",account:"$10,000 allocator",decisions:array(allocator.decisions).length,entries:metricEntryCount(allocatorMetrics),closed:allocatorMetrics.closed_trade_count,pnl:metricTotalPnl(allocatorMetrics),win:allocatorMetrics.win_rate,reason:humanReason(latestAllocation.reason||((latestAllocation.selected_instrument||{}).ticker?"已选择工具，等待执行或持仓管理":"最近没有选择可执行工具"))},
+    {name:"llm_news_drift_v1",label:"新闻漂移实验",mode:"只观察",kind:"info",account:"不进入账户",decisions:newsMetrics.proposal_count,entries:0,closed:"—",pnl:null,win:newsNext.hit_rate,reason:`${newsMetrics.valid_return_label_count||0} 个有效结果标签 · ${newsMetrics.profitability||"insufficient_forward_evidence"}`},
   ];
 }
 function renderStrategies(state){
@@ -1750,7 +2053,7 @@ function renderStrategies(state){
   document.getElementById("view-strategies").className="";
   document.getElementById("view-strategies").innerHTML=`<div class="page-heading"><div><h2>策略表现</h2><p>同一行比较权限、账户、交易数量和结果；影子实验不会混入账户 PnL。</p></div></div>
     <section class="section-block"><div class="table-wrap"><table class="mobile-table"><thead><tr><th>策略</th><th>当前模式</th><th>账户</th><th>决策</th><th>入场</th><th>平仓</th><th>累计 PnL</th><th>胜率</th><th>最近结论</th></tr></thead><tbody>${rows}</tbody></table></div>
-      <div class="definition-grid"><div class="definition"><strong>胜率</strong><span>盈利交易数除以已平仓交易数，不能单独代表是否赚钱。</span></div><div class="definition"><strong>累计 PnL</strong><span>已实现盈利减去亏损和模拟执行成本。</span></div><div class="definition"><strong>只管理旧仓</strong><span>停止新增入场，但原有持仓继续执行止盈、止损和期限退出。</span></div></div></section>`;
+      <div class="definition-grid"><div class="definition"><strong>胜率</strong><span>盈利交易数除以已平仓交易数，不能单独代表是否赚钱。</span></div><div class="definition"><strong>累计 PnL</strong><span>当前净值减去初始资金，包含已实现和当前未实现盈亏。</span></div><div class="definition"><strong>影子研究 / 管理旧仓</strong><span>继续记录不执行的 AI 决策，同时只对原有持仓执行退出管理。</span></div></div></section>`;
 }
 function renderAiDecisions(state){
   const allocator=state.ai_instrument_allocator||{},allocation=allocator.latest_allocation||{},selected=allocation.selected_instrument||{},decisions=array(allocator.decisions).slice().reverse().slice(0,12);
@@ -1761,7 +2064,7 @@ function renderAiDecisions(state){
   document.getElementById("view-ai").className="";
   document.getElementById("view-ai").innerHTML=`<div class="page-heading"><div><h2>AI 决策</h2><p>模型负责结构化研究；只有确定性 Python 风控可以批准模拟执行。</p></div><div class="asof">私有推理原文不会显示</div></div>
     <section class="section-block"><div class="section-head"><div><h3>决策流水线</h3><p>每一步都使用同一 data cutoff，不允许未来数据。</p></div></div><div class="pipeline"><div class="pipeline-step"><strong>1. 候选</strong><span>技术和事件发现</span></div><div class="pipeline-step"><strong>2. Exa 证据</strong><span>新闻与原始来源</span></div><div class="pipeline-step"><strong>3. DeepSeek</strong><span>结构化方向判断</span></div><div class="pipeline-step"><strong>4. Challenge</strong><span>反证与否决建议</span></div><div class="pipeline-step"><strong>5. Python 风控</strong><span>最终 veto 权</span></div></div></section>
-    <section class="section-block"><div class="section-head"><div><h3>最近一次工具分配</h3><p>$10,000 独立模拟账户与 $2,000 可负担性对照。</p></div>${statusBadge(allocation.status||"暂无分配",allocation.status==="selected"?"good":"warn")}</div><div class="stat-strip"><div class="stat"><div class="stat-label">选中工具</div><div class="stat-value">${esc(selectedLabel)}</div></div><div class="stat"><div class="stat-label">数量</div><div class="stat-value">${selected.quantity??"—"}</div></div><div class="stat"><div class="stat-label">保守情景净收益</div><div class="stat-value ${tone(selected.conservative_net_return_pct)}">${selected.conservative_net_return_pct==null?"—":pct(number(selected.conservative_net_return_pct)*100)}</div></div><div class="stat"><div class="stat-label">概率 EV</div><div class="stat-value">${allocation.probability_ev_available?money(allocation.probability_ev_usd):"未校准，不展示"}</div></div></div></section>
+    <section class="section-block"><div class="section-head"><div><h3>最近一次工具分配</h3><p>$10,000 独立模拟账户与 $2,000 可负担性对照。</p></div>${statusBadge(allocation.status||"暂无分配",allocation.status==="selected"?"good":"warn")}</div><div class="stat-strip"><div class="stat"><div class="stat-label">选中工具</div><div class="stat-value">${esc(selectedLabel)}</div></div><div class="stat"><div class="stat-label">数量</div><div class="stat-value">${esc(selected.quantity??"—")}</div></div><div class="stat"><div class="stat-label">保守情景净收益</div><div class="stat-value ${tone(selected.conservative_net_return_pct)}">${selected.conservative_net_return_pct==null?"—":pct(number(selected.conservative_net_return_pct)*100)}</div></div><div class="stat"><div class="stat-label">概率 EV</div><div class="stat-value">${allocation.probability_ev_available?money(allocation.probability_ev_usd):"未校准，不展示"}</div></div></div></section>
     <section class="section-block"><div class="section-head"><div><h3>Allocator 结构化决策</h3><p>最多显示最近 12 条研究结论。</p></div></div><div class="table-wrap"><table class="mobile-table"><thead><tr><th>时间</th><th>股票</th><th>研究阶段</th><th>方向</th><th>期限</th><th>Challenge</th><th>结构化结论</th></tr></thead><tbody>${decisionRows||'<tr><td colspan="7" class="muted">尚无 allocator 决策。</td></tr>'}</tbody></table></div></section>
     <section class="section-block"><div class="section-head"><div><h3>Exa + DeepSeek 催化研究</h3><p>Bull / News、Challenge、Decision 与确定性 Python 风控分栏展示。</p></div></div><div class="table-wrap"><table class="mobile-table"><thead><tr><th>时间</th><th>股票</th><th>Bull / News</th><th>Challenge</th><th>Decision</th><th>Python 风控</th></tr></thead><tbody>${catalystRows||'<tr><td colspan="6" class="muted">尚无新的催化决策。</td></tr>'}</tbody></table></div></section>
     <section class="section-block"><div class="section-head"><div><h3>最近候选排名</h3><p>这是研究入口，不代表已经创建订单。</p></div></div><div class="table-wrap"><table class="mobile-table"><thead><tr><th>股票</th><th>综合分</th><th>入场线</th><th>系统动作</th><th>原因</th></tr></thead><tbody>${candidateRows||'<tr><td colspan="5" class="muted">尚无候选排名。</td></tr>'}</tbody></table></div></section>`;
@@ -1769,11 +2072,20 @@ function renderAiDecisions(state){
 function healthRows(state){
   const heartbeat=state.heartbeat||{},summary=state.beginner_summary||{},ops=summary.operations||{},news=state.news_drift||{},jobs=((heartbeat.payload||{}).latest_jobs)||{},rows=[];
   const add=(component,status,detail,kind)=>rows.push({component,status,detail,kind});
-  add("Paper-only 安全边界",(state.mode||{}).paper&&!(state.mode||{}).live_trading?"正常":"异常","paper=true · live_trading=false · 页面无写入入口",(state.mode||{}).paper&&!(state.mode||{}).live_trading?"good":"bad");
+  const safe=paperOnlyMode(state.mode||{}),mode=state.mode||{};
+  add("Paper-only 安全边界",safe?"正常":"异常",`paper=${mode.paper===true} · live_readonly=${mode.live_readonly===true} · live_trading=${mode.live_trading===true}`,safe?"good":"bad");
   const service=heartbeat.effective_status||"unknown";add("Forward service",serviceLabels[service]||service,heartbeat.last_heartbeat_at?`最近心跳 ${localDateTime(heartbeat.last_heartbeat_at)}`:"没有心跳时间",service==="ok"?"good":service==="degraded"?"warn":service==="unknown"?"":"bad");
-  const jobValues=Object.values(jobs),failed=jobValues.filter(job=>["failed","timed_out"].includes((job||{}).status)).length;add("Scheduler",failed?`${failed} 个最近作业异常`:"最近作业正常",`${jobValues.length} 个受监督作业有最近状态`,failed?"bad":"good");
-  add("市场数据",heartbeat.stale?"数据过期":"时间戳新鲜",heartbeat.age_seconds==null?"没有可用时间戳":`心跳年龄 ${number(heartbeat.age_seconds).toFixed(0)} 秒`,heartbeat.stale?"bad":"good");
-  add("Robinhood 权限边界","只读",(state.mode||{}).live_trading?"检测到 live_trading=true":"dashboard 不导入 broker adapter，也没有真实下单方法",(state.mode||{}).live_trading?"bad":"good");
+  const jobValues=Object.values(jobs),failed=jobValues.filter(job=>["failed","timed_out"].includes((job||{}).status)).length;
+  if(!jobValues.length){add("Scheduler","无最近状态","heartbeat 中没有受监督作业状态","")}
+  else if(service!=="ok"){add("Scheduler","状态已过期",`${jobValues.length} 个作业记录随服务心跳一同过期`,"warn")}
+  else{add("Scheduler",failed?`${failed} 个最近作业异常`:"最近作业正常",`${jobValues.length} 个受监督作业有最近状态`,failed?"bad":"good")}
+  const addQuote=(label,quote)=>{
+    if(!quote.observed_at){add(label,"无报价时间","没有可用的报价观察时间","");return}
+    const detail=`最近 ${localDateTime(quote.observed_at)} · ${ageLabel(quote.age_seconds)}${quote.source?" · "+quote.source:""}`;
+    add(label,quote.stale?"报价不可用于执行":"时间戳新鲜",detail,quote.stale?"bad":"good");
+  };
+  const marketData=state.market_data||{};addQuote("股票行情",marketData.equity||{});addQuote("期权行情",marketData.options||{});
+  add("Broker 写入边界",safe?"仅行情只读":"模式配置异常",safe?"dashboard 不导入 broker adapter，也没有真实下单方法":`paper=${mode.paper===true} · live_readonly=${mode.live_readonly===true} · live_trading=${mode.live_trading===true}`,safe?"good":"bad");
   add("Exa 新闻发现",(news.latest_cycle||{}).event?"有最近周期":"暂无最近周期",(news.latest_cycle||{}).ts?`最近 ${localDateTime(news.latest_cycle.ts)}`:"等待新的 discovery cycle",(news.latest_cycle||{}).event?"good":"");
   add("DeepSeek 调用",ops.llm_errors?`${ops.llm_errors} 次历史错误`:"最近交易日无记录错误",`${ops.llm_calls||0} 次调用 · 估算成本 $${number(ops.estimated_api_cost_usd).toFixed(4)}`,ops.llm_errors?"warn":"good");
   add("审计与真实下单","只追加 / 未调用",`最近交易日记录 ${ops.runtime_jobs||0} 个作业；dashboard 只读`,"good");
@@ -1824,7 +2136,7 @@ async function refresh(){
     const response=await fetch("/api/state",{cache:"no-store"});
     if(!response.ok)throw new Error("HTTP "+response.status);
     const state=await response.json();
-    renderHeader(state);renderOverview(state);renderPortfolio(state);renderStrategies(state);renderAiDecisions(state);renderHealth(state);
+    renderBoundary(state);renderHeader(state);renderOverview(state);renderPortfolio(state);renderStrategies(state);renderAiDecisions(state);renderHealth(state);
   }catch(error){
     document.getElementById("view-overview").innerHTML=`<div class="error-box"><strong>无法读取本地状态</strong><div>${esc(error.message||error)}</div></div>`;
   }finally{refreshInFlight=false}

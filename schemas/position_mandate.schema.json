@@ -37,7 +37,7 @@
     "entered_at": {"type": ["string", "null"], "format": "date-time"},
     "planned_exit_at": {"type": "string", "format": "date-time"},
     "thesis_valid_until": {"type": "string", "format": "date-time"},
-    "invalidation_condition": {"type": "string"},
+    "invalidation_condition": {"type": "string", "minLength": 1},
     "invalidation_triggered": {"type": "boolean"},
     "invalidation_reason": {"type": "string"},
     "planned_stop_price": {"type": ["number", "null"]},

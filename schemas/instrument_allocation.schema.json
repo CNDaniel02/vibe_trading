@@ -11,6 +11,7 @@
     "selected_instrument",
     "counterfactual_2000",
     "short_equity_counterfactual",
+    "selection_policy_version",
     "probability_ev_available",
     "probability_ev_usd",
     "raw_probability_used_for_ev"
@@ -20,10 +21,19 @@
     "status": {"enum": ["selected", "no_trade"]},
     "reason": {"type": ["string", "null"]},
     "signal_summary": {"type": "object"},
-    "considered": {"type": "array", "items": {"type": "object"}},
-    "selected_instrument": {"type": ["object", "null"]},
+    "considered": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/instrument_candidate"}
+    },
+    "selected_instrument": {
+      "oneOf": [
+        {"$ref": "#/$defs/instrument_candidate"},
+        {"type": "null"}
+      ]
+    },
     "counterfactual_2000": {"type": ["object", "null"]},
     "short_equity_counterfactual": {"type": ["object", "null"]},
+    "selection_policy_version": {"const": "deterministic_risk_adjusted_v1"},
     "probability_ev_available": {"const": false},
     "probability_ev_usd": {"type": "null"},
     "raw_probability_used_for_ev": {"const": false},
@@ -42,7 +52,7 @@
       "minimum": 0
     },
     "market_implied_move_method": {
-      "enum": ["nearest_candidate_iv_sqrt_t", null]
+      "enum": ["nearest_candidate_iv_sqrt_calendar_time", null]
     },
     "market_implied_move_option_id": {"type": ["string", "null"]},
     "market_implied_volatility": {
@@ -51,6 +61,34 @@
     },
     "forecast_exceeds_market_implied_move": {
       "type": ["boolean", "null"]
+    },
+    "planned_exit_at": {"type": "string", "format": "date-time"},
+    "scenario_elapsed_calendar_days": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    }
+  },
+  "$defs": {
+    "instrument_candidate": {
+      "type": "object",
+      "required": [
+        "scenario_pnl_usd",
+        "scenario_return_on_account_nav",
+        "deterministic_risk_usd",
+        "deterministic_risk_pct_of_nav",
+        "selection_score",
+        "selection_score_method"
+      ],
+      "properties": {
+        "scenario_pnl_usd": {"type": "number"},
+        "scenario_return_on_account_nav": {"type": "number"},
+        "deterministic_risk_usd": {"type": "number", "minimum": 0},
+        "deterministic_risk_pct_of_nav": {"type": "number", "minimum": 0},
+        "selection_score": {"type": ["number", "null"]},
+        "selection_score_method": {
+          "const": "conservative_scenario_pnl_over_deterministic_risk_v1"
+        }
+      }
     }
   },
   "allOf": [
@@ -69,7 +107,9 @@
           "market_implied_move_method",
           "market_implied_move_option_id",
           "market_implied_volatility",
-          "forecast_exceeds_market_implied_move"
+          "forecast_exceeds_market_implied_move",
+          "planned_exit_at",
+          "scenario_elapsed_calendar_days"
         ]
       }
     }

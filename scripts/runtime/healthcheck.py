@@ -17,6 +17,7 @@ def run_healthcheck(root: str | Path, require_heartbeat: bool = False) -> dict:
     root = Path(root)
     config = load_runtime_config(root)
     assert_paper_mode(config)
+    mode = config.get("paper", {}).get("mode", {})
     state_files = [
         "paper_account.json",
         "paper_positions.json",
@@ -158,8 +159,9 @@ def run_healthcheck(root: str | Path, require_heartbeat: bool = False) -> dict:
         "runtime_healthy": runtime_healthy,
         "operational_status": operational_status,
         "degraded_reasons": degraded_reasons,
-        "paper_mode": True,
-        "live_trading": False,
+        "paper_mode": bool(mode.get("paper", False)),
+        "live_readonly": bool(mode.get("live_readonly", False)),
+        "live_trading": bool(mode.get("live_trading", False)),
         "llm_provider": llm_provider,
         "llm_api_key_env": llm_key_env if llm_provider == "api" else None,
         "llm_ready": llm_ready,

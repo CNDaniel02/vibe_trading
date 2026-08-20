@@ -3,8 +3,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 from scripts.agents.investment_team import run_investment_team
-from scripts.core.config import load_runtime_config
+from scripts.core.config import assert_paper_mode, load_runtime_config
 from scripts.core.models import Quote
 from scripts.replay.historical_data_adapter import CsvHistoricalMarketDataAdapter
 from scripts.replay.replay_run_manager import ReplayRunManager
@@ -141,6 +143,9 @@ def test_healthcheck_and_scheduler_wrapper(paper_root):
         )
     )
     assert health["runtime_healthy"] is True
+    assert health["paper_mode"] is True
+    assert health["live_readonly"] is False
+    assert health["live_trading"] is False
     assert health["operational_status"] == (
         "ok" if health["full_forward_evaluation_ready"] else "degraded"
     )
@@ -151,3 +156,11 @@ def test_healthcheck_and_scheduler_wrapper(paper_root):
     scheduler.add_interval_job("noop", 60, lambda: config["paper"]["mode"]["paper"])
     assert scheduler.scheduler.get_job("noop") is not None
     scheduler.shutdown()
+
+
+def test_paper_mode_rejects_live_readonly(paper_root):
+    config = load_runtime_config(paper_root)
+    config["paper"]["mode"]["live_readonly"] = True
+
+    with pytest.raises(RuntimeError, match="live_readonly must be false"):
+        assert_paper_mode(config)

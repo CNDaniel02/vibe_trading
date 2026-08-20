@@ -57,5 +57,7 @@ def assert_paper_mode(config: dict[str, Any]) -> None:
     mode = config["paper"].get("mode", {})
     if not mode.get("paper", False):
         raise RuntimeError("paper mode is not enabled")
+    if mode.get("live_readonly", False):
+        raise RuntimeError("live_readonly must be false for this implementation")
     if mode.get("live_trading", False):
         raise RuntimeError("live_trading must be false for this implementation")

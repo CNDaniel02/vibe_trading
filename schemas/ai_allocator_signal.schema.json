@@ -21,6 +21,7 @@
       "type": "array"
     },
     "entry_condition": {
+      "minLength": 1,
       "type": "string"
     },
     "entry_now": {
@@ -34,6 +35,7 @@
       ]
     },
     "invalidation_condition": {
+      "minLength": 1,
       "type": "string"
     },
     "max_holding_trading_days": {

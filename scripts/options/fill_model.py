@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 
 from scripts.options.models import OptionFill, OptionOrder, OptionQuote
+from scripts.options.tick_rounding import (
+    option_price_tick,
+    round_down_to_tick,
+    round_up_to_tick,
+)
 
 
 @dataclass(frozen=True)
@@ -11,20 +15,6 @@ class OptionFillDecision:
     status: str
     fill: OptionFill | None = None
     reason: str | None = None
-
-
-def _round_up_to_tick(value: float, tick: float) -> float:
-    if tick <= 0:
-        return round(value, 4)
-    units = (Decimal(str(value)) / Decimal(str(tick))).quantize(Decimal("1"), rounding=ROUND_CEILING)
-    return float(units * Decimal(str(tick)))
-
-
-def _round_down_to_tick(value: float, tick: float) -> float:
-    if tick <= 0:
-        return round(value, 4)
-    units = (Decimal(str(value)) / Decimal(str(tick))).quantize(Decimal("1"), rounding=ROUND_FLOOR)
-    return float(units * Decimal(str(tick)))
 
 
 def simulate_option_fill(order: OptionOrder, quote: OptionQuote, costs: dict, filled_at: str) -> OptionFillDecision:
@@ -40,13 +30,8 @@ def simulate_option_fill(order: OptionOrder, quote: OptionQuote, costs: dict, fi
 
     if order.intent == "buy_to_open":
         tick_reference = quote.ask + slip
-        tick = (
-            order.contract.above_tick
-            if tick_reference > order.contract.tick_cutoff_price
-            else order.contract.below_tick
-        )
-        tick = tick or float(costs.get("price_tick_usd", 0.01))
-        adverse_price = _round_up_to_tick(tick_reference, tick)
+        tick = option_price_tick(order.contract, tick_reference, costs)
+        adverse_price = round_up_to_tick(tick_reference, tick)
         if order.order_type == "limit":
             if order.limit_price is None:
                 return OptionFillDecision("rejected", reason="limit buy missing limit_price")
@@ -55,13 +40,8 @@ def simulate_option_fill(order: OptionOrder, quote: OptionQuote, costs: dict, fi
         price = adverse_price
     elif order.intent == "sell_to_close":
         raw_price = max(0.0, quote.bid - slip)
-        tick = (
-            order.contract.above_tick
-            if raw_price > order.contract.tick_cutoff_price
-            else order.contract.below_tick
-        )
-        tick = tick or float(costs.get("price_tick_usd", 0.01))
-        adverse_price = max(0.0, _round_down_to_tick(raw_price, tick))
+        tick = option_price_tick(order.contract, raw_price, costs)
+        adverse_price = max(0.0, round_down_to_tick(raw_price, tick))
         if order.order_type == "limit":
             if order.limit_price is None:
                 return OptionFillDecision("rejected", reason="limit sell missing limit_price")

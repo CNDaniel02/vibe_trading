@@ -8,6 +8,16 @@ from scripts.core.models import parse_ts, utc_now
 from scripts.core.state import JsonStateStore
 
 
+def _record_mapping(raw: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(key): dict(value)
+        for key, value in raw.items()
+        if isinstance(value, dict)
+    }
+
+
 class AllocatorStateStore:
     """Restart-safe conditional plans and allocations for one isolated sleeve."""
 
@@ -108,17 +118,22 @@ class AllocatorStateStore:
 
     def plans(self) -> dict[str, dict[str, Any]]:
         raw = self.store.read_json("allocator_plans.json", {})
-        return {str(key): dict(value) for key, value in raw.items()}
+        return _record_mapping(raw)
 
     def active_plans(self, now: str) -> list[dict[str, Any]]:
         current = parse_ts(now)
-        plans = [
-            value
-            for value in self.plans().values()
-            if value.get("status") == "active"
-            and parse_ts(str(value["created_at"])) <= current
-            and current <= parse_ts(str(value["valid_until"]))
-        ]
+        plans: list[dict[str, Any]] = []
+        for value in self.plans().values():
+            try:
+                active = (
+                    value.get("status") == "active"
+                    and parse_ts(str(value["created_at"])) <= current
+                    and current <= parse_ts(str(value["valid_until"]))
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+            if active:
+                plans.append(value)
         return sorted(plans, key=lambda value: (str(value["created_at"]), str(value["plan_id"])))
 
     def set_plan_status(
@@ -174,4 +189,4 @@ class AllocatorStateStore:
 
     def allocations(self) -> dict[str, dict[str, Any]]:
         raw = self.store.read_json("allocator_allocations.json", {})
-        return {str(key): dict(value) for key, value in raw.items()}
+        return _record_mapping(raw)

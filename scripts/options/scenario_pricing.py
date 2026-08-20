@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-import math
 from typing import Any, Iterable
 
 from scripts.options.greeks import black_scholes_estimate
 from scripts.options.models import OptionContract, OptionQuote
+from scripts.options.tick_rounding import (
+    option_price_tick,
+    round_down_to_tick,
+    round_up_to_tick,
+)
 
 
 def _adverse_slippage(price: float, costs: dict[str, Any]) -> float:
@@ -14,21 +18,13 @@ def _adverse_slippage(price: float, costs: dict[str, Any]) -> float:
     )
 
 
-def _round_up(value: float, tick: float) -> float:
-    return math.ceil((value - 1e-12) / tick) * tick
-
-
-def _round_down(value: float, tick: float) -> float:
-    return math.floor((value + 1e-12) / tick) * tick
-
-
 def reprice_option_scenarios(
     contract: OptionContract,
     quote: OptionQuote,
     *,
     spot: float,
     now: str,
-    horizon_days: float,
+    elapsed_calendar_days: float,
     move_pct: float,
     iv_shifts: Iterable[float],
     costs: dict[str, Any],
@@ -38,11 +34,10 @@ def reprice_option_scenarios(
     if quote.implied_volatility is None or quote.implied_volatility <= 0:
         raise ValueError("positive implied volatility is required")
     dte = contract.dte(now)
-    if dte <= 0 or horizon_days < 0 or horizon_days >= dte:
+    if dte <= 0 or elapsed_calendar_days < 0 or elapsed_calendar_days >= dte:
         raise ValueError("scenario horizon must remain before option expiration")
-    tick = float(contract.below_tick or costs.get("price_tick_usd", 0.01))
     initial_years = dte / 365.0
-    remaining_years = (dte - horizon_days) / 365.0
+    remaining_years = (dte - elapsed_calendar_days) / 365.0
     base_iv = float(quote.implied_volatility)
     initial_model = black_scholes_estimate(
         option_type=contract.option_type,
@@ -52,7 +47,11 @@ def reprice_option_scenarios(
         volatility=base_iv,
     )
     scenario_spot = spot * (1 + move_pct / 100)
-    entry_price = _round_up(quote.ask + _adverse_slippage(quote.ask, costs), tick)
+    raw_entry = quote.ask + _adverse_slippage(quote.ask, costs)
+    entry_price = round_up_to_tick(
+        raw_entry,
+        option_price_tick(contract, raw_entry, costs),
+    )
     spread = max(0.0, quote.ask - quote.bid)
     commission = float(costs.get("commission_per_contract_usd", 0))
     scenarios: list[dict[str, Any]] = []
@@ -77,11 +76,15 @@ def reprice_option_scenarios(
             quote.mid + estimate.price - initial_model.price,
         )
         projected_bid = max(0.0, anchored_mid - spread / 2)
+        raw_exit = max(
+            0.0,
+            projected_bid - _adverse_slippage(projected_bid, costs),
+        )
         executable_bid = max(
             0.0,
-            _round_down(
-                max(0.0, projected_bid - _adverse_slippage(projected_bid, costs)),
-                tick,
+            round_down_to_tick(
+                raw_exit,
+                option_price_tick(contract, raw_exit, costs),
             ),
         )
         net_pnl = (
@@ -111,9 +114,10 @@ def reprice_option_scenarios(
         "option_type": contract.option_type,
         "spot": spot,
         "move_pct": move_pct,
-        "horizon_days": horizon_days,
+        "elapsed_calendar_days": elapsed_calendar_days,
         "entry_executable_ask": round(entry_price, 6),
         "conservative_exit_bid": conservative["executable_exit_bid"],
+        "conservative_net_pnl_usd": conservative["net_pnl_usd"],
         "conservative_net_return_pct": conservative[
             "scenario_net_return_pct"
         ],
@@ -127,4 +131,3 @@ def reprice_option_scenarios(
         "probability_ev_available": False,
         "probability_ev_usd": None,
     }
-

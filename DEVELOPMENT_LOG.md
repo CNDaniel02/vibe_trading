@@ -1,13 +1,25 @@
 # Development Log
 
+## 2026-08-20 (America/Los_Angeles) - 全量提交前终审
+
+- 审核本分支全部 allocator、期权定价、schema、测试、文档和 dashboard 改动。独立 Luna Max 审查发现并修复了严格 paper 三态、损坏状态恢复、非有限概率与异常执行时间戳等边界问题。
+- `assert_paper_mode` 现在只接受 `paper=true`、`live_readonly=false`、`live_trading=false`；healthcheck 返回配置中的真实三态值，不再硬编码。没有增加或调用任何 Robinhood 写工具。
+- allocator 会跳过损坏的 null state record；持久化 signal 不是 object、actionable 字段缺失、概率包含 NaN/Infinity、报价时间无效或计划退出时间无效时，统一返回结构化 `no_trade`，不会继续获取订单或让 scheduler 因解析异常退出。
+- dashboard 会忽略 null 订单/持仓记录。只有 `filled`、`cancelled`、`expired` 和 `rejected` 视为已结束，未知状态保留在未完成订单并显示警告；健康页的 broker 边界与顶部使用同一三态判定。
+- dashboard focused 测试为 `40 passed`；全套 pytest 为 `285 passed`，只有 4 条上游 `exchange_calendars` deprecation warning。Playwright 在 1440x1000 和 390x844 下逐页验证五个视图，页面无横向溢出，console 为 0 error / 0 warning；专用 8790 验证进程已关闭，用户的 8787 dashboard 未停止。
+
 ## 2026-08-19 (America/Los_Angeles) - 五视图模拟交易控制台
 
 - 将原单一长页面重构为 `总览`、`持仓与订单`、`策略表现`、`AI 决策` 和 `系统健康` 五个 tab。默认首屏同时显示旧 `$2,000` 账本与独立 `$10,000 ai_instrument_allocator_v1` sleeve，并把“系统现在在做什么”和当前阻塞事项置于历史统计之前。
-- 持仓和订单按主账户、旧 AI sleeve、allocator sleeve 分开聚合；open order 不再以视觉方式混同持仓，最近 20 笔已结束订单默认折叠。旧 `long_directional_options_v2_weighted` 与 `ai_gated_technical_v1` 明确显示为“只管理旧仓”。
+- 持仓和订单按主账户、旧 AI sleeve、allocator sleeve 分开聚合；open order 不再以视觉方式混同持仓，最近 20 笔已结束订单默认折叠。旧 `long_directional_options_v2_weighted` 显示为“只管理旧仓”，`ai_gated_technical_v1` 显示为“影子研究 / 管理旧仓”。
 - AI 页按候选、Exa、DeepSeek、Challenge 和 deterministic Python risk veto 展示结构化链路。长证据改为短摘要并按需展开，最近深度催化记录限制为 6 条；raw private chain-of-thought、`reasoning_content` 和凭据仍不暴露。
 - 健康页把当前 heartbeat/component 状态与最近交易日历史计数分离；unknown 使用中性状态，历史失败不再显示成当前仍在发生。页面支持 URL hash、ARIA tabs、方向键和 Home/End。
 - `_read_jsonl` 改为从文件尾部按 64 KiB 块读取最后 N 条有效 JSONL，能忽略正在 append 的半截记录，不再每 5 秒读取完整大日志。轮询改为 15 秒，浏览器隐藏时暂停。HTTP handler 只实现 `GET`、`HEAD` 和 `OPTIONS`，dashboard 仍不导入 broker adapter，也没有真实下单、重启或修改配置入口。
-- focused dashboard 测试为 21 passed；全套 pytest 为 239 passed，只有 4 条上游 `exchange_calendars` deprecation warning。Playwright 在 1440x1000 和 390x844 下逐页检查，未发现 console error 或页面横向溢出；AI 桌面页从超过 13,000px 缩短到约 2,400px。
+- Luna Max 终审后补齐三元模式校验：只有 `paper=true`、`live_readonly=false`、`live_trading=false` 同时满足才显示 Paper only。空 scheduler 不再显示绿色正常；顶部服务心跳、股票报价和健康页期权报价使用不同时间戳，且长时间间隔改为分钟、小时或天。损坏或未来 heartbeat、未来报价统一按 stale fail-closed 展示，不会被夹成 0 秒后误标新鲜。
+- 主账户、旧 AI sleeve 和 allocator sleeve 的 open order 全部保留并全部显示，完成订单先按状态筛选再各自保留最近记录；页面明确显示“最近 20 / 总数”，不再因服务端先截 30 条而静默遗漏历史。News Drift SQLite/JSON 异常现在只令该 metrics 组件降级，不会让 `/api/state` 整体失败；allocator 数量也在写入 `innerHTML` 前转义。
+- metrics 按配置、账户状态和相关日志的 mtime/size 签名缓存，文件变化后自动失效；News Drift 同时跟踪 SQLite 主文件、WAL、SHM、模型用量与周期日志，旧 AI directional metrics 同时跟踪其决策日志。现场连续请求从约 506-600 ms 降到约 196-270 ms，响应从约 411 KB 降到约 394 KB。
+- “最近交易日”优先采用 heartbeat 中最新 forward exchange session，不再被未滚动的 `daily_counters.date` 锁在前一日。旧 AI sleeve 和 allocator 的累计 PnL 改为当前净值减初始资金，入场数由已平仓加当前持仓确定；旧 AI 明确标为“影子研究 / 管理旧仓”，News Drift 标签不再冒充平仓交易，样本达标但未盈利也会明确显示未通过盈利门槛。
+- focused dashboard 测试为 38 passed；全套 pytest 为 278 passed，只有 4 条上游 `exchange_calendars` deprecation warning。Playwright 在 1440x1000 和 390x844 下逐页检查，未发现 console error 或页面横向溢出；AI 桌面页约 2,400px。
 - 检修期间没有停止或重启用户的 forward service。浏览器验收使用独立 `127.0.0.1:8790` dashboard 进程，不访问真实下单工具。
 
 ## 2026-08-19 (America/Los_Angeles) - AI Instrument Allocator V1 与旧策略有序退出
