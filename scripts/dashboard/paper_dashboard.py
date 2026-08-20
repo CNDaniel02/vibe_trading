@@ -1406,6 +1406,263 @@ refresh();setInterval(refresh,5000);
 </html>"""
 
 
+_BEGINNER_PAGE = """<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>模拟交易控制台</title>
+<style>
+:root{
+  color-scheme:light;
+  --page:#f3f5f4;--surface:#fff;--surface-soft:#f8faf9;
+  --text:#18221d;--muted:#627069;--line:#d9dfdc;--line-strong:#c7d0cc;
+  --green:#0b7650;--green-soft:#e7f4ee;--red:#bd3542;--red-soft:#faeaec;
+  --amber:#8d5b06;--amber-soft:#fff3d6;--blue:#205f96;--blue-soft:#eaf2f9;
+  --neutral:#46534d;
+}
+*{box-sizing:border-box}
+html{background:var(--page)}
+body{margin:0;background:var(--page);color:var(--text);font:14px/1.5 "Segoe UI","Microsoft YaHei",Arial,sans-serif;letter-spacing:0}
+button{font:inherit;letter-spacing:0}
+.topbar{background:var(--surface);border-bottom:1px solid var(--line)}
+.topbar-inner{max-width:1420px;margin:0 auto;padding:16px 24px;display:flex;align-items:center;justify-content:space-between;gap:24px}
+.brand{min-width:0}.brand h1{font-size:22px;line-height:1.2;margin:0 0 3px}.brand p{margin:0;color:var(--muted);font-size:12px}
+.runtime-strip{display:flex;align-items:center;justify-content:flex-end;gap:16px;flex-wrap:wrap}
+.runtime-item{display:grid;grid-template-columns:auto auto;align-items:center;gap:7px;white-space:nowrap}
+.runtime-label{font-size:11px;color:var(--muted)}.runtime-value{font-weight:700}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--neutral)}
+.dot.good{background:var(--green)}.dot.bad{background:var(--red)}.dot.warn{background:#c18110}.dot.info{background:var(--blue)}
+.paper-boundary{background:var(--green-soft);color:#235b42;border-bottom:1px solid #cce4d7}
+.paper-boundary-inner{max-width:1420px;margin:0 auto;padding:8px 24px;display:flex;align-items:center;justify-content:space-between;gap:16px}
+.paper-boundary strong{font-size:13px}.paper-boundary span{font-size:12px}
+.tabbar{position:sticky;top:0;z-index:20;background:rgba(255,255,255,.97);border-bottom:1px solid var(--line)}
+.tabs{max-width:1420px;margin:0 auto;padding:0 24px;display:flex;gap:4px;overflow-x:auto;scrollbar-width:thin}
+.tab{height:46px;padding:0 15px;border:0;border-bottom:3px solid transparent;background:transparent;color:var(--muted);font-weight:650;white-space:nowrap;cursor:pointer}
+.tab:hover{color:var(--text);background:var(--surface-soft)}
+.tab[aria-selected="true"]{color:var(--blue);border-bottom-color:var(--blue)}
+.tab:focus-visible{outline:2px solid var(--blue);outline-offset:-3px}
+main{max-width:1420px;margin:0 auto;padding:20px 24px 48px}
+.view[hidden]{display:none}.view{min-height:480px}
+.page-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:14px}
+.page-heading h2{font-size:19px;line-height:1.3;margin:0 0 3px}.page-heading p{margin:0;color:var(--muted)}
+.asof{font-size:12px;color:var(--muted);white-space:nowrap;padding-top:4px}
+.activity{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(260px,.7fr);gap:14px;margin-bottom:14px}
+.activity-main,.current-alerts{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:17px 18px;min-width:0}
+.eyebrow{font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase;margin-bottom:5px}
+.activity-title{font-size:20px;line-height:1.35;font-weight:750;margin-bottom:5px}.activity-copy{color:var(--muted);margin:0}
+.status-badge{display:inline-flex;align-items:center;gap:6px;border-radius:4px;padding:3px 7px;font-size:12px;font-weight:700;background:#edf0ee;color:var(--neutral);white-space:nowrap}
+.status-badge.good{background:var(--green-soft);color:var(--green)}.status-badge.bad{background:var(--red-soft);color:var(--red)}
+.status-badge.warn{background:var(--amber-soft);color:var(--amber)}.status-badge.info{background:var(--blue-soft);color:var(--blue)}
+.alert-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}.alert-head h3{font-size:14px;margin:0}
+.alert-list{display:grid;gap:8px}.alert-row{display:grid;grid-template-columns:9px minmax(0,1fr);gap:8px;align-items:start;color:var(--muted)}
+.alert-mark{width:8px;height:8px;border-radius:2px;background:var(--amber);margin-top:6px}.alert-row.bad .alert-mark{background:var(--red)}
+.clear-state{color:var(--green);font-weight:650}
+.account-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-bottom:14px}
+.account-card{background:var(--surface);border:1px solid var(--line);border-radius:6px;overflow:hidden;min-width:0}
+.account-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:14px 16px;border-bottom:1px solid var(--line)}
+.account-head h3{font-size:15px;margin:0 0 2px}.account-head p{margin:0;color:var(--muted);font-size:12px}
+.account-body{display:grid;grid-template-columns:minmax(170px,.85fr) minmax(0,1.4fr);align-items:stretch}
+.account-primary{padding:17px 16px;border-right:1px solid var(--line)}
+.account-equity{font-size:28px;line-height:1.15;font-weight:760;font-variant-numeric:tabular-nums;margin:3px 0}.account-pnl{font-weight:700;font-variant-numeric:tabular-nums}
+.good-text{color:var(--green)}.bad-text{color:var(--red)}.warn-text{color:var(--amber)}
+.account-facts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
+.fact{padding:12px 14px;border-bottom:1px solid var(--line);min-width:0}.fact:nth-child(odd){border-right:1px solid var(--line)}.fact:nth-last-child(-n+2){border-bottom:0}
+.fact-label{font-size:11px;color:var(--muted);margin-bottom:2px}.fact-value{font-size:15px;font-weight:700;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.section-block{background:var(--surface);border:1px solid var(--line);border-radius:6px;margin-bottom:14px;overflow:hidden}
+.section-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;padding:14px 16px;border-bottom:1px solid var(--line)}
+.section-head h3{font-size:15px;margin:0 0 2px}.section-head p{margin:0;color:var(--muted);font-size:12px}
+.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:760px}
+th,td{padding:10px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}th{font-size:11px;color:var(--muted);font-weight:700;background:var(--surface-soft)}
+tbody tr:last-child td{border-bottom:0}.num{font-variant-numeric:tabular-nums;white-space:nowrap}.muted{color:var(--muted)}.small{font-size:12px}
+.empty-state{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:36px 20px;text-align:center;color:var(--muted)}
+.empty-state h2{color:var(--text);font-size:18px;margin:0 0 5px}
+.error-box{background:var(--red-soft);border:1px solid #e9bdc2;border-radius:6px;padding:16px;color:var(--red)}
+@media(max-width:940px){
+  .activity{grid-template-columns:1fr}.account-grid{grid-template-columns:1fr}
+  .topbar-inner{align-items:flex-start}.runtime-strip{gap:10px 16px}
+}
+@media(max-width:680px){
+  .topbar-inner,.paper-boundary-inner{padding-left:14px;padding-right:14px;align-items:flex-start;flex-direction:column;gap:10px}
+  .runtime-strip{justify-content:flex-start}.paper-boundary-inner{gap:3px}.tabs{padding:0 8px}.tab{padding:0 12px}
+  main{padding:14px}.page-heading{display:block}.asof{margin-top:4px}.activity-main,.current-alerts{padding:14px}
+  .account-body{grid-template-columns:1fr}.account-primary{border-right:0;border-bottom:1px solid var(--line)}
+  .account-facts{grid-template-columns:1fr}.fact:nth-child(odd){border-right:0}.fact:nth-last-child(-n+2){border-bottom:1px solid var(--line)}.fact:last-child{border-bottom:0}
+  .account-equity{font-size:25px}
+}
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand"><h1>模拟交易控制台</h1><p>账户、策略、AI 决策与运行状态</p></div>
+    <div class="runtime-strip" aria-label="当前运行状态">
+      <div class="runtime-item"><span id="service-dot" class="dot"></span><span><span class="runtime-label">服务</span><br><span id="service-value" class="runtime-value">读取中</span></span></div>
+      <div class="runtime-item"><span id="market-dot" class="dot info"></span><span><span class="runtime-label">市场</span><br><span id="market-value" class="runtime-value">读取中</span></span></div>
+      <div class="runtime-item"><span id="fresh-dot" class="dot"></span><span><span class="runtime-label">数据</span><br><span id="fresh-value" class="runtime-value">读取中</span></span></div>
+    </div>
+  </div>
+</header>
+<div class="paper-boundary"><div class="paper-boundary-inner"><strong>Paper only · 仅使用假钱模拟</strong><span>Robinhood 行情只读 · 不会调用真实下单工具</span></div></div>
+<nav class="tabbar" aria-label="控制台视图">
+  <div class="tabs" role="tablist" aria-label="模拟交易控制台">
+    <button class="tab" id="tab-overview" data-tab="overview" role="tab" aria-controls="panel-overview" aria-selected="true" tabindex="0">总览</button>
+    <button class="tab" id="tab-portfolio" data-tab="portfolio" role="tab" aria-controls="panel-portfolio" aria-selected="false" tabindex="-1">持仓与订单</button>
+    <button class="tab" id="tab-strategies" data-tab="strategies" role="tab" aria-controls="panel-strategies" aria-selected="false" tabindex="-1">策略表现</button>
+    <button class="tab" id="tab-ai" data-tab="ai" role="tab" aria-controls="panel-ai" aria-selected="false" tabindex="-1">AI 决策</button>
+    <button class="tab" id="tab-health" data-tab="health" role="tab" aria-controls="panel-health" aria-selected="false" tabindex="-1">系统健康</button>
+  </div>
+</nav>
+<main>
+  <section class="view" id="panel-overview" role="tabpanel" aria-labelledby="tab-overview"><div id="view-overview"><div class="empty-state">正在读取本地模拟状态...</div></div></section>
+  <section class="view" id="panel-portfolio" role="tabpanel" aria-labelledby="tab-portfolio" hidden><div id="view-portfolio" class="empty-state"><h2>持仓与订单</h2><p>正在整理账户中的持仓和订单。</p></div></section>
+  <section class="view" id="panel-strategies" role="tabpanel" aria-labelledby="tab-strategies" hidden><div id="view-strategies" class="empty-state"><h2>策略表现</h2><p>正在整理各条策略线的独立结果。</p></div></section>
+  <section class="view" id="panel-ai" role="tabpanel" aria-labelledby="tab-ai" hidden><div id="view-ai" class="empty-state"><h2>AI 决策</h2><p>正在整理候选、证据和确定性风控结论。</p></div></section>
+  <section class="view" id="panel-health" role="tabpanel" aria-labelledby="tab-health" hidden><div id="view-health" class="empty-state"><h2>系统健康</h2><p>正在整理当前故障和历史运行记录。</p></div></section>
+</main>
+<script>
+const REFRESH_INTERVAL_MS=15000;
+const TAB_IDS=["overview","portfolio","strategies","ai","health"];
+const esc=value=>String(value??"—").replace(/[&<>'"]/g,char=>({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
+const number=value=>Number(value||0);
+const array=value=>Array.isArray(value)?value:[];
+const money=value=>value===undefined||value===null?"—":"$"+Math.abs(number(value)).toFixed(2);
+const signedMoney=value=>(number(value)>0?"+":number(value)<0?"-":"")+money(value);
+const pct=value=>value===undefined||value===null?"—":number(value).toFixed(2)+"%";
+const tone=value=>number(value)>0?"good-text":number(value)<0?"bad-text":"";
+const serviceLabels={ok:"运行中",stale:"心跳过期",stopped:"已停止",degraded:"部分降级",unknown:"未知"};
+const marketLabels={pre_market:"盘前",regular:"正常交易",post_market:"盘后",after_hours:"盘后",closed:"休市"};
+const openOrderStatuses=new Set(["created","submitted_to_paper_broker","open","partially_filled"]);
+function statusBadge(label,kind=""){
+  return `<span class="status-badge ${kind}">${esc(label)}</span>`;
+}
+function setDot(id,kind){document.getElementById(id).className="dot "+kind}
+function currentAlerts(state){
+  const alerts=[];
+  const heartbeat=state.heartbeat||{},status=heartbeat.effective_status||"unknown";
+  if(status!=="ok")alerts.push({kind:"bad",text:`主服务${serviceLabels[status]||status}`});
+  if(!((state.mode||{}).paper) || (state.mode||{}).live_trading)alerts.push({kind:"bad",text:"Paper-only 安全边界不符合预期"});
+  const jobs=(((heartbeat.payload||{}).latest_jobs)||{});
+  Object.entries(jobs).forEach(([name,job])=>{
+    const jobStatus=(job||{}).status;
+    if(["failed","timed_out"].includes(jobStatus))alerts.push({kind:"bad",text:`${name} 最近一次作业${jobStatus==="failed"?"失败":"超时"}`});
+  });
+  return alerts;
+}
+function renderHeader(state){
+  const b=state.beginner_summary||{},service=b.service||{},heartbeat=state.heartbeat||{};
+  const status=service.status||heartbeat.effective_status||"unknown";
+  document.getElementById("service-value").textContent=serviceLabels[status]||status;
+  setDot("service-dot",status==="ok"?"good":status==="degraded"?"warn":"bad");
+  const session=service.market_session||"unknown";
+  document.getElementById("market-value").textContent=marketLabels[session]||"未识别";
+  setDot("market-dot",session==="regular"?"good":"info");
+  const age=heartbeat.age_seconds;
+  const fresh=!heartbeat.stale;
+  document.getElementById("fresh-value").textContent=age==null?"无时间戳":fresh?`${number(age).toFixed(0)} 秒前`:`${number(age).toFixed(0)} 秒前`;
+  setDot("fresh-dot",fresh?"good":"bad");
+}
+function systemActivity(state){
+  const b=state.beginner_summary||{},service=b.service||{},account=b.account||{};
+  const status=service.status||"unknown",positions=number(account.open_equity_positions)+number(account.open_option_positions);
+  if(status!=="ok")return {title:"主服务当前没有正常推进",copy:"系统保持 fail-closed，不会使用不完整数据创建模拟订单。",kind:"bad"};
+  if(positions>0)return {title:`正在监控 ${positions} 个持仓`,copy:"退出模块会继续检查价格、盈亏、持有期限和收盘前平仓规则。",kind:"info"};
+  if(service.market_session==="regular")return {title:"正在扫描机会，目前没有持仓",copy:"系统会先筛选候选，再经过新闻、模型判断和确定性风控；没有通过时不会强行交易。",kind:"good"};
+  return {title:"市场当前不在正常交易时段",copy:"系统会更新研究和状态，但只在允许的正常交易时段模拟开仓。",kind:"info"};
+}
+function accountCard({title,subtitle,equity,initial,pnl,cash,positions,orders,badge,badgeKind}){
+  return `<article class="account-card">
+    <div class="account-head"><div><h3>${esc(title)}</h3><p>${esc(subtitle)}</p></div>${statusBadge(badge,badgeKind)}</div>
+    <div class="account-body">
+      <div class="account-primary"><div class="eyebrow">当前净值</div><div class="account-equity">${money(equity)}</div><div class="account-pnl ${tone(pnl)}">累计 ${signedMoney(pnl)}</div><div class="small muted">初始 ${money(initial)}</div></div>
+      <div class="account-facts">
+        <div class="fact"><div class="fact-label">可用现金</div><div class="fact-value">${money(cash)}</div></div>
+        <div class="fact"><div class="fact-label">当前持仓</div><div class="fact-value">${positions} 个</div></div>
+        <div class="fact"><div class="fact-label">未完成订单</div><div class="fact-value">${orders} 笔</div></div>
+        <div class="fact"><div class="fact-label">累计收益率</div><div class="fact-value ${tone(pnl)}">${initial?pct(number(pnl)/number(initial)*100):"—"}</div></div>
+      </div>
+    </div>
+  </article>`;
+}
+function strategySummaryRows(state){
+  const b=state.beginner_summary||{},lines=b.strategy_lines||{},metrics=state.metrics||{},metricLines=metrics.lines||{};
+  const equity=lines.equity||{},options=lines.options||{},ai=lines.ai||{},allocator=state.ai_instrument_allocator||{},allocatorMetrics=allocator.metrics||{};
+  const rows=[
+    {name:"股票加权",mode:(state.strategy_modes||{}).weighted_relative_strength_v2==="shadow_only"?"只观察":"模拟交易",kind:"info",pnl:(metricLines.equity||{}).net_pnl,activity:`监控 ${equity.watchlist_count||0} 个标的`},
+    {name:"方向期权",mode:(state.strategy_modes||{}).long_directional_options_v2_weighted_new_entries?"模拟交易":"只管理旧仓",kind:"warn",pnl:(metricLines.options||{}).net_pnl,activity:`${options.direction_evaluations||0} 次方向评估`},
+    {name:"旧 AI Gated",mode:(state.strategy_modes||{}).ai_gated_technical_v1_new_entries?"模拟交易":"只管理旧仓",kind:"warn",pnl:((state.ai_gated||{}).metrics||{}).net_pnl,activity:`${ai.completed||0} 次完成`},
+    {name:"AI 工具分配器",mode:(state.strategy_modes||{}).ai_instrument_allocator_v1==="paper"?"模拟交易":"未启用",kind:"good",pnl:allocatorMetrics.realized_pnl,activity:`${array(allocator.positions).length+array(allocator.option_positions).length} 个持仓`},
+  ];
+  return rows.map(row=>`<tr><td><strong>${esc(row.name)}</strong></td><td>${statusBadge(row.mode,row.kind)}</td><td class="num ${tone(row.pnl)}">${signedMoney(row.pnl)}</td><td class="muted">${esc(row.activity)}</td></tr>`).join("");
+}
+function renderOverview(state){
+  const b=state.beginner_summary||{},day=b.day||{},legacy=b.account||{},allocator=state.ai_instrument_allocator||{},allocatorAccount=allocator.account||{},allocatorMetrics=allocator.metrics||{};
+  const activity=systemActivity(state),alerts=currentAlerts(state);
+  const legacyOrders=array(state.orders).filter(order=>openOrderStatuses.has(order.status)).length+array(state.option_orders).filter(order=>openOrderStatuses.has(order.status)).length;
+  const allocatorOrders=array(allocator.orders).filter(order=>openOrderStatuses.has(order.status)).length+array(allocator.option_orders).filter(order=>openOrderStatuses.has(order.status)).length;
+  const legacyCard=accountCard({title:"旧 $2,000 模拟账本",subtitle:"历史交易与旧策略持仓",equity:legacy.ending_equity,initial:legacy.initial_cash,pnl:legacy.cumulative_pnl,cash:(state.account||{}).cash,positions:number(legacy.open_equity_positions)+number(legacy.open_option_positions),orders:legacyOrders,badge:"独立账本",badgeKind:"info"});
+  const allocatorInitial=allocatorAccount.initial_cash||allocatorMetrics.initial_cash||10000;
+  const allocatorEquity=allocatorMetrics.ending_equity??allocatorAccount.cash;
+  const allocatorPnl=allocatorMetrics.realized_pnl??(allocatorEquity==null?null:number(allocatorEquity)-number(allocatorInitial));
+  const allocatorCard=accountCard({title:"$10,000 AI 分配账户",subtitle:"ai_instrument_allocator_v1",equity:allocatorEquity,initial:allocatorInitial,pnl:allocatorPnl,cash:allocatorAccount.cash,positions:array(allocator.positions).length+array(allocator.option_positions).length,orders:allocatorOrders,badge:"独立账户",badgeKind:"good"});
+  const alertHtml=alerts.length?alerts.map(item=>`<div class="alert-row ${item.kind}"><span class="alert-mark"></span><span>${esc(item.text)}</span></div>`).join(""):'<div class="clear-state">当前没有检测到阻塞运行的故障</div>';
+  document.getElementById("view-overview").innerHTML=`
+    <div class="page-heading"><div><h2>总览</h2><p>先看系统状态和两套模拟账户，再决定是否需要查看细节。</p></div><div class="asof">最近交易日 ${esc(b.session_date||"—")} · 页面刷新 ${new Date().toLocaleTimeString("zh-CN",{hour12:false})}</div></div>
+    <div class="activity">
+      <section class="activity-main"><div class="eyebrow">系统现在在做什么</div><div class="activity-title">${esc(activity.title)}</div><p class="activity-copy">${esc(activity.copy)}</p><div style="margin-top:12px">${statusBadge(activity.kind==="bad"?"需要处理":activity.kind==="good"?"正常运行":"当前状态",activity.kind)}</div></section>
+      <aside class="current-alerts"><div class="alert-head"><h3>当前阻塞事项</h3>${statusBadge(alerts.length?alerts.length+" 项":"无",alerts.length?"bad":"good")}</div><div class="alert-list">${alertHtml}</div></aside>
+    </div>
+    <div class="account-grid">${legacyCard}${allocatorCard}</div>
+    <section class="section-block"><div class="section-head"><div><h3>最近交易日结果</h3><p>只把已完成买入和卖出的闭环计入当日结果。</p></div><strong class="num ${tone(day.realized_pnl)}">${signedMoney(day.realized_pnl)}</strong></div>
+      <div class="table-wrap"><table><thead><tr><th>已平仓</th><th>盈利</th><th>亏损</th><th>当前持仓</th><th>盈利证据</th></tr></thead><tbody><tr><td class="num">${day.closed_trades||0} 笔</td><td class="num good-text">${day.wins||0} 笔</td><td class="num bad-text">${day.losses||0} 笔</td><td class="num">${number(legacy.open_equity_positions)+number(legacy.open_option_positions)} 个</td><td>${esc((b.evidence||{}).sufficient?"达到最低样本线，仍需继续前向验证":"样本或质量仍不足")}</td></tr></tbody></table></div>
+    </section>
+    <section class="section-block"><div class="section-head"><div><h3>策略状态速览</h3><p>每条策略的账户和交易权限相互区分。</p></div></div><div class="table-wrap"><table><thead><tr><th>策略</th><th>当前模式</th><th>累计 PnL</th><th>最近活动</th></tr></thead><tbody>${strategySummaryRows(state)}</tbody></table></div></section>`;
+}
+function activateTab(id,updateHash=true){
+  const active=TAB_IDS.includes(id)?id:"overview";
+  document.querySelectorAll('[role="tab"]').forEach(tab=>{
+    const selected=tab.dataset.tab===active;
+    tab.setAttribute("aria-selected",String(selected));
+    tab.tabIndex=selected?0:-1;
+  });
+  TAB_IDS.forEach(tabId=>{document.getElementById(`panel-${tabId}`).hidden=tabId!==active});
+  if(updateHash&&location.hash!==`#${active}`)history.replaceState(null,"",`#${active}`);
+}
+document.querySelectorAll('[role="tab"]').forEach((tab,index)=>{
+  tab.addEventListener("click",()=>activateTab(tab.dataset.tab));
+  tab.addEventListener("keydown",event=>{
+    if(!["ArrowLeft","ArrowRight","Home","End"].includes(event.key))return;
+    event.preventDefault();
+    let next=index;
+    if(event.key==="ArrowLeft")next=(index-1+TAB_IDS.length)%TAB_IDS.length;
+    if(event.key==="ArrowRight")next=(index+1)%TAB_IDS.length;
+    if(event.key==="Home")next=0;
+    if(event.key==="End")next=TAB_IDS.length-1;
+    const target=document.getElementById(`tab-${TAB_IDS[next]}`);target.focus();activateTab(TAB_IDS[next]);
+  });
+});
+window.addEventListener("hashchange",()=>activateTab(location.hash.slice(1),false));
+activateTab(location.hash.slice(1)||"overview",false);
+let refreshInFlight=false;
+async function refresh(){
+  if(document.hidden||refreshInFlight)return;
+  refreshInFlight=true;
+  try{
+    const response=await fetch("/api/state",{cache:"no-store"});
+    if(!response.ok)throw new Error("HTTP "+response.status);
+    const state=await response.json();
+    renderHeader(state);renderOverview(state);
+  }catch(error){
+    document.getElementById("view-overview").innerHTML=`<div class="error-box"><strong>无法读取本地状态</strong><div>${esc(error.message||error)}</div></div>`;
+  }finally{refreshInFlight=false}
+}
+document.addEventListener("visibilitychange",()=>{if(!document.hidden)refresh()});
+refresh();setInterval(refresh,REFRESH_INTERVAL_MS);
+</script>
+</body>
+</html>"""
+
+
 def make_handler(root: Path) -> type[BaseHTTPRequestHandler]:
     class DashboardHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802

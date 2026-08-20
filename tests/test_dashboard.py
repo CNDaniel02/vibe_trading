@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
 
 from scripts.dashboard.paper_dashboard import (
+    _BEGINNER_PAGE,
     _read_jsonl,
     build_dashboard_state,
     make_handler,
@@ -77,6 +79,44 @@ def test_dashboard_handler_exposes_only_read_routes(paper_root):
     handler = make_handler(paper_root)
     assert handler.__name__ == "DashboardHandler"
     assert not hasattr(handler, "do_POST")
+
+
+def test_dashboard_page_has_five_accessible_operational_tabs():
+    expected_tabs = {
+        "overview": "总览",
+        "portfolio": "持仓与订单",
+        "strategies": "策略表现",
+        "ai": "AI 决策",
+        "health": "系统健康",
+    }
+
+    assert 'role="tablist"' in _BEGINNER_PAGE
+    assert len(re.findall(r'<button[^>]+role="tab"', _BEGINNER_PAGE)) == len(
+        expected_tabs
+    )
+    assert len(re.findall(r'<section[^>]+role="tabpanel"', _BEGINNER_PAGE)) == len(
+        expected_tabs
+    )
+    for tab_id, label in expected_tabs.items():
+        assert f'id="tab-{tab_id}"' in _BEGINNER_PAGE
+        assert f'aria-controls="panel-{tab_id}"' in _BEGINNER_PAGE
+        assert f'id="panel-{tab_id}"' in _BEGINNER_PAGE
+        assert label in _BEGINNER_PAGE
+    assert "location.hash" in _BEGINNER_PAGE
+    assert 'addEventListener("keydown"' in _BEGINNER_PAGE
+
+
+def test_dashboard_page_uses_visibility_aware_fifteen_second_polling():
+    assert "const REFRESH_INTERVAL_MS=15000" in _BEGINNER_PAGE
+    assert "document.hidden" in _BEGINNER_PAGE
+    assert 'addEventListener("visibilitychange"' in _BEGINNER_PAGE
+    assert "setInterval(refresh,5000)" not in _BEGINNER_PAGE
+
+
+def test_dashboard_page_keeps_explicit_paper_only_boundary():
+    assert "仅使用假钱模拟" in _BEGINNER_PAGE
+    assert "不会调用真实下单工具" in _BEGINNER_PAGE
+    assert "模拟交易控制台" in _BEGINNER_PAGE
 
 
 def test_dashboard_ignores_client_disconnect_during_response(paper_root):
