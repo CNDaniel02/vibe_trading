@@ -35,9 +35,9 @@ def run_options_dry_run(project_root: str | Path) -> dict[str, Any]:
         )
         entry_quote = OptionQuote(
             option_id=contract.option_id,
-            bid=0.99,
-            ask=1.00,
-            mark=0.995,
+            bid=0.50,
+            ask=0.51,
+            mark=0.505,
             updated_at=DRY_RUN_TIME,
             source="fixture",
             delta=-0.45,
@@ -54,14 +54,14 @@ def run_options_dry_run(project_root: str | Path) -> dict[str, Any]:
             intent="buy_to_open",
             order_type="limit",
             quantity=1,
-            limit_price=1.01,
+            limit_price=0.52,
             quote_seen_at=entry_quote.updated_at,
             thesis="offline long-put fixture",
             now=DRY_RUN_TIME,
         )
         entry = broker.submit_order(entry, entry_quote, DRY_RUN_TIME)
         exit_time = "2026-07-06T16:00:00+00:00"
-        exit_quote = OptionQuote(**{**entry_quote.to_dict(), "bid": 1.20, "ask": 1.25, "mark": 1.225, "updated_at": exit_time})
+        exit_quote = OptionQuote(**{**entry_quote.to_dict(), "bid": 0.70, "ask": 0.72, "mark": 0.71, "updated_at": exit_time})
         closing = broker.create_order(
             decision_id="fixture-option-exit",
             contract=contract,

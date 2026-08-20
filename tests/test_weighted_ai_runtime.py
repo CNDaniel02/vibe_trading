@@ -913,7 +913,14 @@ def test_ai_entry_requires_immediate_unexpired_authorization(paper_root: Path) -
     assert pipeline.broker.store.positions() == {}
 
 
-def test_ai_same_session_stop_loss_blocks_ticker_reentry(paper_root: Path) -> None:
+@pytest.mark.parametrize(
+    "exit_thesis",
+    ["deterministic stop loss", "thesis invalidation"],
+)
+def test_ai_same_session_stop_loss_blocks_ticker_reentry(
+    paper_root: Path,
+    exit_thesis: str,
+) -> None:
     config = load_runtime_config(paper_root)
     tracker = UsageTracker()
     pipeline = AiGatedPaperPipeline(
@@ -947,7 +954,7 @@ def test_ai_same_session_stop_loss_blocks_ticker_reentry(paper_root: Path) -> No
         quantity=1,
         limit_price=None,
         quote_seen_at=stop_quote.asof,
-        thesis="deterministic stop loss",
+        thesis=exit_thesis,
         idempotency_key="prior-stop",
         now=NOW,
     )
@@ -1005,9 +1012,9 @@ def test_ai_metrics_separate_bullish_and_bearish_results(paper_root: Path) -> No
     contract = OptionContract("put-1", "chain", "MSFT", "put", 100, "2026-08-07")
     put_entry_quote = OptionQuote(
         "put-1",
-        0.99,
-        1.0,
-        0.995,
+        0.50,
+        0.51,
+        0.505,
         NOW,
         "fixture",
         delta=-0.45,
@@ -1032,9 +1039,9 @@ def test_ai_metrics_separate_bullish_and_bearish_results(paper_root: Path) -> No
     assert option_broker.submit_order(put_entry, put_entry_quote, NOW).status == "filled"
     put_exit_quote = OptionQuote(
         "put-1",
-        1.20,
-        1.21,
-        1.205,
+        0.70,
+        0.71,
+        0.705,
         exit_time,
         "fixture",
         delta=-0.40,

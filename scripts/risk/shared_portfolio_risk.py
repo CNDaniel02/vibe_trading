@@ -83,6 +83,70 @@ def _pending_option_cost(orders: dict[str, Any]) -> float:
     return total
 
 
+def _active_equity_underlyings(
+    positions: dict[str, Position],
+    orders: dict[str, Order],
+) -> set[str]:
+    underlyings = {
+        str(symbol).upper()
+        for symbol, position in positions.items()
+        if float(_value(position, "quantity", 0)) > 0
+    }
+    for order in orders.values():
+        if _value(order, "status") in _OPEN_STATUSES and _value(order, "side") == "buy":
+            underlyings.add(str(_value(order, "symbol", "")).upper())
+    return {symbol for symbol in underlyings if symbol}
+
+
+def _active_option_underlyings(
+    positions: dict[str, Any],
+    orders: dict[str, Any],
+) -> set[str]:
+    underlyings: set[str] = set()
+    for position in positions.values():
+        if float(_value(position, "quantity", 0)) <= 0:
+            continue
+        contract = _value(position, "contract", {})
+        underlying = str(_value(contract, "underlying", "")).upper()
+        if underlying:
+            underlyings.add(underlying)
+    for order in orders.values():
+        if _value(order, "status") not in _OPEN_STATUSES or _value(order, "intent") != "buy_to_open":
+            continue
+        contract = _value(order, "contract", {})
+        underlying = str(_value(contract, "underlying", "")).upper()
+        if underlying:
+            underlyings.add(underlying)
+    return underlyings
+
+
+def _open_exposure_count(
+    equity_positions: dict[str, Position],
+    option_positions: dict[str, Any],
+    equity_orders: dict[str, Order],
+    option_orders: dict[str, Any],
+) -> int:
+    exposures: set[tuple[str, str]] = set()
+    for symbol, position in equity_positions.items():
+        if float(_value(position, "quantity", 0)) > 0:
+            exposures.add(("equity", str(symbol).upper()))
+    for order_id, order in equity_orders.items():
+        if _value(order, "status") in _OPEN_STATUSES and _value(order, "side") == "buy":
+            identity = str(_value(order, "symbol", order_id)).upper()
+            exposures.add(("equity", identity))
+    for option_id, position in option_positions.items():
+        if float(_value(position, "quantity", 0)) > 0:
+            contract = _value(position, "contract", {})
+            identity = str(_value(contract, "option_id", option_id))
+            exposures.add(("options", identity))
+    for order_id, order in option_orders.items():
+        if _value(order, "status") in _OPEN_STATUSES and _value(order, "intent") == "buy_to_open":
+            contract = _value(order, "contract", {})
+            identity = str(_value(contract, "option_id", order_id))
+            exposures.add(("options", identity))
+    return len(exposures)
+
+
 def shared_deployment(
     account: Account,
     equity_positions: dict[str, Position],
@@ -158,6 +222,7 @@ def check_shared_entry(
     option_orders: dict[str, Any],
     counters: dict[str, Any],
     shared_config: dict[str, Any],
+    new_underlying: str | None = None,
 ) -> SharedRiskDecision:
     deployment = shared_deployment(
         account,
@@ -174,6 +239,23 @@ def check_shared_entry(
     decision = SharedRiskDecision(True, "shared account risk approved", account_equity, total_after, line_after)
     if not shared_config.get("enabled", True):
         return decision
+    if new_underlying and shared_config.get("one_exposure_per_underlying", False):
+        underlying = new_underlying.upper()
+        equity_underlyings = _active_equity_underlyings(equity_positions, equity_orders)
+        option_underlyings = _active_option_underlyings(option_positions, option_orders)
+        if line == "options" and underlying in equity_underlyings:
+            return SharedRiskDecision(False, "underlying already has executable equity exposure", account_equity, total_after, line_after)
+        if line == "equity" and underlying in option_underlyings:
+            return SharedRiskDecision(False, "underlying already has executable option exposure", account_equity, total_after, line_after)
+        if line == "options" and underlying in option_underlyings:
+            return SharedRiskDecision(False, "underlying already has executable option exposure", account_equity, total_after, line_after)
+    if _open_exposure_count(
+        equity_positions,
+        option_positions,
+        equity_orders,
+        option_orders,
+    ) >= int(shared_config.get("max_total_open_positions", 999)):
+        return SharedRiskDecision(False, "shared max total open positions reached", account_equity, total_after, line_after)
     if new_risk_usd <= 0:
         return SharedRiskDecision(False, "entry risk must be positive", account_equity, total_after, line_after)
     if new_risk_usd > account.cash + 1e-9:

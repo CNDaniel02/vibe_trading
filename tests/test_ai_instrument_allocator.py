@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -709,3 +710,219 @@ def test_two_thousand_counterfactual_never_reselects_instrument() -> None:
     assert counterfactual["risk_pct_of_nav"] == 0.125
     assert counterfactual["rejection_reason"] == "same option contract exceeds 3% per-entry premium risk"
     assert counterfactual["alternative_instrument_considered"] is False
+
+
+def test_allocator_risk_configuration_has_effective_portfolio_caps(
+    paper_root: Path,
+) -> None:
+    config = load_runtime_config(paper_root)
+
+    assert config["risk"]["max_position_pct_of_equity"] == 0.25
+    assert config["risk"]["max_planned_loss_pct_of_equity"] == 0.01
+    assert config["options_risk"]["max_order_risk_pct_of_equity"] == 0.03
+    assert config["options_risk"]["max_line_deployed_pct_of_equity"] == 0.08
+    assert config["shared_risk"]["max_options_deployed_pct_of_equity"] == 0.08
+    assert config["shared_risk"]["max_total_open_positions"] == 3
+    assert config["shared_risk"]["max_total_daily_entry_trades"] == 3
+    assert config["shared_risk"]["one_exposure_per_underlying"] is True
+
+
+def test_allocator_equity_order_requires_stop_and_caps_planned_nav_loss(
+    paper_root: Path,
+) -> None:
+    from scripts.core.models import Account, Order
+    from scripts.risk.risk_gate import check_order
+
+    config = load_runtime_config(paper_root)
+    quote = _underlying_quote()
+
+    def decision(stop_price):
+        order = Order(
+            order_id=f"equity-{stop_price}",
+            decision_id="allocator-equity",
+            symbol="AAPL",
+            side="buy",
+            order_type="limit",
+            quantity=20,
+            limit_price=100.06,
+            quote_seen_at=REGULAR_NOW,
+            created_at=REGULAR_NOW,
+            strategy="ai_instrument_allocator_v1",
+            planned_stop_price=stop_price,
+            signal_horizon="next_close",
+        )
+        return check_order(
+            order,
+            quote,
+            Account(10_000, 10_000),
+            {},
+            {},
+            {"trades": 0},
+            config,
+            REGULAR_NOW,
+            option_positions={},
+            option_orders={},
+        )
+
+    assert decision(None).reason == "allocator equity entry requires a planned stop"
+    assert decision(94.0).reason == "planned stop NAV risk exceeded"
+    assert decision(97.0).approved is True
+
+
+def test_single_underlying_and_three_position_caps_apply_across_lines(
+    paper_root: Path,
+) -> None:
+    from scripts.core.models import Account, Order, Position
+    from scripts.options.models import OptionOrder, OptionPosition
+    from scripts.options.risk_gate import check_option_order
+    from scripts.risk.risk_gate import check_order
+
+    config = load_runtime_config(paper_root)
+    account = Account(10_000, 10_000)
+    option_contract = _option_contract("aapl-put-risk", "2026-08-21", "put")
+    option_quote = _option_quote("aapl-put-risk", bid=1.99, ask=2.0)
+    option_order = OptionOrder(
+        order_id="cross-line-option",
+        decision_id="cross-line-option",
+        contract=option_contract,
+        intent="buy_to_open",
+        quantity=1,
+        order_type="limit",
+        limit_price=2.01,
+        quote_seen_at=REGULAR_NOW,
+        created_at=REGULAR_NOW,
+        strategy="ai_instrument_allocator_v1",
+        signal_horizon="next_close",
+    )
+    equity_positions = {
+        "AAPL": Position("AAPL", 1, 100, REGULAR_NOW, REGULAR_NOW)
+    }
+    option_decision = check_option_order(
+        option_order,
+        option_quote,
+        account,
+        equity_positions,
+        {},
+        {},
+        {},
+        {"trades": 0},
+        config,
+        REGULAR_NOW,
+    )
+    assert option_decision.reason == "underlying already has executable equity exposure"
+
+    existing_option = OptionPosition(
+        option_contract,
+        1,
+        1.0,
+        REGULAR_NOW,
+        REGULAR_NOW,
+    )
+    equity_order = Order(
+        order_id="cross-line-equity",
+        decision_id="cross-line-equity",
+        symbol="AAPL",
+        side="buy",
+        order_type="limit",
+        quantity=1,
+        limit_price=100.06,
+        quote_seen_at=REGULAR_NOW,
+        created_at=REGULAR_NOW,
+        strategy="ai_instrument_allocator_v1",
+        planned_stop_price=97.0,
+        signal_horizon="next_close",
+    )
+    equity_decision = check_order(
+        equity_order,
+        _underlying_quote(),
+        account,
+        {},
+        {},
+        {"trades": 0},
+        config,
+        REGULAR_NOW,
+        option_positions={option_contract.option_id: existing_option},
+        option_orders={},
+    )
+    assert equity_decision.reason == "underlying already has executable option exposure"
+
+    three_positions = {
+        "MSFT": Position("MSFT", 1, 100, REGULAR_NOW, REGULAR_NOW),
+        "NVDA": Position("NVDA", 1, 100, REGULAR_NOW, REGULAR_NOW),
+        "GOOGL": Position("GOOGL", 1, 100, REGULAR_NOW, REGULAR_NOW),
+    }
+    full_decision = check_order(
+        Order(
+            order_id="fourth-position",
+            decision_id="fourth-position",
+            symbol="AAPL",
+            side="buy",
+            order_type="limit",
+            quantity=1,
+            limit_price=100.06,
+            quote_seen_at=REGULAR_NOW,
+            created_at=REGULAR_NOW,
+            strategy="ai_instrument_allocator_v1",
+            planned_stop_price=97.0,
+            signal_horizon="next_close",
+        ),
+        _underlying_quote(),
+        account,
+        three_positions,
+        {},
+        {"trades": 0},
+        config,
+        REGULAR_NOW,
+        option_positions={},
+        option_orders={},
+    )
+    assert full_decision.reason == "shared max total open positions reached"
+
+
+def test_option_aggregate_eight_percent_cap_rejects_third_risk_block(
+    paper_root: Path,
+) -> None:
+    from scripts.core.models import Account
+    from scripts.options.models import OptionOrder, OptionPosition
+    from scripts.options.risk_gate import check_option_order
+
+    config = load_runtime_config(paper_root)
+    existing_contract = replace(
+        _option_contract("existing-put", "2026-08-21", "put"),
+        underlying="MSFT",
+    )
+    existing = OptionPosition(
+        existing_contract,
+        1,
+        7.0,
+        REGULAR_NOW,
+        REGULAR_NOW,
+    )
+    new_contract = _option_contract("new-put", "2026-08-21", "put")
+    order = OptionOrder(
+        order_id="aggregate-option",
+        decision_id="aggregate-option",
+        contract=new_contract,
+        intent="buy_to_open",
+        quantity=1,
+        order_type="limit",
+        limit_price=2.01,
+        quote_seen_at=REGULAR_NOW,
+        created_at=REGULAR_NOW,
+        strategy="ai_instrument_allocator_v1",
+        signal_horizon="next_close",
+    )
+    decision = check_option_order(
+        order,
+        _option_quote("new-put", bid=1.99, ask=2.0),
+        Account(9_300, 10_000),
+        {},
+        {existing_contract.option_id: existing},
+        {},
+        {},
+        {"trades": 0},
+        config,
+        REGULAR_NOW,
+    )
+
+    assert decision.reason == "shared options deployed risk cap exceeded"

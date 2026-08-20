@@ -137,6 +137,7 @@ def check_option_order(
         option_orders=option_orders,
         counters=counters,
         shared_config=config.get("shared_risk", {}),
+        new_underlying=contract.underlying,
     )
     if not shared.approved:
         return RiskDecision(False, shared.reason)

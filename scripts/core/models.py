@@ -81,6 +81,9 @@ class Order:
     reject_reason: str | None = None
     idempotency_key: str | None = None
     thesis: str = ""
+    strategy: str | None = None
+    planned_stop_price: float | None = None
+    signal_horizon: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

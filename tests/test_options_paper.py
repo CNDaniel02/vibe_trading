@@ -34,7 +34,7 @@ def contract(option_type: str = "call") -> OptionContract:
     )
 
 
-def quote(option_type: str = "call", *, bid: float = 0.99, ask: float = 1.0, asof: str = NOW) -> OptionQuote:
+def quote(option_type: str = "call", *, bid: float = 0.50, ask: float = 0.51, asof: str = NOW) -> OptionQuote:
     return OptionQuote(
         option_id=contract(option_type).option_id,
         bid=bid,
@@ -52,7 +52,7 @@ def quote(option_type: str = "call", *, bid: float = 0.99, ask: float = 1.0, aso
     )
 
 
-def order(option_type: str = "call", *, intent: str = "buy_to_open", limit_price: float | None = 1.01) -> OptionOrder:
+def order(option_type: str = "call", *, intent: str = "buy_to_open", limit_price: float | None = 0.52) -> OptionOrder:
     return OptionOrder(
         order_id="option-test",
         decision_id="decision-test",
@@ -72,20 +72,20 @@ def test_option_buy_fill_uses_ask_and_adverse_slippage(paper_root):
     decision = simulate_option_fill(order(), quote(), config["options_costs"], NOW)
     assert decision.status == "filled"
     assert decision.fill is not None
-    assert decision.fill.price == 1.01
-    assert decision.fill.gross_amount == 101
+    assert decision.fill.price == 0.52
+    assert decision.fill.gross_amount == 52
 
 
 def test_option_sell_fill_uses_bid_and_adverse_slippage(paper_root):
     config = load_runtime_config(paper_root)
     decision = simulate_option_fill(order(intent="sell_to_close", limit_price=None), quote(), config["options_costs"], NOW)
     assert decision.fill is not None
-    assert decision.fill.price == 0.98
+    assert decision.fill.price == 0.49
 
 
 def test_option_limit_not_reached_remains_open(paper_root):
     config = load_runtime_config(paper_root)
-    assert simulate_option_fill(order(limit_price=0.90), quote(), config["options_costs"], NOW).status == "open"
+    assert simulate_option_fill(order(limit_price=0.40), quote(), config["options_costs"], NOW).status == "open"
     assert simulate_option_fill(order(intent="sell_to_close", limit_price=1.05), quote(), config["options_costs"], NOW).status == "open"
 
 
@@ -156,7 +156,7 @@ def test_duplicate_and_daily_option_limits_are_enforced(paper_root):
     current = order()
     current.status = "open"
     duplicate = check_option_order(order(), quote(), Account(2000, 2000), {}, {}, {}, {"existing": current}, {"trades": 0}, config, NOW)
-    daily = check_option_order(order(), quote(), Account(2000, 2000), {}, {}, {}, {}, {"trades": 2, "option_trades": 2}, config, NOW)
+    daily = check_option_order(order(), quote(), Account(2000, 2000), {}, {}, {}, {}, {"trades": 3, "option_trades": 3}, config, NOW)
     assert not duplicate.approved and "duplicate" in duplicate.reason
     assert not daily.approved and daily.reason == "max daily option trades reached"
 
@@ -189,7 +189,7 @@ def test_option_broker_uses_shared_cash_and_independent_state(paper_root):
             intent="buy_to_open",
             order_type="limit",
             quantity=1,
-                limit_price=1.01,
+                limit_price=0.52,
             quote_seen_at=NOW,
             now=NOW,
         ),
@@ -197,7 +197,7 @@ def test_option_broker_uses_shared_cash_and_independent_state(paper_root):
         NOW,
     )
     assert submitted.status == "filled"
-    assert broker.store.base.account().cash == 1899
+    assert broker.store.base.account().cash == 1948
     assert contract("put").option_id in broker.store.positions()
     assert json.loads((paper_root / "state" / "paper_positions.json").read_text(encoding="utf-8")) == {}
     recovered = OptionPaperBroker(paper_root, config)
@@ -214,7 +214,7 @@ def test_option_close_ignores_entry_liquidity_rules_and_does_not_consume_trade_l
             intent="buy_to_open",
             order_type="limit",
             quantity=1,
-            limit_price=1.01,
+            limit_price=0.52,
             quote_seen_at=NOW,
             now=NOW,
         ),
@@ -262,7 +262,7 @@ def test_created_or_open_option_order_is_not_a_position(paper_root):
         intent="buy_to_open",
         order_type="limit",
         quantity=1,
-        limit_price=0.90,
+        limit_price=0.40,
         quote_seen_at=NOW,
         now=NOW,
     )
@@ -303,7 +303,7 @@ def test_shared_entry_capacity_reports_remaining_line_and_total_room(paper_root)
         option_orders={},
         shared_config=config["shared_risk"],
     )
-    assert capacity == 200
+    assert capacity == 160
 
 
 def test_option_expiry_and_sellout_policy_forces_close():
@@ -453,11 +453,11 @@ def test_option_selection_diagnostics_explain_budget_shortfall(paper_root):
             underlying_price=100,
             option_type="call",
             now=NOW,
-            max_premium_usd=80,
+            max_premium_usd=50,
         )
     assert selected is None
-    assert diagnostics["minimum_eligible_premium_usd"] == 100
-    assert diagnostics["minimum_budget_shortfall_usd"] == 20
+    assert diagnostics["minimum_eligible_premium_usd"] == 51
+    assert diagnostics["minimum_budget_shortfall_usd"] == 1
     assert diagnostics["cheapest_eligible_contract"]["option_id"] == contract().option_id
 
 

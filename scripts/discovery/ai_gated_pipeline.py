@@ -1066,7 +1066,10 @@ class AiGatedPaperPipeline:
             for order in self.broker.store.orders().values()
             if order.side == "sell"
             and order.status == "filled"
-            and "stop loss" in order.thesis.lower()
+            and any(
+                reason in order.thesis.lower()
+                for reason in ("stop loss", "thesis invalidation")
+            )
             and parse_ts(order.updated_at or order.submitted_at or order.created_at).date()
             == session_date
         }
@@ -1075,7 +1078,10 @@ class AiGatedPaperPipeline:
             for order in self.option_broker.store.orders().values()
             if order.intent == "sell_to_close"
             and order.status == "filled"
-            and "stop loss" in order.thesis.lower()
+            and any(
+                reason in order.thesis.lower()
+                for reason in ("stop loss", "thesis invalidation")
+            )
             and parse_ts(order.updated_at or order.submitted_at or order.created_at).date()
             == session_date
         )

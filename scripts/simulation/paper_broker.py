@@ -50,6 +50,9 @@ class PaperBroker:
         limit_price: float | None,
         quote_seen_at: str,
         thesis: str = "",
+        strategy: str | None = None,
+        planned_stop_price: float | None = None,
+        signal_horizon: str | None = None,
         idempotency_key: str | None = None,
         now: str | None = None,
     ) -> Order:
@@ -64,6 +67,9 @@ class PaperBroker:
             quote_seen_at=quote_seen_at,
             idempotency_key=idempotency_key or decision_id,
             thesis=thesis,
+            strategy=strategy,
+            planned_stop_price=planned_stop_price,
+            signal_horizon=signal_horizon,
             created_at=now or utc_now(),
         )
         orders = self.store.orders()

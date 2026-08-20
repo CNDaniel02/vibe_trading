@@ -145,6 +145,14 @@ def check_order(
             return RiskDecision(False, "all-in order blocked")
         if notional > equity * float(risk.get("max_order_pct_of_equity", 1)):
             return RiskDecision(False, "max order size exceeded")
+        stop_required_for = set(risk.get("require_planned_stop_for_strategies", []))
+        if order.strategy in stop_required_for:
+            if order.planned_stop_price is None or not 0 < order.planned_stop_price < estimated_price:
+                return RiskDecision(False, "allocator equity entry requires a planned stop")
+            planned_loss = (estimated_price - order.planned_stop_price) * order.quantity
+            max_planned_loss = equity * float(risk.get("max_planned_loss_pct_of_equity", 1))
+            if planned_loss > max_planned_loss + 1e-9:
+                return RiskDecision(False, "planned stop NAV risk exceeded")
 
     current_position = positions.get(order.symbol)
     if order.side == "buy":
@@ -169,6 +177,7 @@ def check_order(
             option_orders=option_orders or {},
             counters=counters,
             shared_config=config.get("shared_risk", {}),
+            new_underlying=order.symbol,
         )
         if not shared.approved:
             return RiskDecision(False, shared.reason)
