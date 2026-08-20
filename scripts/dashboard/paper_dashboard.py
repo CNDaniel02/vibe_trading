@@ -57,22 +57,45 @@ def _safe_metrics(root: Path, namespace: str | None = None) -> dict[str, Any]:
 
 
 def _read_jsonl(path: Path, limit: int = 400) -> list[dict[str, Any]]:
+    if limit <= 0:
+        return []
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            position = handle.tell()
+            chunks: list[bytes] = []
+            newline_count = 0
+            while position > 0 and newline_count < limit + 1:
+                read_size = min(64 * 1024, position)
+                position -= read_size
+                handle.seek(position)
+                chunk = handle.read(read_size)
+                chunks.append(chunk)
+                newline_count += chunk.count(b"\n")
+            starts_on_line_boundary = position == 0
+            if position > 0:
+                handle.seek(position - 1)
+                starts_on_line_boundary = handle.read(1) == b"\n"
     except OSError:
         return []
+    lines = b"".join(reversed(chunks)).splitlines()
+    if position > 0 and not starts_on_line_boundary:
+        lines = lines[1:]
     records: list[dict[str, Any]] = []
-    for line in lines[-limit:]:
+    for line in reversed(lines):
         if not line.strip():
             continue
         try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
+            record = json.loads(line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
             # The service can be appending while the dashboard reads. Ignore a
             # single incomplete line and retry on the next browser refresh.
             continue
         if isinstance(record, dict):
             records.append(record)
+            if len(records) == limit:
+                break
+    records.reverse()
     return records
 
 

@@ -2,7 +2,44 @@ from __future__ import annotations
 
 import json
 
-from scripts.dashboard.paper_dashboard import build_dashboard_state, make_handler
+from scripts.dashboard.paper_dashboard import (
+    _read_jsonl,
+    build_dashboard_state,
+    make_handler,
+)
+
+
+def test_dashboard_jsonl_reader_uses_bounded_tail_and_keeps_last_valid_records(
+    tmp_path,
+    monkeypatch,
+):
+    path = tmp_path / "large.jsonl"
+    records = [
+        {"index": 1, "text": "old"},
+        {"index": 2, "text": "上涨"},
+        {"index": 3, "text": "最新"},
+    ]
+    path.write_text(
+        "".join(
+            json.dumps(record, ensure_ascii=False) + "\n" for record in records
+        )
+        + '{"index": 4',
+        encoding="utf-8",
+    )
+
+    def fail_full_read(*_args, **_kwargs):
+        raise AssertionError("dashboard must not read the whole JSONL file")
+
+    monkeypatch.setattr(type(path), "read_text", fail_full_read)
+
+    assert _read_jsonl(path, limit=2) == records[-2:]
+
+
+def test_dashboard_jsonl_reader_returns_empty_for_non_positive_limit(tmp_path):
+    path = tmp_path / "events.jsonl"
+    path.write_text('{"event":"ignored"}\n', encoding="utf-8")
+
+    assert _read_jsonl(path, limit=0) == []
 
 
 def test_dashboard_state_explains_deterministic_rejection_and_paper_boundary(paper_root):
