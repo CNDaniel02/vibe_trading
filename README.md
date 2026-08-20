@@ -21,7 +21,7 @@ The paper broker supports fractional equity quantities in increments of `0.001` 
 - `multi_agent_relative_strength_v2_candidate` and Vibe Swarm are shadow/research only.
 - `exa_deepseek_catalyst_v1` independently discovers candidates but remains shadow-only and creates no orders.
 - `llm_news_drift_v1` discovers market-wide news before any technical screen and remains an isolated long-equity shadow experiment.
-- `ai_gated_technical_v1` no longer opens new entries; its existing `$2,000` sleeve is preserved byte-for-byte and remains exit-managed until flat.
+- `ai_gated_technical_v1` no longer opens new entries; its existing `$2,000` sleeve is preserved byte-for-byte, remains exit-managed until flat, and continues producing non-executing shadow decisions.
 - `ai_instrument_allocator_v1` is the only new AI executable experiment. It uses a separate `$10,000` paper sleeve and compares long equity, long call, and long put after deterministic scenario repricing and risk veto.
 - No adapter exposes create, submit, place, or cancel methods for a real broker.
 - Options sell-to-open, short contracts, spreads, margin, 0DTE, exercise, and assignment are rejected.
@@ -68,8 +68,10 @@ read-only watchlist/scans/earnings -> deterministic technical top 5-8
         -> isolated local paper sleeve, monitor, exit, journal, and metrics
 ```
 
-That lane is now entry-frozen. Its monitor stays active solely to close legacy
-orders and positions. New AI research and entries use `ai_instrument_allocator_v1`:
+That lane is now entry-frozen. Its monitor still closes legacy orders and
+positions, while its research path records `shadow_only` decisions without
+creating orders or publishing executable signals. New AI entries use
+`ai_instrument_allocator_v1`:
 
 ```text
 read-only scans and technical top 8 + Exa evidence
@@ -223,6 +225,8 @@ each data-collection stage are written to append-only runtime logs.
 # Read-only local GUI (run in a separate terminal while the service is running)
 .\.venv\Scripts\python.exe -m scripts.dashboard.paper_dashboard
 # Then open http://127.0.0.1:8787
+# Ctrl+C in this terminal stops only the dashboard, not the paper service.
+# If 8787 is occupied, add: --port 8790
 
 # Vibe 5-minute point-in-time replay
 .\.venv\Scripts\python.exe -m scripts.replay.vibe_replay_run_manager --start-date 2026-07-10 --end-date 2026-07-10 --symbols AAPL,MSFT,NVDA,SPY
@@ -236,6 +240,24 @@ each data-collection stage are written to append-only runtime logs.
 # Independent headline-drift event/firm-day/portfolio-day metrics
 .\.venv\Scripts\python.exe -m scripts.evaluation.evaluate_news_drift --root .
 ```
+
+The dashboard is a five-view read-only control center:
+
+- `总览` separates the legacy `$2,000` ledger from the independent `$10,000`
+  allocator sleeve and shows current blockers before historical incidents.
+- `持仓与订单` keeps positions, open orders, and completed order history
+  distinct; completed history is collapsed by default.
+- `策略表现` compares execution mode, account ownership, decisions, entries,
+  closed trades, PnL, win rate, and the latest no-trade reason by strategy.
+- `AI 决策` shows candidate ranking, Exa evidence, structured DeepSeek output,
+  Challenge review, and the deterministic Python risk verdict without raw
+  private chain-of-thought.
+- `系统健康` separates current component state from historical daily counts.
+
+The browser polls every 15 seconds and pauses while its tab is hidden. The
+server reads bounded JSONL tails instead of loading complete growing logs on
+every refresh. It exposes only `GET`, `HEAD`, and `OPTIONS`, imports no broker
+adapter, and has no order, restart, or configuration endpoint.
 
 ## Promotion Gate
 
@@ -261,14 +283,22 @@ is enabled only for its final Decision Manager. The dashboard displays
 structured evidence and verdicts, never raw private chain-of-thought.
 
 The independent catalyst lane remains shadow-only. The old executable AI-gated
-lane is entry-frozen and retains only monitoring and exits. The new allocator
+lane is entry-frozen but retains monitoring, exits, and non-executing shadow
+decisions. The new allocator
 starts from a deterministic top-eight set rather than waiting for another
 strategy to emit `buy`. DeepSeek emits one complete seven-bucket signed-return
 distribution for a specified horizon. Python derives bullish, bearish, neutral,
 and magnitude fields; raw values remain `uncalibrated` and never produce a
 displayed probability EV. Overnight Challenge and Decision may use thinking;
-fast stages do not. At 09:32 the system makes no model call: it reuses an active
+fast stages do not. At 08:00 only active-plan tickers receive incremental Exa
+refresh and, when evidence is new, a three-call fast News/Challenge/Decision
+reassessment. At 09:25 only active plans with new evidence receive a two-call
+News/Challenge invalidation check; it cannot change direction. At 09:32 the
+system makes no model call: it reuses an active
 conditional plan, refreshes quotes, reprices instruments, and reruns risk.
+The 09:25 stage records a same-session `preopen_revalidated_at` execution
+permit even when there is no new evidence. A missing or failed state write
+leaves the plan non-executable at 09:32.
 An after-hours or premarket signal must set `entry_now=false`; that field blocks
 an order during research but does not cancel the saved conditional plan. Only a
 plan created by an approved non-regular research stage can reach 09:32

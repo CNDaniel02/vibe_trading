@@ -53,6 +53,59 @@ class AllocatorStateStore:
         )
         return value
 
+    def replace_plan(
+        self,
+        prior_plan_id: str,
+        replacement: dict[str, Any],
+        *,
+        reason: str,
+        now: str,
+    ) -> dict[str, Any]:
+        required = {
+            "plan_id",
+            "strategy",
+            "ticker",
+            "created_at",
+            "valid_until",
+            "status",
+            "signal",
+            "snapshot",
+        }
+        missing = sorted(required - set(replacement))
+        if missing:
+            raise ValueError(f"allocator plan missing fields: {', '.join(missing)}")
+        if replacement["strategy"] != self.namespace:
+            raise ValueError("allocator plan namespace mismatch")
+        parse_ts(str(replacement["created_at"]))
+        parse_ts(str(replacement["valid_until"]))
+
+        plans = self.plans()
+        prior = plans.get(prior_plan_id)
+        if prior is None:
+            raise ValueError(f"allocator plan not found: {prior_plan_id}")
+        value = dict(replacement)
+        value["ticker"] = str(value["ticker"]).upper()
+        value["updated_at"] = now
+        prior["status"] = "superseded"
+        prior["status_reason"] = reason
+        prior["updated_at"] = now
+        plans[prior_plan_id] = prior
+        plans[str(value["plan_id"])] = value
+        self.store.write_json("allocator_plans.json", plans)
+        append_jsonl(
+            self.root,
+            self.log_name,
+            {
+                "event": "allocator_plan_replaced",
+                "namespace": self.namespace,
+                "prior_plan_id": prior_plan_id,
+                "reason": reason,
+                "decision_time": now,
+                "plan": value,
+            },
+        )
+        return value
+
     def plans(self) -> dict[str, dict[str, Any]]:
         raw = self.store.read_json("allocator_plans.json", {})
         return {str(key): dict(value) for key, value in raw.items()}

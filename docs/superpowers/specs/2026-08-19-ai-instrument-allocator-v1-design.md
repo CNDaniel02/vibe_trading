@@ -36,6 +36,8 @@ in entry-frozen mode:
   cancellation handling.
 - Their existing positions continue through their existing monitor, stop,
   take-profit, time-stop, and EOD exit logic until flat.
+- The AI-gated lane continues bounded research and records shadow decisions,
+  but actionable output is blocked before executable quote, risk, or broker work.
 - Their state directories and append-only logs are never migrated or rewritten.
 
 `relative_strength_v1` and `long_directional_options_v1` remain unchanged as
@@ -79,8 +81,12 @@ flowchart TD
 
 - `20:00 ET`: full slow research, primary evidence, challenge, and conditional
   plans. Thinking is enabled only for the overnight Challenge and Decision calls.
-- `08:00 ET`: incremental Exa evidence refresh and fast plan revalidation.
-- `09:25 ET`: final pre-open evidence invalidation pass.
+- `08:00 ET`: active-plan-only incremental Exa evidence refresh. New evidence
+  runs fast News, Challenge, and Decision; discovery and ranking do not rerun.
+- `09:25 ET`: active-plan-only final invalidation pass. New evidence runs fast
+  News and Challenge only; the pass can retain or veto, but cannot redirect, the
+  existing plan. Successful completion persists a same-session
+  `preopen_revalidated_at` permit even when no new evidence exists.
 - `09:32 ET`: no LLM call; fetch fresh quotes, rebuild executable economics,
   run deterministic risk, and optionally submit to the paper broker.
 - Regular-session discovery may run at a bounded interval. It uses the fast,
@@ -94,12 +100,19 @@ The model must set `entry_now=false` outside regular hours. That value prevents
 research-time execution; it does not discard a saved conditional plan. At the
 open, only a plan carrying an `overnight`, `premarket_update`, or
 `preopen_revalidation` source stage may proceed to fresh executable economics
-and deterministic risk. The open-execution window is 09:32 through 09:37 ET;
+and deterministic risk, and only after the same-session pre-open permit was
+persisted. A missing permit or failed state write blocks execution. The
+open-execution window is 09:32 through 09:37 ET;
 late calls and plans originating from `intraday` are rejected. New completed analysis for the same ticker supersedes
 the older plan, while no-trade or fail-closed analysis invalidates it. Events
 included in a successful ranking enter cooldown even when they are outside the
 deep-analysis top set or the final action is no-trade. Failed ranking can be
 retried but cannot create a plan or order.
+
+Replacing a premarket plan is one atomic state-file transition: the replacement
+becomes active in the same write that supersedes the prior plan. Refresh or
+revalidation failure invalidates the prior plan before a decision-audit append,
+preventing a restart from exposing duplicate or stale executable plans.
 
 ## 5. Model Output Contract
 

@@ -30,7 +30,7 @@ Robinhood 连接只用于显式 allowlist 内的只读市场数据。项目 brok
 | `multi_agent_relative_strength_v2_candidate` | 对 active 股票候选做 LLM 对照 | 否，shadow-only | 无独立资金 |
 | `exa_deepseek_catalyst_v1` | 独立发现事件和交易机会 | 否，shadow-only | 无独立资金 |
 | `llm_news_drift_v1` | 全市场新闻优先的价格盲漂移实验 | 否，shadow-only | 独立参考预算，无账户 |
-| `ai_gated_technical_v1` | 旧技术前排加 Exa/DeepSeek 策略 | 否；仅管理已有订单和仓位 | 历史 `$2,000` AI sleeve |
+| `ai_gated_technical_v1` | 旧技术前排加 Exa/DeepSeek 策略 | 否；管理旧仓并继续 shadow 决策 | 历史 `$2,000` AI sleeve |
 | `ai_instrument_allocator_v1` | signed-return 预测加股票/期权工具分配 | 是，仅本地 paper | 独立 `$10,000` sleeve |
 
 股票和期权仍会并行筛选；旧两条加权执行线停止新增仓位，新 allocator 可以在自己的 `$10,000` sleeve 中从同一份 signed signal 比较 long equity、long call 或 long put。任何可执行线路都不能各自把账户资金用满，因为 `scripts/risk/shared_portfolio_risk.py` 会同时执行：
@@ -51,7 +51,7 @@ AI sleeve 的状态目录、订单、持仓、daily counter、journal 和 metric
 ```mermaid
 flowchart TD
     S["APScheduler supervisor"] --> F["5 分钟主 forward cycle"]
-    S --> A["旧 AI-gated monitor-only"]
+    S --> A["旧 AI-gated monitor + shadow research"]
     S --> IA["Allocator 两速研究与执行"]
     S --> C["每小时 catalyst shadow cycle"]
     S --> N["每分钟 news-drift shadow cycle"]
@@ -89,7 +89,7 @@ flowchart TD
 flowchart LR
     W["weighted equity v2"] --> WS["shadow candidate only"]
     O["weighted long options v2"] --> OR["option risk gate"] --> M["主 paper 账户"]
-    A["旧 AI gated"] --> AC["entry frozen；仅 monitor/exit"] --> S["历史 $2,000 AI sleeve"]
+    A["旧 AI gated"] --> AC["entry frozen；monitor/exit + shadow 决策"] --> S["历史 $2,000 AI sleeve"]
     IA["AI instrument allocator"] --> AR["共享 deterministic risk"] --> NS["独立 $10,000 sleeve"]
     C["catalyst / news drift / baselines"] --> CS["shadow ledgers only"]
     M -. "无真实 broker 方法" .-> L["本地 JSON/JSONL"]
@@ -199,8 +199,8 @@ flowchart LR
 默认调度为：
 
 - 主 forward cycle：每 300 秒；
-- 旧 AI-gated：停止研究和 entry，只保留每 300 秒 monitor；
-- 新 allocator：20:00 慢速研究、08:00 evidence update、09:25 pre-open invalidation、09:32 无 LLM 的 fresh-quote execution、正常时段每 3600 秒 fast research；
+- 旧 AI-gated：停止 entry，保留每 300 秒 monitor，并按原有界周期继续生成不可执行的 shadow 决策；
+- 新 allocator：20:00 慢速完整研究、08:00 仅对 active plan 做增量 evidence update、09:25 仅对 active plan 做 News/Challenge invalidation、09:32 无 LLM 的 fresh-quote execution、正常时段每 3600 秒 fast research；
 - 新 allocator position monitor：每 300 秒；
 - catalyst discovery：每 3600 秒，并与 AI cycle 使用错开的启动偏移；
 - news-drift worker：每 60 秒解析到期标签；全市场 Exa discovery 独立限流为每 15 分钟最多一次；
@@ -314,7 +314,7 @@ Exa 负责外部非结构化证据，不替代报价、historicals、fundamental
 
 ## 11. 旧 AI-Gated Sleeve 的退出管理
 
-`ai_gated_technical_v1` 的历史 `$2,000` sleeve 不迁移、不重置。它现在 `new_entries_enabled=false`：每个 cycle 先运行 monitor 和 open-order reconciliation，然后在任何 discovery、Exa、DeepSeek 或 entry 之前返回 `ai_gated_entries_frozen`。已有股票和 long option 继续使用下面的原始条件、paper broker 和 exit logic，直到完全清仓。
+`ai_gated_technical_v1` 的历史 `$2,000` sleeve 不迁移、不重置。它现在 `new_entries_enabled=false`：每个 cycle 先运行 monitor 和 open-order reconciliation，再继续执行原 discovery、Exa 和 DeepSeek 路径作为 shadow comparison。可执行信号不会发布；actionable 决策在进入 quote、risk 或 broker 路径前固定记录为 `shadow_only`，paper order 数必须为 0。已有股票和 long option 继续使用原 paper broker 和 exit logic，直到完全清仓。
 
 1. 从 read-only watchlist、scanner、earnings 和市场数据形成候选。
 2. Python 同时计算 bullish 和 bearish 技术分数，选择前 5 至 8 个有界候选，并为已确认的财报 surprise 保留少量位置。
@@ -327,7 +327,7 @@ Exa 负责外部非结构化证据，不替代报价、historicals、fundamental
 9. 股票 proposal 进入 sleeve 的股票 risk gate；期权 proposal 使用带拒绝诊断的 contract selection，再进入 option/shared risk gate。
 10. 只有所有检查通过才写本地 paper order，之后由独立 monitor 管理退出。
 
-上述 1-10 步仅用于解释历史订单是怎样产生的；entry-frozen 后不会再运行这些研究步骤。旧日志、订单、成交和 PnL 不会被转换成新 allocator 记录。
+entry-frozen 后仍运行上述研究和决策步骤用于对照评估，但第 7-10 步的可执行路径被 `shadow_only` gate 取代，不刷新执行报价、不调用 risk/order path，也不创建新订单。旧日志、订单、成交和 PnL 不会被转换成新 allocator 记录。
 
 ```mermaid
 flowchart TD
@@ -385,7 +385,7 @@ flowchart TD
     V --> B["short_equity_counterfactual shadow-only"]
 ```
 
-两速时钟：20:00 ET 生成慢速 conditional plans；08:00 和 09:25 只更新/失效计划；09:32 ET 不调用 LLM，只用 active plan 和 fresh quote 重建执行经济性；正常交易时段以有界间隔运行 fast research。夜间和盘前模型的 `entry_now=false` 只禁止研究阶段下单，不会取消已保存计划；只有带合法非正常时段来源的计划能在 09:32-09:37 ET 重验，窗口外调用和 intraday plan 均拒绝。相同 ticker 的更新分析会 supersede 旧计划，no-trade/fail-closed 会 invalidate 旧计划。成功 rank 后全部候选事件都进入 cooldown，不只 top-3 deep analysis。每次真正执行授权最多有效 300 秒。
+两速时钟：20:00 ET 生成慢速 conditional plans；08:00 和 09:25 只更新/失效计划；09:32 ET 不调用 LLM，只用 active plan 和 fresh quote 重建执行经济性；正常交易时段以有界间隔运行 fast research。09:25 无论是否出现新证据，都必须成功写入当日 `preopen_revalidated_at` 执行许可；任务缺席或状态写入失败时，09:32 必须拒绝旧计划。夜间和盘前模型的 `entry_now=false` 只禁止研究阶段下单，不会取消已保存计划；只有带合法非正常时段来源且通过当日盘前复核的计划能在 09:32-09:37 ET 重验，窗口外调用和 intraday plan 均拒绝。相同 ticker 的更新分析会 supersede 旧计划，no-trade/fail-closed 会 invalidate 旧计划。成功 rank 后全部候选事件都进入 cooldown，不只 top-3 deep analysis。每次真正执行授权最多有效 300 秒。
 
 概率校准按 horizon 完全分开。expanding walk-forward 的每个训练 fold 只能使用在该 test decision time 前已经成熟的标签；主要比较 out-of-sample Brier score 与 log loss，ECE 和 reliability curve 仅作诊断。每条记录保存 calibration version、training cutoff、sample size 和 horizon。
 
@@ -469,7 +469,17 @@ AI sleeve 额外按方向拆分 `bullish` 与 `bearish`：decision count、trade
 
 deterministic risk rejection 不再被计入“未成交率”的分母，因为它从未进入市场执行生命周期；它仍作为独立 rejected count 和风险诊断保留。
 
-dashboard 是只读视图。它不启动服务、不修改策略、不下单，只从 `state/` 和 `logs/` 生成初学者摘要。服务和 dashboard 应在两个终端分别启动。
+dashboard 是只读视图。它不启动服务、不修改策略、不下单，只从 `state/` 和 `logs/` 生成初学者摘要。服务和 dashboard 应在两个终端分别启动；dashboard 终端中的 `Ctrl+C` 只停止页面服务，不会停止 forward service。
+
+dashboard 使用五个相互隔离的客户端视图：
+
+1. `总览`：先显示 service、market session 和 freshness，再并列显示旧 `$2,000` 账本与 `$10,000 ai_instrument_allocator_v1` sleeve。两套账户的 cash、positions、orders 和 PnL 不合并。
+2. `持仓与订单`：分别收集主账户、旧 AI sleeve 和 allocator sleeve 的 equity/option position 与 order。`created`、`submitted_to_paper_broker`、`open`、`partially_filled` 只属于未完成订单，不能显示为持仓；已结束订单默认折叠。
+3. `策略表现`：按行显示策略的 execution mode、账户归属、决策、入场、平仓、PnL、胜率和最近结论。`shadow_only`、`只管理旧仓` 和 `模拟交易` 不混淆。
+4. `AI 决策`：展示候选、Exa 证据、DeepSeek 结构化结果、Challenge 和 deterministic Python risk veto。长证据默认折叠，`reasoning_content` 和 API key 不进入 dashboard state 或页面。
+5. `系统健康`：当前 heartbeat、scheduler、market data、paper boundary、Exa、DeepSeek 和 audit 状态优先；最近交易日累计错误另列为历史事件，避免把历史 390 次失败误读成当前仍有 390 个故障。
+
+页面使用 URL hash 保存当前 tab，支持左右方向键、Home/End 和 ARIA tab semantics。浏览器每 15 秒刷新，在 `document.hidden=true` 时暂停；服务端 `_read_jsonl` 从文件尾部按块读取最后 N 条有效记录，不再为每次页面刷新整文件加载几十 MB 的 audit/decision/runtime log。HTTP handler 只实现 `GET`、`HEAD` 和 `OPTIONS`，且 dashboard 模块不导入 broker adapter。
 
 ## 15. Historical Replay 和 Forward Evaluation
 

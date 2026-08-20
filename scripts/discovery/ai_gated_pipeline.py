@@ -105,21 +105,7 @@ class AiGatedPaperPipeline:
         cycle_id = f"aigt_{uuid4().hex}"
         calls_before = len(self.tracker.records)
         monitor = self.monitor_only(decision_time)
-        if not self.profile.get("new_entries_enabled", True):
-            result = {
-                "event": "ai_gated_entries_frozen",
-                "strategy": self.STRATEGY,
-                "cycle_id": cycle_id,
-                "decision_time": decision_time,
-                "reason": "legacy strategy accepts exits and open-order updates only",
-                "monitor": monitor,
-                "model_calls": 0,
-                "paper_orders_created": 0,
-                "paper_sleeve": self.namespace,
-                "live_order_tools_called": False,
-            }
-            append_jsonl(self.root, "ai_gated_cycles.jsonl", result)
-            return result
+        new_entries_enabled = bool(self.profile.get("new_entries_enabled", True))
         research_cutoff = int(
             self.profile.get("minimum_minutes_to_close_for_research", 30)
         )
@@ -141,7 +127,7 @@ class AiGatedPaperPipeline:
                 "paper_sleeve": self.namespace,
                 "live_order_tools_called": False,
             }
-        if not research_only:
+        if not research_only and new_entries_enabled:
             entry_lines = []
             if self.profile.get("allow_equity", True):
                 entry_lines.append("equity")
@@ -380,6 +366,7 @@ class AiGatedPaperPipeline:
                 item,
                 live_cycle=now is None,
                 research_only=research_only,
+                new_entries_enabled=new_entries_enabled,
             )
             analysis["execution"] = execution
             analysis["evidence_snapshot"] = item["evidence_snapshot"]
@@ -387,8 +374,9 @@ class AiGatedPaperPipeline:
             decisions.append(analysis)
             if execution.get("order"):
                 orders.append(execution["order"])
-            if not research_only:
+            if not research_only and new_entries_enabled:
                 self._publish_signal(analysis, snapshot)
+            if not research_only:
                 self.evidence.mark_researched(
                     f"ai_gated:{item['ticker']}",
                     item["events"],
@@ -846,6 +834,7 @@ class AiGatedPaperPipeline:
         *,
         live_cycle: bool,
         research_only: bool = False,
+        new_entries_enabled: bool = True,
     ) -> dict[str, Any]:
         decision = analysis["decision"]
         minimum_confidence = float(self.profile.get("minimum_decision_confidence", 0.58))
@@ -885,6 +874,13 @@ class AiGatedPaperPipeline:
                 "status": "no_trade",
                 "reason": "model entry authorization exceeds deterministic validity window",
                 "order": None,
+            }
+        if not new_entries_enabled:
+            return {
+                "status": "shadow_only",
+                "reason": "legacy strategy new paper entries are disabled",
+                "order": None,
+                "live_order_tools_called": False,
             }
         if research_only:
             return {
@@ -1177,6 +1173,9 @@ class AiGatedPaperPipeline:
             "paper_sleeve": self.namespace,
             "paper_account": account.to_dict(),
             "research_only": research_only,
+            "new_entries_enabled": bool(
+                self.profile.get("new_entries_enabled", True)
+            ),
             "live_order_tools_called": False,
         }
 

@@ -95,9 +95,14 @@ def test_readiness_cli_never_constructs_stateful_service(
     assert json.loads(capsys.readouterr().out) == report
 
 
-def test_entry_frozen_ai_pipeline_skips_research_but_keeps_monitor_result(
+def test_entry_frozen_ai_pipeline_keeps_shadow_research_and_monitor_result(
     paper_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    class NoExecutionQuoteDiscovery(_AllocatorResearchDiscovery):
+        def fetch_current_quote(self, *_args, **_kwargs):
+            raise AssertionError("frozen shadow decisions must not refresh execution quotes")
+
     config = load_runtime_config(paper_root)
     tracker = UsageTracker()
     pipeline = AiGatedPaperPipeline(
@@ -105,16 +110,27 @@ def test_entry_frozen_ai_pipeline_skips_research_but_keeps_monitor_result(
         config,
         MockProvider(tracker),
         tracker,
-        discovery_adapter=_MustNotDiscover(),
-        news_adapter=_NoNews(),
+        discovery_adapter=NoExecutionQuoteDiscovery(REGULAR_NOW),
+        news_adapter=_AllocatorResearchNews(),
         option_data=_NoOptions(),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_publish_signal",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("frozen shadow decisions must not publish executable signals")
+        ),
     )
 
     result = pipeline.run(REGULAR_NOW)
 
-    assert result["event"] == "ai_gated_entries_frozen"
+    assert result["event"] == "ai_gated_cycle_complete"
     assert result["paper_orders_created"] == 0
-    assert result["model_calls"] == 0
+    assert result["model_calls"] == 4
+    assert result["new_entries_enabled"] is False
+    assert result["decisions"][0]["execution"]["status"] == "shadow_only"
+    assert pipeline.broker.store.orders() == {}
+    assert pipeline.option_broker.store.orders() == {}
     assert result["monitor"]["event"] == "ai_gated_monitor_complete"
     assert result["live_order_tools_called"] is False
 
@@ -1167,7 +1183,11 @@ class _AllocatorResearchNews:
                 "novelty": 0.95,
                 "already_priced_in": self.already_priced_in,
                 "confidence": 0.9,
-                "url": "https://company.example/investors/guidance",
+                "url": (
+                    "https://company.example/investors/guidance"
+                    if positive
+                    else "https://company.example/investors/withdrawn-guidance"
+                ),
                 "highlights": [
                     "Full-year revenue guidance increased."
                     if positive
@@ -1229,6 +1249,7 @@ def test_open_execution_uses_saved_conditional_plan_without_llm_and_only_new_nam
             "valid_until": "2026-07-13T13:37:00+00:00",
             "status": "active",
             "stage": "overnight",
+            "preopen_revalidated_at": "2026-07-13T13:25:00+00:00",
             "signal": _signed_signal(entry_now=False),
             "snapshot": {"snapshot_id": "allocator-open-snapshot"},
         }
@@ -1245,6 +1266,45 @@ def test_open_execution_uses_saved_conditional_plan_without_llm_and_only_new_nam
     assert set(pipeline.broker.store.positions()) == {"AAPL"}
     assert pipeline.mandates.for_exposure("equity:AAPL")["status"] == "open"
     assert (paper_root / "state" / "paper_account.json").read_bytes() == legacy_account_before
+
+
+def test_open_execution_requires_current_preopen_revalidation(
+    paper_root: Path,
+) -> None:
+    from scripts.discovery.ai_instrument_allocator_pipeline import (
+        AiInstrumentAllocatorPipeline,
+    )
+
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    pipeline = AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=_AllocatorExecutionDiscovery(OPEN_EXECUTION_NOW),
+        news_adapter=_NoNews(),
+        option_data=_AllocatorNoOptions(),
+    )
+    pipeline.plans.save_plan(
+        {
+            "plan_id": "unvalidated-open-plan",
+            "strategy": "ai_instrument_allocator_v1",
+            "ticker": "AAPL",
+            "created_at": "2026-07-13T00:00:00+00:00",
+            "valid_until": "2026-07-13T13:37:00+00:00",
+            "status": "active",
+            "stage": "overnight",
+            "signal": _signed_signal(entry_now=False),
+            "snapshot": {"snapshot_id": "unvalidated-open-snapshot"},
+        }
+    )
+
+    result = pipeline.run_stage("open_execution", OPEN_EXECUTION_NOW)
+
+    assert result["paper_orders_created"] == 0
+    assert result["executions"][0]["reason"] == "current pre-open revalidation is required"
+    assert pipeline.broker.store.orders() == {}
 
 
 def test_allocator_mock_dry_run_survives_overnight_open_and_restart(
@@ -1285,8 +1345,13 @@ def test_allocator_mock_dry_run_survives_overnight_open_and_restart(
     )
 
     assert premarket["paper_orders_created"] == 0
+    assert premarket["model_calls"] == 0
     assert preopen["paper_orders_created"] == 0
+    assert preopen["model_calls"] == 0
     assert len(pipeline.plans.active_plans(OPEN_EXECUTION_NOW)) == 1
+    assert pipeline.plans.active_plans(OPEN_EXECUTION_NOW)[0][
+        "preopen_revalidated_at"
+    ] == "2026-07-13T13:25:00+00:00"
 
     opened = pipeline.run_stage("open_execution", OPEN_EXECUTION_NOW)
 
@@ -1392,6 +1457,7 @@ def test_open_execution_rejects_intraday_plan_source(
 
 def test_premarket_research_replaces_older_plan_for_same_ticker(
     paper_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from scripts.decision.signed_return_signal import derive_signal_summary
     from scripts.discovery.ai_instrument_allocator_pipeline import (
@@ -1414,6 +1480,18 @@ def test_premarket_research_replaces_older_plan_for_same_ticker(
     overnight = pipeline.run_stage("overnight", "2026-07-13T00:00:00+00:00")
     old_plan_id = overnight["plans"][0]["plan_id"]
     news.direction = "negative"
+    pipeline.discovery = _MustNotDiscover()
+    calls_before = len(tracker.records)
+    plan_writes = 0
+    write_json = pipeline.plans.store.write_json
+
+    def count_plan_writes(name, value):
+        nonlocal plan_writes
+        if name == "allocator_plans.json":
+            plan_writes += 1
+        return write_json(name, value)
+
+    monkeypatch.setattr(pipeline.plans.store, "write_json", count_plan_writes)
 
     updated = pipeline.run_stage(
         "premarket_update",
@@ -1421,11 +1499,89 @@ def test_premarket_research_replaces_older_plan_for_same_ticker(
     )
 
     active = pipeline.plans.active_plans(REGULAR_NOW)
-    assert updated["model_calls"] == 4
+    assert updated["model_calls"] == 3
+    assert [
+        record.agent_name for record in tracker.records[calls_before:]
+    ] == [
+        "ai_allocator_fast_news_agent",
+        "ai_allocator_fast_challenge_agent",
+        "ai_allocator_fast_decision_manager",
+    ]
     assert updated["paper_orders_created"] == 0
+    assert plan_writes == 1
     assert len(active) == 1
     assert active[0]["plan_id"] != old_plan_id
     assert derive_signal_summary(active[0]["signal"])["direction"] == "bearish"
+    assert pipeline.plans.plans()[old_plan_id]["status"] == "superseded"
+
+
+def test_premarket_refresh_failure_invalidates_prior_plan(paper_root: Path) -> None:
+    from scripts.discovery.ai_instrument_allocator_pipeline import (
+        AiInstrumentAllocatorPipeline,
+    )
+
+    class FailingNews:
+        @staticmethod
+        def search(*_args, **_kwargs):
+            raise RuntimeError("Exa unavailable")
+
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    pipeline = AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=_AllocatorResearchDiscovery(),
+        news_adapter=_AllocatorResearchNews(),
+        option_data=_AllocatorNoOptions(),
+    )
+    overnight = pipeline.run_stage("overnight", "2026-07-13T00:00:00+00:00")
+    old_plan_id = overnight["plans"][0]["plan_id"]
+    pipeline.news = FailingNews()
+    pipeline.discovery = _MustNotDiscover()
+
+    updated = pipeline.run_stage("premarket_update", "2026-07-13T12:00:00+00:00")
+
+    assert updated["model_calls"] == 0
+    assert pipeline.plans.active_plans(OPEN_EXECUTION_NOW) == []
+    assert pipeline.plans.plans()[old_plan_id]["status"] == "invalidated"
+
+
+def test_premarket_state_is_safe_before_decision_audit_append(
+    paper_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.discovery import ai_instrument_allocator_pipeline as pipeline_module
+
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    news = _AllocatorResearchNews()
+    pipeline = pipeline_module.AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=_AllocatorResearchDiscovery(),
+        news_adapter=news,
+        option_data=_AllocatorNoOptions(),
+    )
+    overnight = pipeline.run_stage("overnight", "2026-07-13T00:00:00+00:00")
+    old_plan_id = overnight["plans"][0]["plan_id"]
+    news.direction = "negative"
+    pipeline.discovery = _MustNotDiscover()
+    monkeypatch.setattr(
+        pipeline_module,
+        "append_jsonl",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("disk full")),
+    )
+
+    with pytest.raises(RuntimeError, match="disk full"):
+        pipeline.run_stage("premarket_update", "2026-07-13T12:00:00+00:00")
+
+    active = pipeline.plans.active_plans(OPEN_EXECUTION_NOW)
+    assert len(active) == 1
+    assert active[0]["plan_id"] != old_plan_id
     assert pipeline.plans.plans()[old_plan_id]["status"] == "superseded"
 
 
@@ -1453,16 +1609,153 @@ def test_premarket_no_trade_invalidates_older_plan_for_same_ticker(
     old_plan_id = overnight["plans"][0]["plan_id"]
     news.direction = "negative"
     news.already_priced_in = True
+    pipeline.discovery = _MustNotDiscover()
 
     updated = pipeline.run_stage(
         "premarket_update",
         "2026-07-13T12:00:00+00:00",
     )
 
-    assert updated["model_calls"] == 4
+    assert updated["model_calls"] == 3
     assert updated["plans"] == []
     assert pipeline.plans.active_plans(OPEN_EXECUTION_NOW) == []
     assert pipeline.plans.plans()[old_plan_id]["status"] == "invalidated"
+
+
+def test_preopen_revalidation_only_runs_news_and_challenge_for_new_evidence(
+    paper_root: Path,
+) -> None:
+    from scripts.discovery.ai_instrument_allocator_pipeline import (
+        AiInstrumentAllocatorPipeline,
+    )
+
+    class RecordingMockProvider(MockProvider):
+        def __init__(self, tracker):
+            super().__init__(tracker)
+            self.requests = []
+
+        def generate(self, request):
+            self.requests.append(request)
+            return super().generate(request)
+
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    provider = RecordingMockProvider(tracker)
+    news = _AllocatorResearchNews()
+    pipeline = AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        provider,
+        tracker,
+        discovery_adapter=_AllocatorResearchDiscovery(),
+        news_adapter=news,
+        option_data=_AllocatorNoOptions(),
+    )
+
+    overnight = pipeline.run_stage("overnight", "2026-07-13T00:00:00+00:00")
+    old_plan_id = overnight["plans"][0]["plan_id"]
+    news.direction = "negative"
+    pipeline.discovery = _MustNotDiscover()
+    calls_before = len(tracker.records)
+
+    revalidated = pipeline.run_stage(
+        "preopen_revalidation",
+        "2026-07-13T13:25:00+00:00",
+    )
+
+    assert revalidated["model_calls"] == 2
+    assert [
+        record.agent_name for record in tracker.records[calls_before:]
+    ] == [
+        "ai_allocator_fast_news_agent",
+        "ai_allocator_fast_challenge_agent",
+    ]
+    assert all(
+        [event["headline"] for event in request.input_payload["available_news"]]
+        == ["Company withdraws full-year guidance"]
+        for request in provider.requests[calls_before:]
+    )
+    assert revalidated["paper_orders_created"] == 0
+    assert revalidated["plans"] == []
+    assert pipeline.plans.active_plans(OPEN_EXECUTION_NOW) == []
+    assert pipeline.plans.plans()[old_plan_id]["status"] == "invalidated"
+
+
+def test_preopen_invalidation_is_safe_before_decision_audit_append(
+    paper_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.discovery import ai_instrument_allocator_pipeline as pipeline_module
+
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    news = _AllocatorResearchNews()
+    pipeline = pipeline_module.AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=_AllocatorResearchDiscovery(),
+        news_adapter=news,
+        option_data=_AllocatorNoOptions(),
+    )
+    overnight = pipeline.run_stage("overnight", "2026-07-13T00:00:00+00:00")
+    old_plan_id = overnight["plans"][0]["plan_id"]
+    news.direction = "negative"
+    pipeline.discovery = _MustNotDiscover()
+    monkeypatch.setattr(
+        pipeline_module,
+        "append_jsonl",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("disk full")),
+    )
+
+    with pytest.raises(RuntimeError, match="disk full"):
+        pipeline.run_stage(
+            "preopen_revalidation",
+            "2026-07-13T13:25:00+00:00",
+        )
+
+    assert pipeline.plans.active_plans(OPEN_EXECUTION_NOW) == []
+    assert pipeline.plans.plans()[old_plan_id]["status"] == "invalidated"
+
+
+def test_preopen_state_write_failure_blocks_open_execution(
+    paper_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.discovery.ai_instrument_allocator_pipeline import (
+        AiInstrumentAllocatorPipeline,
+    )
+
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    pipeline = AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=_AllocatorResearchDiscovery(OPEN_EXECUTION_NOW),
+        news_adapter=_AllocatorResearchNews(),
+        option_data=_AllocatorNoOptions(),
+    )
+    pipeline.run_stage("overnight", "2026-07-13T00:00:00+00:00")
+    monkeypatch.setattr(
+        pipeline.plans.store,
+        "write_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("disk full")),
+    )
+
+    with pytest.raises(RuntimeError, match="disk full"):
+        pipeline.run_stage(
+            "preopen_revalidation",
+            "2026-07-13T13:25:00+00:00",
+        )
+
+    opened = pipeline.run_stage("open_execution", OPEN_EXECUTION_NOW)
+
+    assert opened["paper_orders_created"] == 0
+    assert opened["executions"][0]["reason"] == "current pre-open revalidation is required"
+    assert pipeline.broker.store.orders() == {}
 
 
 def test_no_trade_event_enters_cooldown_after_model_research(
@@ -1556,10 +1849,11 @@ def test_allocator_execution_advances_to_latest_observed_option_quote(
             "strategy": "ai_instrument_allocator_v1",
             "ticker": "AAPL",
             "created_at": "2026-07-13T13:27:00+00:00",
-                "valid_until": "2026-07-13T13:37:00+00:00",
-                "status": "active",
-                "stage": "overnight",
-                "signal": _bearish_signal(),
+            "valid_until": "2026-07-13T13:37:00+00:00",
+            "status": "active",
+            "stage": "overnight",
+            "preopen_revalidated_at": "2026-07-13T13:25:00+00:00",
+            "signal": _bearish_signal(),
             "snapshot": {"snapshot_id": "future-option-quote-snapshot"},
         }
     )
@@ -1632,10 +1926,11 @@ def test_allocator_missing_mandate_exits_after_restart(paper_root: Path) -> None
             "strategy": "ai_instrument_allocator_v1",
             "ticker": "AAPL",
             "created_at": "2026-07-13T13:27:00+00:00",
-                "valid_until": "2026-07-13T13:37:00+00:00",
-                "status": "active",
-                "stage": "overnight",
-                "signal": _signed_signal(),
+            "valid_until": "2026-07-13T13:37:00+00:00",
+            "status": "active",
+            "stage": "overnight",
+            "preopen_revalidated_at": "2026-07-13T13:25:00+00:00",
+            "signal": _signed_signal(),
             "snapshot": {"snapshot_id": "missing-mandate-snapshot"},
         }
     )

@@ -96,7 +96,12 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                 monitor=monitor,
             )
 
-        research = self._research_stage(stage, decision_time)
+        if stage == "premarket_update":
+            research = self._premarket_update(decision_time)
+        elif stage == "preopen_revalidation":
+            research = self._preopen_revalidation(decision_time)
+        else:
+            research = self._research_stage(stage, decision_time)
         return self._stage_result(
             stage,
             decision_time,
@@ -312,6 +317,277 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
             "live_order_tools_called": False,
         }
 
+    def _premarket_update(self, decision_time: str) -> dict[str, Any]:
+        plans: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        for prior_plan in self.plans.active_plans(decision_time):
+            try:
+                refreshed = self._refresh_plan_evidence(
+                    prior_plan,
+                    decision_time,
+                    stage="premarket_update",
+                )
+            except Exception as exc:
+                reason = f"incremental evidence refresh failed closed: {type(exc).__name__}: {exc}"
+                self.plans.set_plan_status(
+                    str(prior_plan["plan_id"]),
+                    "invalidated",
+                    reason=reason,
+                    now=decision_time,
+                )
+                skipped.append(
+                    {
+                        "ticker": prior_plan["ticker"],
+                        "reason": reason,
+                    }
+                )
+                continue
+            if refreshed is None:
+                skipped.append(
+                    {
+                        "ticker": prior_plan["ticker"],
+                        "reason": "no new evidence; active plan retained",
+                    }
+                )
+                continue
+            snapshot, new_events, evidence_snapshot = refreshed
+            ranking = dict(prior_plan.get("ranking", {}))
+            try:
+                analysis = self.team.analyze(
+                    snapshot,
+                    ranking,
+                    stage="premarket_update",
+                )
+            except Exception as exc:
+                reason = f"premarket model revalidation failed closed: {type(exc).__name__}: {exc}"
+                self.plans.set_plan_status(
+                    str(prior_plan["plan_id"]),
+                    "invalidated",
+                    reason=reason,
+                    now=decision_time,
+                )
+                skipped.append({"ticker": prior_plan["ticker"], "reason": reason})
+                continue
+            signal = analysis["signal"]
+            record = {
+                **analysis,
+                "decision_time": snapshot["decision_time"],
+                "data_cutoff_time": snapshot["data_cutoff_time"],
+                "evidence_snapshot": evidence_snapshot,
+                "prior_plan_id": prior_plan["plan_id"],
+                **uncalibrated_metadata(str(signal["horizon"])),
+            }
+            actionable = not analysis.get("fail_closed") and signal.get(
+                "action"
+            ) == "propose_trade"
+            if not actionable:
+                reason = signal.get("no_trade_reason") or "premarket update failed closed"
+                self.plans.set_plan_status(
+                    str(prior_plan["plan_id"]),
+                    "invalidated",
+                    reason=reason,
+                    now=decision_time,
+                )
+                skipped.append({"ticker": prior_plan["ticker"], "reason": reason})
+            else:
+                plan = self.plans.replace_plan(
+                    str(prior_plan["plan_id"]),
+                    {
+                        "plan_id": f"plan_{uuid4().hex}",
+                        "strategy": self.STRATEGY,
+                        "ticker": prior_plan["ticker"],
+                        "created_at": snapshot["decision_time"],
+                        "valid_until": signal["thesis_valid_until"],
+                        "status": "active",
+                        "stage": "premarket_update",
+                        "signal": signal,
+                        "snapshot": snapshot,
+                        "ranking": ranking,
+                        "evidence_snapshot": evidence_snapshot,
+                    },
+                    reason="replaced by incremental premarket analysis",
+                    now=decision_time,
+                )
+                plans.append(plan)
+            append_jsonl(
+                self.root,
+                f"strategy_sleeves/{self.namespace}/decisions.jsonl",
+                record,
+            )
+            self.evidence.mark_researched(
+                f"allocator:{prior_plan['ticker']}",
+                new_events,
+                decision_time,
+            )
+        return {"plans": plans, "executions": [], "skipped": skipped}
+
+    def _preopen_revalidation(self, decision_time: str) -> dict[str, Any]:
+        plans: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        for plan in self.plans.active_plans(decision_time):
+            try:
+                refreshed = self._refresh_plan_evidence(
+                    plan,
+                    decision_time,
+                    stage="preopen_revalidation",
+                )
+            except Exception as exc:
+                reason = f"pre-open evidence refresh failed closed: {type(exc).__name__}: {exc}"
+                self.plans.set_plan_status(
+                    str(plan["plan_id"]),
+                    "invalidated",
+                    reason=reason,
+                    now=decision_time,
+                )
+                skipped.append({"ticker": plan["ticker"], "reason": reason})
+                continue
+            if refreshed is None:
+                updated = self.plans.save_plan(
+                    {
+                        **plan,
+                        "stage": "preopen_revalidation",
+                        "preopen_revalidated_at": decision_time,
+                        "updated_at": decision_time,
+                    }
+                )
+                plans.append(updated)
+                skipped.append(
+                    {
+                        "ticker": plan["ticker"],
+                        "reason": "no new evidence; active plan retained",
+                    }
+                )
+                continue
+            snapshot, new_events, evidence_snapshot = refreshed
+            try:
+                assessment = self.team.revalidate(
+                    snapshot,
+                    dict(plan.get("ranking", {})),
+                    dict(plan["signal"]),
+                    new_events,
+                    stage="preopen_revalidation",
+                )
+            except Exception as exc:
+                reason = f"pre-open model revalidation failed closed: {type(exc).__name__}: {exc}"
+                self.plans.set_plan_status(
+                    str(plan["plan_id"]),
+                    "invalidated",
+                    reason=reason,
+                    now=decision_time,
+                )
+                skipped.append({"ticker": plan["ticker"], "reason": reason})
+                continue
+            challenge = assessment.get("challenge") or {}
+            if assessment.get("fail_closed") or challenge.get("veto_recommended"):
+                reason = str(
+                    assessment.get("failure_reason")
+                    or "new evidence invalidated the active plan"
+                )
+                self.plans.set_plan_status(
+                    str(plan["plan_id"]),
+                    "invalidated",
+                    reason=reason,
+                    now=decision_time,
+                )
+                skipped.append({"ticker": plan["ticker"], "reason": reason})
+            else:
+                updated = self.plans.save_plan(
+                    {
+                        **plan,
+                        "stage": "preopen_revalidation",
+                        "preopen_revalidated_at": decision_time,
+                        "snapshot": snapshot,
+                        "evidence_snapshot": evidence_snapshot,
+                        "updated_at": decision_time,
+                        "revalidation": {
+                            "decision_time": decision_time,
+                            "snapshot_id": snapshot["snapshot_id"],
+                            "veto_recommended": False,
+                        },
+                    }
+                )
+                plans.append(updated)
+            append_jsonl(
+                self.root,
+                f"strategy_sleeves/{self.namespace}/decisions.jsonl",
+                {
+                    **assessment,
+                    "decision_time": snapshot["decision_time"],
+                    "data_cutoff_time": snapshot["data_cutoff_time"],
+                    "evidence_snapshot": evidence_snapshot,
+                    "prior_plan_id": plan["plan_id"],
+                    "revalidation_only": True,
+                    **uncalibrated_metadata(str(plan["signal"]["horizon"])),
+                },
+            )
+            self.evidence.mark_researched(
+                f"allocator:{plan['ticker']}",
+                new_events,
+                decision_time,
+            )
+        return {"plans": plans, "executions": [], "skipped": skipped}
+
+    def _refresh_plan_evidence(
+        self,
+        plan: dict[str, Any],
+        decision_time: str,
+        *,
+        stage: str,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]] | None:
+        ticker = str(plan["ticker"]).upper()
+        events, sources = self.news.search(ticker, decision_time)
+        normalized = self.evidence.normalize_events(events, ticker=ticker)
+        prior_snapshot = dict(plan["snapshot"])
+        prior_events = self.evidence.normalize_events(
+            list(prior_snapshot.get("available_news", [])),
+            ticker=ticker,
+        )
+        seen = {
+            str(event.get(key))
+            for event in prior_events
+            for key in ("canonical_url", "event_fingerprint", "content_hash")
+            if event.get(key)
+        }
+        new_events = [
+            event
+            for event in normalized
+            if not {
+                str(event.get(key))
+                for key in ("canonical_url", "event_fingerprint", "content_hash")
+                if event.get(key)
+            }
+            & seen
+        ]
+        if not new_events:
+            return None
+        combined_events = self.evidence.normalize_events(
+            [*new_events, *prior_events],
+            ticker=ticker,
+        )
+        snapshot = {
+            **prior_snapshot,
+            "snapshot_id": f"allocator_{stage}_{ticker}_{uuid4().hex}",
+            "decision_time": decision_time,
+            "data_cutoff_time": decision_time,
+            "market_session": self.clock.status(decision_time).market_session,
+            "available_news": combined_events,
+            "source_metadata": [
+                *sources,
+                *list(prior_snapshot.get("source_metadata", [])),
+            ],
+        }
+        evidence_snapshot = self.evidence.write_snapshot(
+            snapshot_type=f"allocator-{stage}-{ticker}",
+            decision_time=decision_time,
+            payload={
+                "prior_plan_id": plan["plan_id"],
+                "new_events": new_events,
+                "events": combined_events,
+                "source_metadata": snapshot["source_metadata"],
+            },
+        )
+        return snapshot, new_events, evidence_snapshot
+
     def _research_stage(self, stage: str, decision_time: str) -> dict[str, Any]:
         skipped: list[dict[str, Any]] = []
         plans: list[dict[str, Any]] = []
@@ -504,6 +780,23 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                 "reason": "plan source is not eligible for open execution",
                 "order": None,
             }
+        if stage == "open_execution":
+            revalidated_at = plan.get("preopen_revalidated_at")
+            clock = self.clock.status(now)
+            try:
+                current_revalidation = bool(revalidated_at) and (
+                    parse_ts(str(revalidated_at)).date()
+                    == parse_ts(str(clock.open_time)).date()
+                    and parse_ts(str(revalidated_at)) <= parse_ts(now)
+                )
+            except (TypeError, ValueError):
+                current_revalidation = False
+            if not current_revalidation:
+                return {
+                    "status": "no_trade",
+                    "reason": "current pre-open revalidation is required",
+                    "order": None,
+                }
         if stage == "intraday" and not signal.get("entry_now", False):
             return {"status": "no_trade", "reason": "model did not authorize entry", "order": None}
         try:

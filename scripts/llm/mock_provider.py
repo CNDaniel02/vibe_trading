@@ -374,9 +374,18 @@ class MockProvider(LLMProvider):
 
     @staticmethod
     def _catalyst_challenge(payload: dict[str, Any]) -> dict[str, Any]:
-        bull = payload.get("agent_context", {}).get("bull_news", {})
+        context = payload.get("agent_context", {})
+        bull = context.get("bull_news", {})
         objections: list[str] = []
         missing = list(bull.get("data_gaps", []))
+        if context.get("revalidation_only"):
+            prior_direction = context.get("prior_direction")
+            new_direction = bull.get("direction")
+            if (prior_direction, new_direction) in {
+                ("bullish", "negative"),
+                ("bearish", "positive"),
+            }:
+                objections.append("New evidence contradicts the active plan direction.")
         if bull.get("direction") in {"mixed", "unclear"}:
             objections.append("Catalyst direction is not clear.")
         if bull.get("already_priced_in"):

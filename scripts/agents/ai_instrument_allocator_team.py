@@ -5,7 +5,10 @@ from pathlib import Path
 from typing import Any
 
 from scripts.core.models import parse_ts
-from scripts.decision.signed_return_signal import validate_signed_return_signal
+from scripts.decision.signed_return_signal import (
+    derive_signal_summary,
+    validate_signed_return_signal,
+)
 from scripts.llm.base_provider import LLMProvider, ProviderError, ProviderRequest
 from scripts.llm.schemas import (
     AI_ALLOCATOR_RANKING_OUTPUT_SCHEMA,
@@ -150,6 +153,86 @@ class AiInstrumentAllocatorTeam:
             "fail_closed": False,
         }
 
+    def revalidate(
+        self,
+        snapshot: dict[str, Any],
+        ranking: dict[str, Any],
+        prior_signal: dict[str, Any],
+        new_events: list[dict[str, Any]],
+        *,
+        stage: str,
+    ) -> dict[str, Any]:
+        calls_before = len(self.tracker.records)
+        ticker = str(snapshot.get("ticker", "UNKNOWN"))
+        try:
+            validate_agent_input(snapshot)
+            incremental_news = list(new_events)
+            news_payload = dict(snapshot)
+            news_payload["available_news"] = incremental_news
+            news_payload["agent_context"] = {
+                "ranking": ranking,
+                "prior_signal": prior_signal,
+                "stage": stage,
+                "revalidation_only": True,
+            }
+            news = self._call(
+                "ai_allocator_fast_news_agent",
+                news_payload,
+                AI_ALLOCATOR_RESEARCH_OUTPUT_SCHEMA,
+            )
+            challenge_payload = dict(snapshot)
+            challenge_payload["available_news"] = incremental_news
+            challenge_payload["agent_context"] = {
+                "ranking": ranking,
+                "bull_news": news,
+                "prior_signal": prior_signal,
+                "prior_direction": derive_signal_summary(prior_signal)["direction"],
+                "stage": stage,
+                "revalidation_only": True,
+            }
+            challenge = self._call(
+                "ai_allocator_fast_challenge_agent",
+                challenge_payload,
+                CHALLENGE_OUTPUT_SCHEMA,
+            )
+            allowed_urls = {
+                str(item.get("url"))
+                for item in incremental_news
+                if item.get("url")
+            }
+            if news["ticker"] != ticker:
+                raise ValueError("model attempted to change immutable ticker")
+            if set(news.get("source_urls", [])) - allowed_urls:
+                raise ValueError("model cited evidence absent from immutable snapshot")
+        except (ProviderError, ValueError) as exc:
+            return {
+                "strategy": self.STRATEGY,
+                "snapshot_id": str(snapshot.get("snapshot_id", "invalid")),
+                "ticker": ticker,
+                "stage": stage,
+                "ranking": ranking,
+                "bull_news": None,
+                "challenge": None,
+                "signal": prior_signal,
+                "model_calls": len(self.tracker.records) - calls_before,
+                "guardrail_actions": ["pre-open revalidation failed closed"],
+                "failure_reason": f"structured model failure: {exc}",
+                "fail_closed": True,
+            }
+        return {
+            "strategy": self.STRATEGY,
+            "snapshot_id": snapshot["snapshot_id"],
+            "ticker": ticker,
+            "stage": stage,
+            "ranking": ranking,
+            "bull_news": news,
+            "challenge": challenge,
+            "signal": prior_signal,
+            "model_calls": len(self.tracker.records) - calls_before,
+            "guardrail_actions": [],
+            "fail_closed": False,
+        }
+
     def _call(
         self,
         agent_name: str,
@@ -224,4 +307,3 @@ class AiInstrumentAllocatorTeam:
             "max_holding_trading_days": 0,
             "no_trade_reason": reason,
         }
-

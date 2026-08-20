@@ -1,6 +1,22 @@
 # Development Log
 
+## 2026-08-19 (America/Los_Angeles) - 五视图模拟交易控制台
+
+- 将原单一长页面重构为 `总览`、`持仓与订单`、`策略表现`、`AI 决策` 和 `系统健康` 五个 tab。默认首屏同时显示旧 `$2,000` 账本与独立 `$10,000 ai_instrument_allocator_v1` sleeve，并把“系统现在在做什么”和当前阻塞事项置于历史统计之前。
+- 持仓和订单按主账户、旧 AI sleeve、allocator sleeve 分开聚合；open order 不再以视觉方式混同持仓，最近 20 笔已结束订单默认折叠。旧 `long_directional_options_v2_weighted` 与 `ai_gated_technical_v1` 明确显示为“只管理旧仓”。
+- AI 页按候选、Exa、DeepSeek、Challenge 和 deterministic Python risk veto 展示结构化链路。长证据改为短摘要并按需展开，最近深度催化记录限制为 6 条；raw private chain-of-thought、`reasoning_content` 和凭据仍不暴露。
+- 健康页把当前 heartbeat/component 状态与最近交易日历史计数分离；unknown 使用中性状态，历史失败不再显示成当前仍在发生。页面支持 URL hash、ARIA tabs、方向键和 Home/End。
+- `_read_jsonl` 改为从文件尾部按 64 KiB 块读取最后 N 条有效 JSONL，能忽略正在 append 的半截记录，不再每 5 秒读取完整大日志。轮询改为 15 秒，浏览器隐藏时暂停。HTTP handler 只实现 `GET`、`HEAD` 和 `OPTIONS`，dashboard 仍不导入 broker adapter，也没有真实下单、重启或修改配置入口。
+- focused dashboard 测试为 21 passed；全套 pytest 为 239 passed，只有 4 条上游 `exchange_calendars` deprecation warning。Playwright 在 1440x1000 和 390x844 下逐页检查，未发现 console error 或页面横向溢出；AI 桌面页从超过 13,000px 缩短到约 2,400px。
+- 检修期间没有停止或重启用户的 forward service。浏览器验收使用独立 `127.0.0.1:8790` dashboard 进程，不访问真实下单工具。
+
 ## 2026-08-19 (America/Los_Angeles) - AI Instrument Allocator V1 与旧策略有序退出
+
+### PR #2 review 修复
+
+- 修复旧 `ai_gated_technical_v1` 在 `new_entries_enabled=false` 时过早返回的问题。旧持仓和 open order 继续由原 monitor/exit 管理，同时 discovery、Exa、ranking、News、Challenge 和 Decision 继续产生 shadow 对照记录；actionable 结果在执行报价、entry risk 和 broker 之前返回 `shadow_only`，不发布可执行 signal，也不创建 paper order。
+- allocator 的 08:00 和 09:25 不再复用完整 `_research_stage`。08:00 只遍历 active plan ticker，只有发现新 URL/event fingerprint/content hash 时才运行 fast News、Challenge、Decision，共 3 次模型调用；09:25 只运行 fast News 和 Challenge，共 2 次，只能保留或否决原方向。两阶段无新证据均为 0 次模型调用，且不再执行 universe discovery、技术 context 或 ranker；09:32 继续保持 0 次模型调用和 fresh executable revalidation。
+- 盘前 plan 替换改为一次 state-file 原子写，同时写入“新 plan active”和“旧 plan superseded”，消除重启时双 active plan 窗口。08:00 evidence refresh 失败、08:00/09:25 非预期模型失败都会先 invalidated 旧 plan，再尝试写 decision audit；即使 audit append 失败，执行状态也已 fail closed。09:25 成功完成时还会写入当日 `preopen_revalidated_at` 执行许可（无新证据时仍写入）；状态写失败或该阶段缺席时，09:32 拒绝旧计划。
 
 ### 变更原因和账户边界
 

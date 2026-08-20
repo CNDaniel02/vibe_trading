@@ -37,9 +37,10 @@ neutral rather than an automatic 30% score penalty.
 `ai_gated_technical_v1` has an isolated historical `$2,000` virtual account. It does not
 share positions, orders, daily counters, or performance statistics with the
 active deterministic account. Equity and options inside the AI sleeve do share
-that sleeve's cash and risk limits. New entries are disabled; only open-order
-processing, position monitoring, and exits continue. Historical state and logs
-are not migrated into the new allocator.
+that sleeve's cash and risk limits. New entries are disabled; open-order
+processing, position monitoring, and exits continue, and the bounded research
+path records non-executing shadow decisions. Historical state and logs are not
+migrated into the new allocator.
 
 The cycle is:
 
@@ -66,8 +67,9 @@ the balanced `auto` search mode. Exa Agent and Monitors are not used because
 DeepSeek and APScheduler already own those responsibilities; full deep search
 is deferred until measured evidence-grounding evals justify its added cost.
 
-The historical workflow below explains prior orders only. The entry-frozen
-runtime returns before discovery, Exa, DeepSeek, or order creation.
+The workflow below now remains active for shadow comparison. The entry-frozen
+runtime stops actionable output before executable quote refresh, deterministic
+entry risk, or order creation.
 
 No model may call broker tools, change configuration, add an unvalidated ticker,
 or emit a live order. The only permitted option actions are buy-to-open and

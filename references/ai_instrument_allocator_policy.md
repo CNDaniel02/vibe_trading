@@ -14,14 +14,18 @@ actual allocator stage or monitor invocation.
 The `$2,000` main account and historical `$2,000` AI-gated account are immutable
 legacy ledgers. `long_directional_options_v2_weighted` and
 `ai_gated_technical_v1` cannot create new entries, but their original open-order,
-monitor, and exit paths remain active until flat. No migration joins their cash,
-orders, fills, PnL, journal, or logs to the allocator.
+monitor, and exit paths remain active until flat. The AI-gated research path
+continues to write shadow decisions, but actionable output is stopped before
+executable quote, risk, or broker work. No migration joins their cash, orders,
+fills, PnL, journal, or logs to the allocator.
 
 ## Research and execution clock
 
 - 20:00 ET: full evidence research and overnight conditional plans;
-- 08:00 ET: bounded premarket update;
-- 09:25 ET: final pre-open evidence revalidation;
+- 08:00 ET: active-plan-only incremental evidence update; new evidence runs
+  fast News, Challenge, and Decision without discovery or ranking;
+- 09:25 ET: active-plan-only evidence invalidation; new evidence runs fast News
+  and Challenge only and may retain or veto, but cannot redirect, a plan;
 - 09:32 ET: fresh-quote execution with no LLM call;
 - regular session: bounded fast research plus five-minute position monitoring.
 
@@ -36,12 +40,19 @@ plan at 09:32. This exception applies only to plans whose recorded source stage
 is `overnight`, `premarket_update`, or `preopen_revalidation`; regular-session
 fast proposals still require `entry_now=true`. `open_execution` is accepted only
 from 09:32 through 09:37 ET, so a late manual invocation cannot execute a stale
-opening plan. A newer completed analysis for
+opening plan. The 09:25 stage must also persist a same-session
+`preopen_revalidated_at` permit, including when no new evidence is found. A
+missing permit or failed state write blocks open execution. A newer completed analysis for
 the same ticker supersedes the older active plan. A newer fail-closed or
 no-trade analysis invalidates the older plan. Every event actually sent to the
 successful ranker enters event/ticker cooldown even when it is outside the
 deep-analysis top set or the final decision is no-trade. A failed ranking may be
 retried but cannot create a plan or order.
+
+Premarket replacement commits the new active plan and the old superseded status
+in one state-file write. Evidence refresh or model revalidation failure
+invalidates the prior plan before decision-audit append, so restart cannot expose
+both plans or execute a stale plan after a partial stage failure.
 
 ## Model contract
 
