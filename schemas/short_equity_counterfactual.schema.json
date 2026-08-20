@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "benchmark_name",
+    "ticker",
+    "entry_price",
+    "scenario_cover_price",
+    "scenario_net_return_pct",
+    "probability_status",
+    "creates_order",
+    "enters_account",
+    "merged_with_long_put_pnl"
+  ],
+  "properties": {
+    "benchmark_name": {"const": "short_equity_counterfactual"},
+    "ticker": {"type": "string"},
+    "entry_price": {"type": "number"},
+    "scenario_cover_price": {"type": "number"},
+    "scenario_net_return_pct": {"type": ["number", "null"]},
+    "probability_status": {"const": "uncalibrated"},
+    "creates_order": {"const": false},
+    "enters_account": {"const": false},
+    "merged_with_long_put_pnl": {"const": false}
+  }
+}

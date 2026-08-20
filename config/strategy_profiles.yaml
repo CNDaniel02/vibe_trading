@@ -133,6 +133,49 @@ ai_gated_technical_v1:
   allow_long_put: true
   enabled: true
 
+ai_instrument_allocator_v1:
+  enabled: true
+  execution: isolated_paper_sleeve
+  new_entries_enabled: true
+  allow_model_calls: true
+  may_replace_active_strategy: false
+  share_account_state_with_baseline: false
+  share_order_state_with_baseline: false
+  state_namespace: ai_instrument_allocator_v1
+  paper_initial_cash_usd: 10000
+  top_technical_candidates: 8
+  top_deep_research_candidates: 3
+  minimum_technical_prefilter_score: 0.48
+  minimum_model_rank_score: 0.55
+  ticker_cooldown_minutes: 120
+  event_cooldown_hours: 24
+  max_parallel_exa_searches: 3
+  max_entry_validity_seconds: 300
+  minimum_direction_mass: 0.55
+  minimum_direction_margin: 0.15
+  equity_minimum_scenario_return_pct: 0.0025
+  option_minimum_scenario_return_pct: 0.08
+  non_preferred_spread_hurdle_multiplier: 1.5
+  equity_planned_stop_pct: 0.03
+  counterfactual_nav_usd: 2000
+  option_iv_shifts:
+    - -0.05
+    - 0.0
+    - 0.05
+  option_dte_by_horizon:
+    intraday_close:
+      min_dte: 21
+      target_dte: 24
+      max_dte: 30
+    next_close:
+      min_dte: 21
+      target_dte: 30
+      max_dte: 38
+    two_to_five_days:
+      min_dte: 30
+      target_dte: 38
+      max_dte: 45
+
 llm_news_drift_v1:
   enabled: true
   execution: shadow_only

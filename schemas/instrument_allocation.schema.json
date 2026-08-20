@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "allocation_id",
+    "status",
+    "reason",
+    "signal_summary",
+    "considered",
+    "selected_instrument",
+    "counterfactual_2000",
+    "short_equity_counterfactual",
+    "probability_ev_available",
+    "probability_ev_usd",
+    "raw_probability_used_for_ev"
+  ],
+  "properties": {
+    "allocation_id": {"type": "string"},
+    "status": {"enum": ["selected", "no_trade"]},
+    "reason": {"type": ["string", "null"]},
+    "signal_summary": {"type": "object"},
+    "considered": {"type": "array", "items": {"type": "object"}},
+    "selected_instrument": {"type": ["object", "null"]},
+    "counterfactual_2000": {"type": ["object", "null"]},
+    "short_equity_counterfactual": {"type": ["object", "null"]},
+    "probability_ev_available": {"const": false},
+    "probability_ev_usd": {"type": "null"},
+    "raw_probability_used_for_ev": {"const": false}
+  }
+}

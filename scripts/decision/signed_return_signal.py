@@ -54,8 +54,13 @@ def derive_signal_summary(signal: dict[str, Any]) -> dict[str, Any]:
     bullish = sum(float(buckets[name]) for name in _BULLISH_BUCKETS)
     masses = {"bearish": bearish, "neutral": neutral, "bullish": bullish}
     direction = max(masses, key=lambda name: (masses[name], name == "neutral"))
+    direction_buckets = {
+        "bearish": _BEARISH_BUCKETS,
+        "neutral": (_NEUTRAL_BUCKET,),
+        "bullish": _BULLISH_BUCKETS,
+    }[direction]
     dominant = max(
-        SIGNED_RETURN_BUCKETS,
+        direction_buckets,
         key=lambda name: (float(buckets[name]), -SIGNED_RETURN_BUCKETS.index(name)),
     )
     return {
@@ -67,4 +72,3 @@ def derive_signal_summary(signal: dict[str, Any]) -> dict[str, Any]:
         "conservative_move_pct": _CONSERVATIVE_MOVE_PCT[dominant],
         "probability_status": "uncalibrated",
     }
-

@@ -237,6 +237,28 @@ def test_python_derives_direction_and_conservative_magnitude_from_signed_buckets
     assert summary["probability_status"] == "uncalibrated"
 
 
+def test_derived_magnitude_uses_dominant_bucket_inside_derived_direction() -> None:
+    from scripts.decision.signed_return_signal import derive_signal_summary
+
+    buckets = {
+        "return_lt_minus_5_pct": 0.02,
+        "return_minus_5_to_minus_2_pct": 0.03,
+        "return_minus_2_to_minus_0_5_pct": 0.05,
+        "return_minus_0_5_to_plus_0_5_pct": 0.30,
+        "return_plus_0_5_to_plus_2_pct": 0.20,
+        "return_plus_2_to_plus_5_pct": 0.20,
+        "return_gt_plus_5_pct": 0.20,
+    }
+
+    summary = derive_signal_summary(
+        _signed_signal(signed_return_probability_buckets=buckets)
+    )
+
+    assert summary["direction"] == "bullish"
+    assert summary["dominant_signed_bucket"] == "return_plus_0_5_to_plus_2_pct"
+    assert summary["conservative_move_pct"] == 0.5
+
+
 def test_allocator_signal_schema_has_no_model_selected_instrument() -> None:
     from scripts.llm.schemas import AI_ALLOCATOR_SIGNAL_OUTPUT_SCHEMA, validate_schema
 
@@ -538,3 +560,152 @@ def test_option_scenario_repricing_uses_spot_time_iv_and_reports_vega() -> None:
     assert up["conservative_exit_bid"] > flat_later["conservative_exit_bid"]
     assert up["probability_ev_available"] is False
     assert up["probability_ev_usd"] is None
+
+
+def _bearish_signal() -> dict:
+    buckets = {
+        "return_lt_minus_5_pct": 0.15,
+        "return_minus_5_to_minus_2_pct": 0.35,
+        "return_minus_2_to_minus_0_5_pct": 0.25,
+        "return_minus_0_5_to_plus_0_5_pct": 0.10,
+        "return_plus_0_5_to_plus_2_pct": 0.08,
+        "return_plus_2_to_plus_5_pct": 0.05,
+        "return_gt_plus_5_pct": 0.02,
+    }
+    return _signed_signal(
+        signed_return_probability_buckets=buckets,
+        thesis="Grounded negative catalyst.",
+    )
+
+
+def _neutral_signal() -> dict:
+    buckets = {
+        "return_lt_minus_5_pct": 0.02,
+        "return_minus_5_to_minus_2_pct": 0.05,
+        "return_minus_2_to_minus_0_5_pct": 0.08,
+        "return_minus_0_5_to_plus_0_5_pct": 0.70,
+        "return_plus_0_5_to_plus_2_pct": 0.08,
+        "return_plus_2_to_plus_5_pct": 0.05,
+        "return_gt_plus_5_pct": 0.02,
+    }
+    return _signed_signal(signed_return_probability_buckets=buckets)
+
+
+def _underlying_quote():
+    from scripts.core.models import Quote
+
+    return Quote(
+        "AAPL",
+        bid=100.0,
+        ask=100.05,
+        last=100.02,
+        asof=REGULAR_NOW,
+        source="fixture",
+        avg_daily_volume_usd=500_000_000,
+    )
+
+
+def _account_state(nav: float = 10_000) -> dict:
+    return {
+        "nav_usd": nav,
+        "cash_usd": nav,
+        "equity_deployed_usd": 0.0,
+        "options_deployed_usd": 0.0,
+        "open_position_count": 0,
+    }
+
+
+def test_allocator_selects_equity_for_bullish_signal_when_no_option_clears_hurdle(
+    paper_root: Path,
+) -> None:
+    from scripts.decision.instrument_allocator import allocate_instrument
+
+    config = load_runtime_config(paper_root)
+    allocation = allocate_instrument(
+        _signed_signal(),
+        _underlying_quote(),
+        [],
+        _account_state(),
+        config,
+        REGULAR_NOW,
+    )
+
+    assert allocation["status"] == "selected"
+    assert allocation["selected_instrument"]["instrument_type"] == "equity"
+    assert allocation["selected_instrument"]["ticker"] == "AAPL"
+    assert allocation["probability_ev_available"] is False
+    assert allocation["probability_ev_usd"] is None
+    assert allocation["raw_probability_used_for_ev"] is False
+
+
+def test_allocator_uses_put_only_for_bearish_executable_direction(
+    paper_root: Path,
+) -> None:
+    from scripts.decision.instrument_allocator import allocate_instrument
+
+    config = load_runtime_config(paper_root)
+    put = _option_contract("aapl-put", "2026-08-21", "put")
+    quote = _option_quote("aapl-put", bid=4.95, ask=5.05)
+    allocation = allocate_instrument(
+        _bearish_signal(),
+        _underlying_quote(),
+        [(put, quote)],
+        _account_state(),
+        config,
+        REGULAR_NOW,
+    )
+
+    considered = {item["instrument_type"] for item in allocation["considered"]}
+    assert considered == {"put"}
+    assert allocation["considered"][0]["break_even_move_pct"] < 0
+    assert allocation["short_equity_counterfactual"]["benchmark_name"] == "short_equity_counterfactual"
+    assert allocation["short_equity_counterfactual"]["creates_order"] is False
+    assert "account" not in allocation["short_equity_counterfactual"]
+
+
+def test_allocator_rejects_neutral_signal_before_instrument_comparison(
+    paper_root: Path,
+) -> None:
+    from scripts.decision.instrument_allocator import allocate_instrument
+
+    allocation = allocate_instrument(
+        _neutral_signal(),
+        _underlying_quote(),
+        [],
+        _account_state(),
+        load_runtime_config(paper_root),
+        REGULAR_NOW,
+    )
+
+    assert allocation["status"] == "no_trade"
+    assert allocation["reason"] == "signed return direction is neutral or insufficiently dominant"
+    assert allocation["considered"] == []
+
+
+def test_two_thousand_counterfactual_never_reselects_instrument() -> None:
+    from scripts.decision.instrument_allocator import build_same_instrument_counterfactual
+
+    selected = {
+        "allocation_id": "allocation-put",
+        "selected_instrument": {
+            "instrument_type": "put",
+            "ticker": "AAPL",
+            "option_id": "aapl-put",
+            "expiration_date": "2026-08-21",
+            "strike_price": 100.0,
+            "entry_price": 2.50,
+            "multiplier": 100,
+            "quantity": 1,
+            "risk_usd": 250.0,
+        },
+    }
+
+    counterfactual = build_same_instrument_counterfactual(selected, nav_usd=2_000)
+
+    assert counterfactual["source_allocation_id"] == "allocation-put"
+    assert counterfactual["instrument_identity"]["option_id"] == "aapl-put"
+    assert counterfactual["affordable"] is False
+    assert counterfactual["max_affordable_quantity"] == 0
+    assert counterfactual["risk_pct_of_nav"] == 0.125
+    assert counterfactual["rejection_reason"] == "same option contract exceeds 3% per-entry premium risk"
+    assert counterfactual["alternative_instrument_considered"] is False
