@@ -17,6 +17,10 @@ api:
     catalyst_decision_manager: 60
     ai_gated_challenge_agent: 75
     ai_gated_decision_manager: 60
+    ai_allocator_challenge_agent: 90
+    ai_allocator_decision_manager: 90
+    ai_allocator_fast_challenge_agent: 60
+    ai_allocator_fast_decision_manager: 60
     news_drift_headline_agent: 45
   max_retries: 1
   max_tokens: 3072
@@ -30,6 +34,13 @@ api:
     ai_gated_news_agent: 1200
     ai_gated_challenge_agent: 2200
     ai_gated_decision_manager: 4096
+    ai_allocator_ranker: 1600
+    ai_allocator_news_agent: 1400
+    ai_allocator_challenge_agent: 2600
+    ai_allocator_decision_manager: 4096
+    ai_allocator_fast_news_agent: 1200
+    ai_allocator_fast_challenge_agent: 1800
+    ai_allocator_fast_decision_manager: 2800
     news_drift_headline_agent: 1400
   response_format: json_object
   structured_retry_max_tokens: 4096
@@ -62,6 +73,20 @@ api:
         type: disabled
       ai_gated_decision_manager:
         type: enabled
+      ai_allocator_ranker:
+        type: disabled
+      ai_allocator_news_agent:
+        type: disabled
+      ai_allocator_challenge_agent:
+        type: enabled
+      ai_allocator_decision_manager:
+        type: enabled
+      ai_allocator_fast_news_agent:
+        type: disabled
+      ai_allocator_fast_challenge_agent:
+        type: disabled
+      ai_allocator_fast_decision_manager:
+        type: disabled
       news_drift_headline_agent:
         type: disabled
   input_cost_per_million_usd: 0.14

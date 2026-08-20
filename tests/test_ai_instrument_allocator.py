@@ -16,6 +16,16 @@ from scripts.simulation.paper_broker import PaperBroker
 
 REGULAR_NOW = "2026-07-13T15:00:00+00:00"
 
+SIGNED_BUCKETS = {
+    "return_lt_minus_5_pct": 0.02,
+    "return_minus_5_to_minus_2_pct": 0.04,
+    "return_minus_2_to_minus_0_5_pct": 0.09,
+    "return_minus_0_5_to_plus_0_5_pct": 0.15,
+    "return_plus_0_5_to_plus_2_pct": 0.30,
+    "return_plus_2_to_plus_5_pct": 0.25,
+    "return_gt_plus_5_pct": 0.15,
+}
+
 
 class _MustNotDiscover:
     def collect_seed_candidates(self, *_args, **_kwargs):
@@ -167,3 +177,190 @@ def test_entry_frozen_weighted_options_never_start_market_data_or_order_path(
     assert entries == []
     assert decisions[0]["action"] == "buy_to_open"
     assert decisions[0]["execution_status"] == "entry_frozen"
+
+
+def _signed_signal(**overrides):
+    signal = {
+        "action": "propose_trade",
+        "ticker": "AAPL",
+        "horizon": "next_close",
+        "signed_return_probability_buckets": dict(SIGNED_BUCKETS),
+        "probability_status": "uncalibrated",
+        "thesis": "Grounded fixture thesis.",
+        "supporting_evidence": ["Company guidance increased."],
+        "source_urls": ["https://company.example/guidance"],
+        "contrary_evidence": [],
+        "data_gaps": [],
+        "entry_condition": "Fresh quote confirms the setup.",
+        "entry_now": True,
+        "invalidation_condition": "Guidance is withdrawn.",
+        "thesis_valid_until": "2026-07-15T20:00:00+00:00",
+        "max_holding_trading_days": 1,
+        "no_trade_reason": None,
+    }
+    signal.update(overrides)
+    return signal
+
+
+def test_signed_return_signal_requires_complete_sum_to_one_uncalibrated_buckets() -> None:
+    from scripts.decision.signed_return_signal import validate_signed_return_signal
+
+    validate_signed_return_signal(_signed_signal())
+
+    missing = _signed_signal()
+    del missing["signed_return_probability_buckets"]["return_gt_plus_5_pct"]
+    with pytest.raises(ValueError, match="exactly the configured signed buckets"):
+        validate_signed_return_signal(missing)
+
+    wrong_sum = _signed_signal()
+    wrong_sum["signed_return_probability_buckets"]["return_gt_plus_5_pct"] = 0.25
+    with pytest.raises(ValueError, match="sum to 1"):
+        validate_signed_return_signal(wrong_sum)
+
+    calibrated = _signed_signal(probability_status="calibrated")
+    with pytest.raises(ValueError, match="uncalibrated"):
+        validate_signed_return_signal(calibrated)
+
+
+def test_python_derives_direction_and_conservative_magnitude_from_signed_buckets() -> None:
+    from scripts.decision.signed_return_signal import derive_signal_summary
+
+    summary = derive_signal_summary(_signed_signal())
+
+    assert summary["bullish_probability"] == pytest.approx(0.70)
+    assert summary["bearish_probability"] == pytest.approx(0.15)
+    assert summary["neutral_probability"] == pytest.approx(0.15)
+    assert summary["direction"] == "bullish"
+    assert summary["dominant_signed_bucket"] == "return_plus_0_5_to_plus_2_pct"
+    assert summary["conservative_move_pct"] == 0.5
+    assert summary["probability_status"] == "uncalibrated"
+
+
+def test_allocator_signal_schema_has_no_model_selected_instrument() -> None:
+    from scripts.llm.schemas import AI_ALLOCATOR_SIGNAL_OUTPUT_SCHEMA, validate_schema
+
+    validate_schema(_signed_signal(), AI_ALLOCATOR_SIGNAL_OUTPUT_SCHEMA)
+    assert "instrument" not in AI_ALLOCATOR_SIGNAL_OUTPUT_SCHEMA["properties"]
+    assert "direction_probability" not in AI_ALLOCATOR_SIGNAL_OUTPUT_SCHEMA["properties"]
+    assert "magnitude_distribution" not in AI_ALLOCATOR_SIGNAL_OUTPUT_SCHEMA["properties"]
+
+
+def test_allocator_thinking_is_only_enabled_for_overnight_challenge_and_decision(
+    paper_root: Path,
+) -> None:
+    config = load_runtime_config(paper_root)["llm"]["api"]
+    thinking = config["thinking"]["agents"]
+
+    assert thinking["ai_allocator_challenge_agent"] == {"type": "enabled"}
+    assert thinking["ai_allocator_decision_manager"] == {"type": "enabled"}
+    assert thinking["ai_allocator_fast_challenge_agent"] == {"type": "disabled"}
+    assert thinking["ai_allocator_fast_decision_manager"] == {"type": "disabled"}
+
+
+def _allocator_snapshot(*, with_event: bool = True) -> dict:
+    event = {
+        "ticker": "AAPL",
+        "headline": "Apple raises forward guidance",
+        "published_at": "2026-07-13T14:30:00+00:00",
+        "event_at": "2026-07-13T14:25:00+00:00",
+        "first_seen_at": "2026-07-13T14:31:00+00:00",
+        "retrieved_at": REGULAR_NOW,
+        "source": "company.example",
+        "source_tier": 1,
+        "ticker_relevance": 1.0,
+        "direction": "positive",
+        "novelty": 0.9,
+        "already_priced_in": False,
+        "confidence": 0.9,
+        "url": "https://company.example/guidance",
+        "highlights": ["Guidance increased."],
+    }
+    return {
+        "snapshot_id": "allocator-AAPL",
+        "decision_time": REGULAR_NOW,
+        "data_cutoff_time": REGULAR_NOW,
+        "ticker": "AAPL",
+        "market_session": "regular",
+        "market_data": {
+            "quote": {
+                "symbol": "AAPL",
+                "bid": 100.0,
+                "ask": 100.05,
+                "last": 100.02,
+                "asof": REGULAR_NOW,
+            },
+            "market_regime": "neutral",
+        },
+        "technical_signals": {
+            "relative_strength_20d": 3.0,
+            "price_change_1d_pct": 1.0,
+            "price_change_5d_pct": 4.0,
+            "volume_ratio": 1.4,
+            "chase_score": 0.2,
+        },
+        "available_news": [event] if with_event else [],
+        "source_metadata": [
+            {
+                "source": "company.example",
+                "source_tier": 1,
+                "retrieved_at": REGULAR_NOW,
+            }
+        ],
+    }
+
+
+def test_allocator_team_uses_stage_specific_agents_and_never_selects_instrument(
+    paper_root: Path,
+) -> None:
+    from scripts.agents.ai_instrument_allocator_team import AiInstrumentAllocatorTeam
+
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    team = AiInstrumentAllocatorTeam(config, MockProvider(tracker), tracker)
+    ranking = team.rank(
+        snapshot_id="allocator-cycle",
+        decision_time=REGULAR_NOW,
+        candidates=[
+            {
+                "ticker": "AAPL",
+                "eligible": True,
+                "pre_score": 0.8,
+                "market_context": {"technical_signals": {"price_change_1d_pct": 1.0}},
+                "events": [],
+            }
+        ],
+    )
+    analysis = team.analyze(_allocator_snapshot(), ranking["ranked_candidates"][0], stage="overnight")
+
+    assert "instrument" not in ranking["ranked_candidates"][0]
+    assert "instrument" not in analysis["signal"]
+    assert analysis["signal"]["action"] == "propose_trade"
+    assert analysis["fail_closed"] is False
+    assert [record.agent_name for record in tracker.records] == [
+        "ai_allocator_ranker",
+        "ai_allocator_news_agent",
+        "ai_allocator_challenge_agent",
+        "ai_allocator_decision_manager",
+    ]
+
+
+def test_allocator_team_enforces_challenge_veto_as_no_trade(paper_root: Path) -> None:
+    from scripts.agents.ai_instrument_allocator_team import AiInstrumentAllocatorTeam
+
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    team = AiInstrumentAllocatorTeam(config, MockProvider(tracker), tracker)
+    analysis = team.analyze(
+        _allocator_snapshot(with_event=False),
+        {"ticker": "AAPL", "score": 0.8, "rationale": "fixture", "risk_flags": []},
+        stage="fast",
+    )
+
+    assert analysis["challenge"]["veto_recommended"] is True
+    assert analysis["signal"]["action"] == "no_trade"
+    assert analysis["signal"]["entry_now"] is False
+    assert [record.agent_name for record in tracker.records] == [
+        "ai_allocator_fast_news_agent",
+        "ai_allocator_fast_challenge_agent",
+        "ai_allocator_fast_decision_manager",
+    ]

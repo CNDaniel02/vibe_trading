@@ -36,6 +36,23 @@ class MockProvider(LLMProvider):
             data = self._catalyst_challenge(request.input_payload)
         elif request.agent_name in {"catalyst_decision_manager", "ai_gated_decision_manager"}:
             data = self._catalyst_decision(request.input_payload)
+        elif request.agent_name == "ai_allocator_ranker":
+            data = self._allocator_ranking(request.input_payload)
+        elif request.agent_name in {
+            "ai_allocator_news_agent",
+            "ai_allocator_fast_news_agent",
+        }:
+            data = self._allocator_news(request.input_payload)
+        elif request.agent_name in {
+            "ai_allocator_challenge_agent",
+            "ai_allocator_fast_challenge_agent",
+        }:
+            data = self._catalyst_challenge(request.input_payload)
+        elif request.agent_name in {
+            "ai_allocator_decision_manager",
+            "ai_allocator_fast_decision_manager",
+        }:
+            data = self._allocator_signal(request.input_payload)
         elif request.agent_name == "news_drift_headline_agent":
             data = self._news_drift_headlines(request.input_payload)
         else:
@@ -246,6 +263,87 @@ class MockProvider(LLMProvider):
                 }
             )
         return {"ranked_candidates": ranked, "data_gaps": [] if ranked else ["No eligible candidate was available."]}
+
+    @staticmethod
+    def _allocator_ranking(payload: dict[str, Any]) -> dict[str, Any]:
+        candidates = [item for item in payload.get("candidates", []) if item.get("eligible", False)]
+        candidates.sort(key=lambda item: float(item.get("pre_score", 0)), reverse=True)
+        ranked = [
+            {
+                "ticker": str(item["ticker"]),
+                "score": round(max(0.0, min(1.0, float(item.get("pre_score", 0)))), 3),
+                "rationale": "deterministic mock opportunity ranking",
+                "risk_flags": [],
+            }
+            for item in candidates[:8]
+        ]
+        return {"ranked_candidates": ranked, "data_gaps": [] if ranked else ["No eligible candidate was available."]}
+
+    @staticmethod
+    def _allocator_news(payload: dict[str, Any]) -> dict[str, Any]:
+        value = MockProvider._catalyst_bull_news(payload)
+        value.pop("bull_case", None)
+        value.pop("instrument_preference", None)
+        return value
+
+    @staticmethod
+    def _allocator_signal(payload: dict[str, Any]) -> dict[str, Any]:
+        context = payload.get("agent_context", {})
+        news = context.get("bull_news", {})
+        challenge = context.get("challenge", {})
+        direction = str(news.get("direction", "unclear"))
+        veto = bool(challenge.get("veto_recommended", False))
+        if direction == "positive":
+            buckets = {
+                "return_lt_minus_5_pct": 0.02,
+                "return_minus_5_to_minus_2_pct": 0.04,
+                "return_minus_2_to_minus_0_5_pct": 0.09,
+                "return_minus_0_5_to_plus_0_5_pct": 0.15,
+                "return_plus_0_5_to_plus_2_pct": 0.30,
+                "return_plus_2_to_plus_5_pct": 0.25,
+                "return_gt_plus_5_pct": 0.15,
+            }
+        elif direction == "negative":
+            buckets = {
+                "return_lt_minus_5_pct": 0.15,
+                "return_minus_5_to_minus_2_pct": 0.25,
+                "return_minus_2_to_minus_0_5_pct": 0.30,
+                "return_minus_0_5_to_plus_0_5_pct": 0.15,
+                "return_plus_0_5_to_plus_2_pct": 0.09,
+                "return_plus_2_to_plus_5_pct": 0.04,
+                "return_gt_plus_5_pct": 0.02,
+            }
+        else:
+            buckets = {
+                "return_lt_minus_5_pct": 0.03,
+                "return_minus_5_to_minus_2_pct": 0.07,
+                "return_minus_2_to_minus_0_5_pct": 0.15,
+                "return_minus_0_5_to_plus_0_5_pct": 0.50,
+                "return_plus_0_5_to_plus_2_pct": 0.15,
+                "return_plus_2_to_plus_5_pct": 0.07,
+                "return_gt_plus_5_pct": 0.03,
+            }
+        actionable = bool(news.get("supporting_facts")) and not veto
+        decision_time = parse_ts(str(payload["decision_time"]))
+        horizon = "next_close"
+        return {
+            "action": "propose_trade" if actionable else "no_trade",
+            "ticker": str(payload["ticker"]),
+            "horizon": horizon,
+            "signed_return_probability_buckets": buckets,
+            "probability_status": "uncalibrated",
+            "thesis": str(news.get("catalyst_summary") or "No actionable catalyst."),
+            "supporting_evidence": list(news.get("supporting_facts", [])),
+            "source_urls": list(news.get("source_urls", [])),
+            "contrary_evidence": list(challenge.get("objections", [])),
+            "data_gaps": list(news.get("data_gaps", [])),
+            "entry_condition": "Fresh executable economics clear deterministic hurdles.",
+            "entry_now": actionable and payload.get("market_session") == "regular",
+            "invalidation_condition": "Grounded evidence is contradicted or expires.",
+            "thesis_valid_until": (decision_time + timedelta(days=2)).isoformat(),
+            "max_holding_trading_days": 1,
+            "no_trade_reason": None if actionable else "Challenge veto or insufficient grounded evidence.",
+        }
 
     @staticmethod
     def _catalyst_bull_news(payload: dict[str, Any]) -> dict[str, Any]:
