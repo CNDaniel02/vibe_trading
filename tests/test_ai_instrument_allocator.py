@@ -1158,3 +1158,135 @@ def test_allocator_missing_mandate_exits_after_restart(paper_root: Path) -> None
 
     assert restarted.broker.store.positions() == {}
     assert result["exits"][0]["reason"] == "missing position mandate; fail closed"
+
+
+def test_calibration_walk_forward_is_horizon_separated_and_maturity_safe() -> None:
+    from scripts.evaluation.probability_calibration import (
+        build_expanding_walk_forward_splits,
+    )
+
+    records = [
+        {
+            "record_id": "next-1",
+            "horizon": "next_close",
+            "decision_time": "2026-07-01T15:00:00+00:00",
+            "label_matured_at": "2026-07-02T20:00:00+00:00",
+            "actual_bucket": "return_plus_0_5_to_plus_2_pct",
+        },
+        {
+            "record_id": "intraday",
+            "horizon": "intraday_close",
+            "decision_time": "2026-07-02T15:00:00+00:00",
+            "label_matured_at": "2026-07-02T20:00:00+00:00",
+            "actual_bucket": "return_minus_0_5_to_plus_0_5_pct",
+        },
+        {
+            "record_id": "next-not-mature-at-cutoff",
+            "horizon": "next_close",
+            "decision_time": "2026-07-02T15:00:00+00:00",
+            "label_matured_at": "2026-07-03T16:00:00+00:00",
+            "actual_bucket": "return_plus_2_to_plus_5_pct",
+        },
+        {
+            "record_id": "next-test",
+            "horizon": "next_close",
+            "decision_time": "2026-07-03T15:00:00+00:00",
+            "label_matured_at": "2026-07-06T20:00:00+00:00",
+            "actual_bucket": "return_minus_0_5_to_plus_0_5_pct",
+        },
+    ]
+
+    folds = build_expanding_walk_forward_splits(
+        records,
+        horizon="next_close",
+        evaluation_time="2026-07-07T00:00:00+00:00",
+        minimum_train_size=1,
+    )
+    target = next(fold for fold in folds if fold["test_record"]["record_id"] == "next-test")
+
+    assert target["horizon"] == "next_close"
+    assert [item["record_id"] for item in target["training_records"]] == ["next-1"]
+    assert all(item["horizon"] == "next_close" for item in target["training_records"])
+    assert all(
+        item["label_matured_at"] <= target["training_cutoff_time"]
+        for item in target["training_records"]
+    )
+
+
+def test_multiclass_brier_and_log_loss_match_exact_fixture() -> None:
+    import math
+
+    from scripts.evaluation.probability_calibration import (
+        multiclass_brier_score,
+        multiclass_log_loss,
+    )
+
+    probabilities = {"down": 0.1, "flat": 0.2, "up": 0.7}
+
+    assert multiclass_brier_score(probabilities, "up") == pytest.approx(0.14)
+    assert multiclass_log_loss(probabilities, "up") == pytest.approx(-math.log(0.7))
+
+
+def test_round_trip_cost_decomposition_matches_executable_net_pnl() -> None:
+    from scripts.evaluation.calculate_metrics import round_trip_cost_decomposition
+
+    equity = [
+        {
+            "fill": {
+                "symbol": "AAPL",
+                "side": "buy",
+                "quantity": 2,
+                "price": 100.11,
+                "commission": 0.20,
+                "filled_at": "2026-07-13T15:00:00+00:00",
+            },
+            "quote": {"bid": 99.90, "ask": 100.10},
+        },
+        {
+            "fill": {
+                "symbol": "AAPL",
+                "side": "sell",
+                "quantity": 2,
+                "price": 101.89,
+                "commission": 0.20,
+                "filled_at": "2026-07-13T16:00:00+00:00",
+            },
+            "quote": {"bid": 101.90, "ask": 102.10},
+        },
+    ]
+    options = [
+        {
+            "fill": {
+                "option_id": "put-1",
+                "intent": "buy_to_open",
+                "quantity": 1,
+                "multiplier": 100,
+                "price": 1.03,
+                "commission": 0,
+                "filled_at": "2026-07-13T15:00:00+00:00",
+            },
+            "quote": {"bid": 0.98, "ask": 1.02},
+        },
+        {
+            "fill": {
+                "option_id": "put-1",
+                "intent": "sell_to_close",
+                "quantity": 1,
+                "multiplier": 100,
+                "price": 1.47,
+                "commission": 0,
+                "filled_at": "2026-07-13T16:00:00+00:00",
+            },
+            "quote": {"bid": 1.48, "ask": 1.52},
+        },
+    ]
+
+    costs = round_trip_cost_decomposition(equity, options)
+
+    assert costs["closed_round_trip_count"] == 2
+    assert costs["gross_midpoint_pnl_usd"] == pytest.approx(54.0)
+    assert costs["spread_cost_usd"] == pytest.approx(4.4)
+    assert costs["slippage_and_tick_cost_usd"] == pytest.approx(2.04)
+    assert costs["commission_usd"] == pytest.approx(0.4)
+    assert costs["executable_net_pnl_usd"] == pytest.approx(47.16)
+    assert costs["identity_residual_usd"] == pytest.approx(0.0, abs=1e-9)

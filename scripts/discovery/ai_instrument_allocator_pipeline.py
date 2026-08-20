@@ -18,6 +18,7 @@ from scripts.exit.position_mandates import (
     evaluate_mandate_exit,
     planned_exit_time,
 )
+from scripts.evaluation.probability_calibration import uncalibrated_metadata
 from scripts.journal.write_trade_journal import write_order_journal
 from scripts.llm.base_provider import LLMProvider, ProviderError
 from scripts.llm.usage_tracker import UsageTracker
@@ -435,10 +436,7 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                 "decision_time": snapshot["decision_time"],
                 "data_cutoff_time": snapshot["data_cutoff_time"],
                 "evidence_snapshot": item["evidence_snapshot"],
-                "calibration_status": "uncalibrated",
-                "calibration_version": "none",
-                "calibration_training_cutoff_time": None,
-                "calibration_sample_size": 0,
+                **uncalibrated_metadata(str(signal["horizon"])),
             }
             append_jsonl(
                 self.root,

@@ -97,6 +97,136 @@ def _closed_option_trade_results(
     return results
 
 
+def round_trip_cost_decomposition(
+    equity_fill_records: list[dict[str, Any]],
+    option_fill_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    trips = [
+        *_cost_trips(
+            equity_fill_records,
+            identity_key="symbol",
+            entry_action=("side", "buy"),
+            exit_action=("side", "sell"),
+            default_multiplier=1,
+        ),
+        *_cost_trips(
+            option_fill_records,
+            identity_key="option_id",
+            entry_action=("intent", "buy_to_open"),
+            exit_action=("intent", "sell_to_close"),
+            default_multiplier=100,
+        ),
+    ]
+    keys = (
+        "gross_midpoint_pnl_usd",
+        "spread_cost_usd",
+        "slippage_and_tick_cost_usd",
+        "commission_usd",
+        "executable_net_pnl_usd",
+        "identity_residual_usd",
+    )
+    result = {
+        key: round(sum(float(trip[key]) for trip in trips), 10)
+        for key in keys
+    }
+    result["closed_round_trip_count"] = len(trips)
+    result["round_trips"] = trips
+    result["identity_valid"] = abs(result["identity_residual_usd"]) <= 1e-8
+    return result
+
+
+def _cost_trips(
+    records: list[dict[str, Any]],
+    *,
+    identity_key: str,
+    entry_action: tuple[str, str],
+    exit_action: tuple[str, str],
+    default_multiplier: int,
+) -> list[dict[str, Any]]:
+    lots: dict[str, list[dict[str, Any]]] = {}
+    trips: list[dict[str, Any]] = []
+    ordered = sorted(
+        records,
+        key=lambda record: str(record.get("fill", record).get("filled_at", "")),
+    )
+    for record in ordered:
+        fill = record.get("fill", record)
+        quote = record.get("quote", {})
+        identity = str(fill.get(identity_key, ""))
+        quantity = float(fill.get("quantity", 0))
+        if not identity or quantity <= 0:
+            continue
+        action_name, entry_value = entry_action
+        exit_name, exit_value = exit_action
+        if fill.get(action_name) == entry_value:
+            lots.setdefault(identity, []).append(
+                {
+                    "remaining": quantity,
+                    "original_quantity": quantity,
+                    "fill": fill,
+                    "quote": quote,
+                }
+            )
+            continue
+        if fill.get(exit_name) != exit_value:
+            continue
+        remaining_exit = quantity
+        for lot in lots.get(identity, []):
+            if remaining_exit <= 1e-12:
+                break
+            matched = min(float(lot["remaining"]), remaining_exit)
+            if matched <= 0:
+                continue
+            entry_fill = lot["fill"]
+            entry_quote = lot["quote"]
+            multiplier = float(fill.get("multiplier", entry_fill.get("multiplier", default_multiplier)))
+            entry_mid = (float(entry_quote["bid"]) + float(entry_quote["ask"])) / 2
+            exit_mid = (float(quote["bid"]) + float(quote["ask"])) / 2
+            gross_midpoint = (exit_mid - entry_mid) * matched * multiplier
+            spread = (
+                float(entry_quote["ask"])
+                - entry_mid
+                + exit_mid
+                - float(quote["bid"])
+            ) * matched * multiplier
+            slippage = (
+                float(entry_fill["price"])
+                - float(entry_quote["ask"])
+                + float(quote["bid"])
+                - float(fill["price"])
+            ) * matched * multiplier
+            commission = (
+                float(entry_fill.get("commission", 0))
+                * matched
+                / float(lot["original_quantity"])
+                + float(fill.get("commission", 0)) * matched / quantity
+            )
+            executable_net = (
+                (float(fill["price"]) - float(entry_fill["price"]))
+                * matched
+                * multiplier
+                - commission
+            )
+            residual = gross_midpoint - spread - slippage - commission - executable_net
+            trips.append(
+                {
+                    "identity": identity,
+                    "quantity": matched,
+                    "multiplier": multiplier,
+                    "gross_midpoint_pnl_usd": round(gross_midpoint, 10),
+                    "spread_cost_usd": round(spread, 10),
+                    "slippage_and_tick_cost_usd": round(slippage, 10),
+                    "commission_usd": round(commission, 10),
+                    "executable_net_pnl_usd": round(executable_net, 10),
+                    "identity_residual_usd": round(residual, 10),
+                }
+            )
+            lot["remaining"] = float(lot["remaining"]) - matched
+            remaining_exit -= matched
+        lots[identity] = [lot for lot in lots.get(identity, []) if float(lot["remaining"]) > 1e-12]
+    return trips
+
+
 def _ai_directional_breakdown(
     root: Path,
     equity_closed_pnls: list[float],
@@ -321,6 +451,10 @@ def calculate_metrics(root: str | Path, namespace: str | None = None) -> dict[st
     option_fill_records = _read_jsonl(log_dir / "paper_option_fills.jsonl")
     closed_pnls = _closed_trade_pnls(equity_fill_records)
     option_trade_results = _closed_option_trade_results(option_fill_records)
+    execution_cost_decomposition = round_trip_cost_decomposition(
+        equity_fill_records,
+        option_fill_records,
+    )
     option_closed_pnls = [pnl for _, pnl in option_trade_results]
     all_closed_pnls = [*closed_pnls, *option_closed_pnls]
     gross_profit = sum(item for item in all_closed_pnls if item > 0)
@@ -437,6 +571,7 @@ def calculate_metrics(root: str | Path, namespace: str | None = None) -> dict[st
         "profitability": profitability,
         "evaluation_thresholds": evaluation,
         "lines": classified_lines,
+        "execution_cost_decomposition": execution_cost_decomposition,
     }
     if namespace == "ai_gated_technical_v1":
         result["directional_breakdown"] = _ai_directional_breakdown(
