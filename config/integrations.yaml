@@ -77,6 +77,10 @@ runtime:
   ai_gated_start_offset_seconds: 10
   ai_monitor_cycle_seconds: 300
   ai_monitor_worker_timeout_seconds: 90
+  allocator_worker_timeout_seconds: 600
+  allocator_monitor_cycle_seconds: 300
+  allocator_monitor_worker_timeout_seconds: 90
+  allocator_intraday_start_offset_seconds: 180
   news_drift_worker_timeout_seconds: 120
   news_drift_start_offset_seconds: 20
   evaluation_worker_timeout_seconds: 120

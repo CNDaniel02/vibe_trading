@@ -926,3 +926,235 @@ def test_option_aggregate_eight_percent_cap_rejects_third_risk_block(
     )
 
     assert decision.reason == "shared options deployed risk cap exceeded"
+
+
+def test_allocator_plan_and_position_mandate_survive_restart(
+    paper_root: Path,
+) -> None:
+    from scripts.exit.position_mandates import PositionMandateStore
+    from scripts.strategies.allocator_state import AllocatorStateStore
+
+    namespace = "ai_instrument_allocator_v1"
+    legacy_account_before = (paper_root / "state" / "paper_account.json").read_bytes()
+    plans = AllocatorStateStore(paper_root, namespace=namespace)
+    plan = {
+        "plan_id": "plan-aapl",
+        "strategy": namespace,
+        "ticker": "AAPL",
+        "created_at": REGULAR_NOW,
+        "valid_until": "2026-07-13T15:05:00+00:00",
+        "status": "active",
+        "signal": _signed_signal(),
+        "snapshot": {"snapshot_id": "snapshot-aapl"},
+    }
+    plans.save_plan(plan)
+    plans.record_allocation(
+        {
+            "allocation_id": "allocation-aapl",
+            "plan_id": "plan-aapl",
+            "decision_time": REGULAR_NOW,
+            "status": "selected",
+        }
+    )
+
+    mandates = PositionMandateStore(paper_root, namespace=namespace)
+    mandates.register_order(
+        order_id="paper-order-aapl",
+        exposure_id="equity:AAPL",
+        strategy=namespace,
+        snapshot_id="snapshot-aapl",
+        ticker="AAPL",
+        instrument_type="equity",
+        horizon="next_close",
+        created_at=REGULAR_NOW,
+        planned_exit_at="2026-07-14T19:50:00+00:00",
+        thesis_valid_until="2026-07-14T19:50:00+00:00",
+        invalidation_condition="Close below 97.",
+        planned_stop_price=97.0,
+    )
+
+    restarted_plans = AllocatorStateStore(paper_root, namespace=namespace)
+    restarted_mandates = PositionMandateStore(paper_root, namespace=namespace)
+    assert restarted_plans.active_plans(REGULAR_NOW)[0]["plan_id"] == "plan-aapl"
+    assert restarted_plans.allocations()["allocation-aapl"]["plan_id"] == "plan-aapl"
+    assert restarted_mandates.for_exposure("equity:AAPL")["horizon"] == "next_close"
+    assert (paper_root / "state" / "paper_account.json").read_bytes() == legacy_account_before
+
+
+def test_position_mandate_exit_is_horizon_aware_and_fails_closed() -> None:
+    from scripts.exit.position_mandates import evaluate_mandate_exit
+
+    mandate = {
+        "exposure_id": "equity:AAPL",
+        "status": "open",
+        "ticker": "AAPL",
+        "instrument_type": "equity",
+        "horizon": "next_close",
+        "planned_exit_at": "2026-07-14T19:50:00+00:00",
+        "thesis_valid_until": "2026-07-14T19:50:00+00:00",
+        "invalidation_triggered": False,
+    }
+
+    assert evaluate_mandate_exit(mandate, "2026-07-14T18:00:00+00:00").should_exit is False
+    expired = evaluate_mandate_exit(mandate, "2026-07-14T19:51:00+00:00")
+    assert expired.should_exit is True
+    assert expired.reason == "position mandate planned exit reached"
+    missing = evaluate_mandate_exit(None, "2026-07-14T18:00:00+00:00")
+    assert missing.should_exit is True
+    assert missing.reason == "missing position mandate; fail closed"
+
+
+class _AllocatorExecutionDiscovery:
+    def collect_seed_candidates(self, _now, _watchlist):
+        return []
+
+    def fetch_market_context(self, _tickers, _now):
+        return {}
+
+    def fetch_current_quote(self, symbol: str, **_kwargs):
+        from scripts.core.models import Quote
+
+        return Quote(
+            symbol,
+            100.00,
+            100.01,
+            100.005,
+            REGULAR_NOW,
+            source="allocator-test",
+            avg_daily_volume_usd=500_000_000,
+        )
+
+
+class _AllocatorNoOptions:
+    def fetch_contract_candidates(self, **_kwargs):
+        return [], {"candidate_count": 0}
+
+    def fetch_quotes(self, _option_ids):
+        return {}
+
+
+def test_open_execution_uses_saved_plan_without_llm_and_only_new_namespace(
+    paper_root: Path,
+) -> None:
+    from scripts.discovery.ai_instrument_allocator_pipeline import (
+        AiInstrumentAllocatorPipeline,
+    )
+
+    config = load_runtime_config(paper_root)
+    legacy_account_before = (paper_root / "state" / "paper_account.json").read_bytes()
+    tracker = UsageTracker()
+    pipeline = AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=_AllocatorExecutionDiscovery(),
+        news_adapter=_NoNews(),
+        option_data=_AllocatorNoOptions(),
+    )
+    pipeline.plans.save_plan(
+        {
+            "plan_id": "open-plan-aapl",
+            "strategy": "ai_instrument_allocator_v1",
+            "ticker": "AAPL",
+            "created_at": "2026-07-13T14:55:00+00:00",
+            "valid_until": "2026-07-13T15:05:00+00:00",
+            "status": "active",
+            "signal": _signed_signal(),
+            "snapshot": {"snapshot_id": "allocator-open-snapshot"},
+        }
+    )
+
+    result = pipeline.run_stage("open_execution", REGULAR_NOW)
+
+    assert result["event"] == "ai_instrument_allocator_stage_complete"
+    assert result["model_calls"] == 0
+    assert result["paper_orders_created"] == 1
+    assert result["executions"][0]["order"]["status"] == "filled"
+    assert result["live_order_tools_called"] is False
+    assert pipeline.broker.store.account().initial_cash == 10_000
+    assert set(pipeline.broker.store.positions()) == {"AAPL"}
+    assert pipeline.mandates.for_exposure("equity:AAPL")["status"] == "open"
+    assert (paper_root / "state" / "paper_account.json").read_bytes() == legacy_account_before
+
+
+@pytest.mark.parametrize(
+    ("stage", "now"),
+    [
+        ("overnight", "2026-07-14T00:00:00+00:00"),
+        ("premarket_update", "2026-07-13T12:00:00+00:00"),
+        ("preopen_revalidation", "2026-07-13T13:25:00+00:00"),
+    ],
+)
+def test_allocator_research_stages_never_create_orders(
+    paper_root: Path,
+    stage: str,
+    now: str,
+) -> None:
+    from scripts.discovery.ai_instrument_allocator_pipeline import (
+        AiInstrumentAllocatorPipeline,
+    )
+
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    pipeline = AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=_AllocatorExecutionDiscovery(),
+        news_adapter=_NoNews(),
+        option_data=_AllocatorNoOptions(),
+    )
+
+    result = pipeline.run_stage(stage, now)
+
+    assert result["paper_orders_created"] == 0
+    assert pipeline.broker.store.orders() == {}
+    assert pipeline.option_broker.store.orders() == {}
+
+
+def test_allocator_missing_mandate_exits_after_restart(paper_root: Path) -> None:
+    from scripts.discovery.ai_instrument_allocator_pipeline import (
+        AiInstrumentAllocatorPipeline,
+    )
+
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    pipeline = AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=_AllocatorExecutionDiscovery(),
+        news_adapter=_NoNews(),
+        option_data=_AllocatorNoOptions(),
+    )
+    pipeline.plans.save_plan(
+        {
+            "plan_id": "missing-mandate-plan",
+            "strategy": "ai_instrument_allocator_v1",
+            "ticker": "AAPL",
+            "created_at": "2026-07-13T14:55:00+00:00",
+            "valid_until": "2026-07-13T15:05:00+00:00",
+            "status": "active",
+            "signal": _signed_signal(),
+            "snapshot": {"snapshot_id": "missing-mandate-snapshot"},
+        }
+    )
+    assert pipeline.run_stage("open_execution", REGULAR_NOW)["paper_orders_created"] == 1
+    pipeline.mandates.store.write_json("position_mandates.json", {})
+
+    restarted = AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=_AllocatorExecutionDiscovery(),
+        news_adapter=_NoNews(),
+        option_data=_AllocatorNoOptions(),
+    )
+    result = restarted.monitor_only(REGULAR_NOW)
+
+    assert restarted.broker.store.positions() == {}
+    assert result["exits"][0]["reason"] == "missing position mandate; fail closed"

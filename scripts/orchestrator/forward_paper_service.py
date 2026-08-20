@@ -26,6 +26,9 @@ from scripts.core.config import assert_paper_mode, load_runtime_config
 from scripts.core.models import Quote, parse_ts, utc_now
 from scripts.discovery.catalyst_pipeline import CatalystDiscoveryPipeline
 from scripts.discovery.ai_gated_pipeline import AiGatedPaperPipeline
+from scripts.discovery.ai_instrument_allocator_pipeline import (
+    AiInstrumentAllocatorPipeline,
+)
 from scripts.discovery.catalyst_signal_store import CatalystSignalStore
 from scripts.exit.evaluate_exit import evaluate_position_exit
 from scripts.evaluation.outcome_labeler import CandidateOutcomeLabeler
@@ -133,6 +136,14 @@ class ForwardPaperService:
             news_adapter=self.news_adapter,
             option_data=self.option_data,
         )
+        self.ai_instrument_allocator_pipeline = AiInstrumentAllocatorPipeline(
+            self.root,
+            self.config,
+            provider,
+            tracker,
+            news_adapter=self.news_adapter,
+            option_data=self.option_data,
+        )
         self.catalyst_signals = CatalystSignalStore(self.root)
         self.outcome_labeler = CandidateOutcomeLabeler(
             self.root,
@@ -177,6 +188,7 @@ class ForwardPaperService:
             "ready_for_news_shadow": exa["ready"] and llm_ready,
             "ready_for_catalyst_discovery": discovery_data["ready"] and exa["ready"] and llm_ready,
             "ready_for_ai_gated_paper": discovery_data["ready"] and exa["ready"] and llm_ready,
+            "ready_for_ai_instrument_allocator_paper": discovery_data["ready"] and exa["ready"] and llm_ready,
             "ready_for_news_drift_shadow": discovery_data["ready"] and exa["ready"] and llm_ready,
             "ready_for_full_forward_evaluation": vibe_status["ready"] and quote_ready and discovery_data["ready"] and option_data["ready"] and exa["ready"] and llm_ready,
         }
@@ -604,6 +616,45 @@ class ForwardPaperService:
         )
         return result
 
+    def run_ai_instrument_allocator_stage(
+        self,
+        stage: str,
+        now: str | None = None,
+    ) -> dict[str, Any]:
+        result = self.ai_instrument_allocator_pipeline.run_stage(stage, now)
+        append_jsonl(
+            self.root,
+            "audit.jsonl",
+            {
+                "event": result.get("event"),
+                "strategy": "ai_instrument_allocator_v1",
+                "stage": stage,
+                "paper_orders_created": result.get("paper_orders_created", 0),
+                "paper_sleeve": result.get("paper_sleeve"),
+                "model_calls": result.get("model_calls", 0),
+                "live_order_tools_called": False,
+            },
+        )
+        return result
+
+    def run_ai_instrument_allocator_monitor(
+        self,
+        now: str | None = None,
+    ) -> dict[str, Any]:
+        result = self.ai_instrument_allocator_pipeline.monitor_only(now or utc_now())
+        append_jsonl(
+            self.root,
+            "audit.jsonl",
+            {
+                "event": result.get("event"),
+                "strategy": "ai_instrument_allocator_v1",
+                "paper_sleeve": "ai_instrument_allocator_v1",
+                "monitor_only": True,
+                "live_order_tools_called": False,
+            },
+        )
+        return result
+
     def run_news_drift_cycle(self, now: str | None = None) -> dict[str, Any]:
         return run_news_drift_once(self.root, now)
 
@@ -709,6 +760,10 @@ class ForwardPaperService:
             submitted = self.option_broker.submit_order(order, quote, execution_now)
             option_exits.append({"option_id": option_id, "status": submitted.status, "order": submitted.to_dict()})
         ai_gated = self.ai_gated_pipeline.monitor_only(decision_time, force_flatten=preclose)
+        ai_instrument_allocator = self.ai_instrument_allocator_pipeline.monitor_only(
+            decision_time,
+            force_flatten=False,
+        )
         current_account = self.broker.store.account()
         remaining_equity_positions = self.broker.store.positions()
         remaining_option_positions = self.option_broker.store.positions()
@@ -727,6 +782,7 @@ class ForwardPaperService:
             "equity_exits": equity_exits,
             "option_exits": option_exits,
             "ai_gated": ai_gated,
+            "ai_instrument_allocator": ai_instrument_allocator,
             "main_account_valuation": {
                 "cash": round(current_account.cash, 4),
                 "realized_pnl": round(current_account.realized_pnl, 4),
@@ -1513,6 +1569,26 @@ def serve(root: str | Path) -> None:
             resources={"ai_account"},
         )
 
+    def run_allocator_stage(stage: str) -> None:
+        run_worker(
+            f"allocator_{stage}",
+            ["--allocator-stage", stage],
+            "allocator_worker_timeout_seconds",
+            600,
+            resources={"allocator_account", "evidence_store"},
+        )
+
+    def run_allocator_monitor() -> None:
+        if not _runtime_job_allowed("ai_monitor", utc_now(), config, clock=market_clock):
+            return
+        run_worker(
+            "allocator_monitor",
+            ["--allocator-monitor-once"],
+            "allocator_monitor_worker_timeout_seconds",
+            90,
+            resources={"allocator_account"},
+        )
+
     def run_news_drift_cycle() -> None:
         if not _runtime_job_allowed("news_drift", utc_now(), config, clock=market_clock):
             return
@@ -1625,6 +1701,76 @@ def serve(root: str | Path) -> None:
             max_instances=1,
             coalesce=True,
             next_run_time=now + timedelta(seconds=60),
+        )
+    allocator_profile = config.get("strategies", {}).get(
+        "ai_instrument_allocator_v1",
+        {},
+    )
+    if allocator_profile.get("enabled", False):
+        scheduler.add_job(
+            lambda: run_allocator_stage("overnight"),
+            "cron",
+            day_of_week="mon-fri",
+            hour=20,
+            minute=0,
+            timezone="America/New_York",
+            id="allocator-overnight-research",
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.add_job(
+            lambda: run_allocator_stage("premarket_update"),
+            "cron",
+            day_of_week="mon-fri",
+            hour=8,
+            minute=0,
+            timezone="America/New_York",
+            id="allocator-premarket-update",
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.add_job(
+            lambda: run_allocator_stage("preopen_revalidation"),
+            "cron",
+            day_of_week="mon-fri",
+            hour=9,
+            minute=25,
+            timezone="America/New_York",
+            id="allocator-preopen-revalidation",
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.add_job(
+            lambda: run_allocator_stage("open_execution"),
+            "cron",
+            day_of_week="mon-fri",
+            hour=9,
+            minute=32,
+            timezone="America/New_York",
+            id="allocator-open-execution",
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.add_job(
+            lambda: run_allocator_stage("intraday"),
+            "interval",
+            seconds=int(allocator_profile.get("intraday_cycle_seconds", 3600)),
+            id="allocator-intraday-research",
+            max_instances=1,
+            coalesce=True,
+            next_run_time=now
+            + timedelta(
+                seconds=int(runtime.get("allocator_intraday_start_offset_seconds", 180))
+            ),
+        )
+        scheduler.add_job(
+            run_allocator_monitor,
+            "interval",
+            seconds=int(runtime.get("allocator_monitor_cycle_seconds", 300)),
+            id="allocator-position-monitor",
+            max_instances=1,
+            coalesce=True,
+            next_run_time=now + timedelta(seconds=75),
         )
     news_drift_profile = config.get("strategies", {}).get("llm_news_drift_v1", {})
     if news_drift_profile.get("enabled", False):
@@ -1774,6 +1920,17 @@ def main() -> None:
     parser.add_argument("--catalyst-once", action="store_true")
     parser.add_argument("--ai-gated-once", action="store_true")
     parser.add_argument("--ai-monitor-once", action="store_true")
+    parser.add_argument(
+        "--allocator-stage",
+        choices=[
+            "overnight",
+            "premarket_update",
+            "preopen_revalidation",
+            "open_execution",
+            "intraday",
+        ],
+    )
+    parser.add_argument("--allocator-monitor-once", action="store_true")
     parser.add_argument("--news-drift-once", action="store_true")
     parser.add_argument("--research-once", action="store_true")
     parser.add_argument("--eod-once", action="store_true")
@@ -1786,6 +1943,8 @@ def main() -> None:
             args.catalyst_once,
             args.ai_gated_once,
             args.ai_monitor_once,
+            args.allocator_stage,
+            args.allocator_monitor_once,
             args.news_drift_once,
             args.research_once,
             args.eod_once,
@@ -1813,6 +1972,8 @@ def main() -> None:
             args.catalyst_once,
             args.ai_gated_once,
             args.ai_monitor_once,
+            args.allocator_stage,
+            args.allocator_monitor_once,
             args.news_drift_once,
             args.eod_once,
             args.once,
@@ -1838,6 +1999,13 @@ def main() -> None:
                 result = service.run_ai_gated_cycle(args.now)
             elif args.ai_monitor_once:
                 result = service.run_ai_gated_monitor(args.now)
+            elif args.allocator_stage:
+                result = service.run_ai_instrument_allocator_stage(
+                    args.allocator_stage,
+                    args.now,
+                )
+            elif args.allocator_monitor_once:
+                result = service.run_ai_instrument_allocator_monitor(args.now)
             elif args.research_once:
                 result = service.run_hourly_research(args.now)
             elif args.eod_once:

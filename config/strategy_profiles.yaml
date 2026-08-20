@@ -150,6 +150,7 @@ ai_instrument_allocator_v1:
   ticker_cooldown_minutes: 120
   event_cooldown_hours: 24
   max_parallel_exa_searches: 3
+  intraday_cycle_seconds: 3600
   max_entry_validity_seconds: 300
   minimum_direction_mass: 0.55
   minimum_direction_margin: 0.15

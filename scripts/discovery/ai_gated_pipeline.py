@@ -69,8 +69,24 @@ class AiGatedPaperPipeline:
         self.tracker = tracker
         self.evidence = EvidenceSnapshotStore(self.root)
         self.signals = CatalystSignalStore(self.root)
-        self.broker = PaperBroker(self.root, config, namespace=self.namespace)
-        self.option_broker = OptionPaperBroker(self.root, config, namespace=self.namespace)
+        initial_cash = float(
+            self.profile.get(
+                "paper_initial_cash_usd",
+                config.get("paper", {}).get("paper_initial_cash_usd", 2_000),
+            )
+        )
+        self.broker = PaperBroker(
+            self.root,
+            config,
+            namespace=self.namespace,
+            initial_cash=initial_cash,
+        )
+        self.option_broker = OptionPaperBroker(
+            self.root,
+            config,
+            namespace=self.namespace,
+            initial_cash=initial_cash,
+        )
         self.clock = UsEquityMarketClock()
 
     def run(self, now: str | None = None) -> dict[str, Any]:
