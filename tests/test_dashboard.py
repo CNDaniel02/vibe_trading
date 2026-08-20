@@ -178,6 +178,16 @@ def test_dashboard_page_collapses_completed_order_history_by_default():
     assert '<details class="history-details" open>' not in _BEGINNER_PAGE
 
 
+def test_dashboard_page_keeps_unknown_service_status_neutral():
+    assert "function serviceStatusKind(status)" in _BEGINNER_PAGE
+    assert 'if(status==="unknown")return ""' in _BEGINNER_PAGE
+
+
+def test_dashboard_page_does_not_expose_decorative_arrows_to_accessibility_tree():
+    assert 'content:"→"' not in _BEGINNER_PAGE
+    assert 'content:"↓"' not in _BEGINNER_PAGE
+
+
 def test_dashboard_ignores_client_disconnect_during_response(paper_root):
     class DisconnectedWriter:
         def write(self, _body):

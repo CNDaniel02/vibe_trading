@@ -1477,7 +1477,7 @@ th,td{padding:10px 12px;text-align:left;vertical-align:top;border-bottom:1px sol
 tbody tr:last-child td{border-bottom:0}.num{font-variant-numeric:tabular-nums;white-space:nowrap}.muted{color:var(--muted)}.small{font-size:12px}
 .reason{max-width:540px;color:var(--muted);overflow-wrap:anywhere}
 .pipeline{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:0;padding:14px 16px}
-.pipeline-step{position:relative;padding:8px 20px 8px 0;min-width:0}.pipeline-step:not(:last-child)::after{content:"→";position:absolute;right:6px;top:9px;color:var(--line-strong);font-weight:700}
+.pipeline-step{padding:8px 12px;min-width:0;border-right:1px solid var(--line)}.pipeline-step:last-child{border-right:0}
 .pipeline-step strong{display:block;font-size:13px}.pipeline-step span{display:block;color:var(--muted);font-size:11px;margin-top:2px}
 .stat-strip{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border-bottom:1px solid var(--line)}
 .stat{padding:12px 14px;border-right:1px solid var(--line);min-width:0}.stat:last-child{border-right:0}.stat-label{font-size:11px;color:var(--muted)}.stat-value{font-size:18px;font-weight:750;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
@@ -1491,7 +1491,7 @@ tbody tr:last-child td{border-bottom:0}.num{font-variant-numeric:tabular-nums;wh
 .error-box{background:var(--red-soft);border:1px solid #e9bdc2;border-radius:6px;padding:16px;color:var(--red)}
 @media(max-width:940px){
   .activity{grid-template-columns:1fr}.account-grid{grid-template-columns:1fr}
-  .topbar-inner{align-items:flex-start}.runtime-strip{gap:10px 16px}.pipeline{grid-template-columns:1fr}.pipeline-step{padding:7px 0 7px 20px}.pipeline-step:not(:last-child)::after{content:"↓";left:2px;right:auto;top:8px}.stat-strip{grid-template-columns:repeat(2,minmax(0,1fr))}.stat:nth-child(2){border-right:0}.stat:nth-child(-n+2){border-bottom:1px solid var(--line)}
+  .topbar-inner{align-items:flex-start}.runtime-strip{gap:10px 16px}.pipeline{grid-template-columns:1fr}.pipeline-step{padding:8px 0;border-right:0;border-bottom:1px solid var(--line)}.pipeline-step:last-child{border-bottom:0}.stat-strip{grid-template-columns:repeat(2,minmax(0,1fr))}.stat:nth-child(2){border-right:0}.stat:nth-child(-n+2){border-bottom:1px solid var(--line)}
 }
 @media(max-width:680px){
   .topbar-inner,.paper-boundary-inner{padding-left:14px;padding-right:14px;align-items:flex-start;flex-direction:column;gap:10px}
@@ -1556,11 +1556,17 @@ const openOrderStatuses=new Set(["created","submitted_to_paper_broker","open","p
 function statusBadge(label,kind=""){
   return `<span class="status-badge ${kind}">${esc(label)}</span>`;
 }
+function serviceStatusKind(status){
+  if(status==="unknown")return "";
+  if(status==="ok")return "good";
+  if(status==="degraded")return "warn";
+  return ["stale","stopped"].includes(status)?"bad":"";
+}
 function setDot(id,kind){document.getElementById(id).className="dot "+kind}
 function currentAlerts(state){
   const alerts=[];
   const heartbeat=state.heartbeat||{},status=heartbeat.effective_status||"unknown";
-  if(status!=="ok")alerts.push({kind:"bad",text:`主服务${serviceLabels[status]||status}`});
+  if(status!=="ok")alerts.push({kind:serviceStatusKind(status),text:`主服务${serviceLabels[status]||status}`});
   if(!((state.mode||{}).paper) || (state.mode||{}).live_trading)alerts.push({kind:"bad",text:"Paper-only 安全边界不符合预期"});
   const jobs=(((heartbeat.payload||{}).latest_jobs)||{});
   Object.entries(jobs).forEach(([name,job])=>{
@@ -1573,7 +1579,7 @@ function renderHeader(state){
   const b=state.beginner_summary||{},service=b.service||{},heartbeat=state.heartbeat||{};
   const status=service.status||heartbeat.effective_status||"unknown";
   document.getElementById("service-value").textContent=serviceLabels[status]||status;
-  setDot("service-dot",status==="ok"?"good":status==="degraded"?"warn":"bad");
+  setDot("service-dot",serviceStatusKind(status));
   const session=service.market_session||"unknown";
   document.getElementById("market-value").textContent=marketLabels[session]||"未识别";
   setDot("market-dot",session==="regular"?"good":"info");
@@ -1585,7 +1591,7 @@ function renderHeader(state){
 function systemActivity(state){
   const b=state.beginner_summary||{},service=b.service||{},account=b.account||{};
   const status=service.status||"unknown",positions=number(account.open_equity_positions)+number(account.open_option_positions);
-  if(status!=="ok")return {title:"主服务当前没有正常推进",copy:"系统保持 fail-closed，不会使用不完整数据创建模拟订单。",kind:"bad"};
+  if(status!=="ok")return {title:"主服务当前没有正常推进",copy:"系统保持 fail-closed，不会使用不完整数据创建模拟订单。",kind:serviceStatusKind(status)};
   if(positions>0)return {title:`正在监控 ${positions} 个持仓`,copy:"退出模块会继续检查价格、盈亏、持有期限和收盘前平仓规则。",kind:"info"};
   if(service.market_session==="regular")return {title:"正在扫描机会，目前没有持仓",copy:"系统会先筛选候选，再经过新闻、模型判断和确定性风控；没有通过时不会强行交易。",kind:"good"};
   return {title:"市场当前不在正常交易时段",copy:"系统会更新研究和状态，但只在允许的正常交易时段模拟开仓。",kind:"info"};
