@@ -252,7 +252,7 @@ def build_same_instrument_counterfactual(
             nav_usd * 0.01 / unit_risk if unit_risk > 0 else 0,
         )
         max_quantity = _fractional_floor(max_quantity, 0.001)
-        risk_usd = float(selected.get("risk_usd", 0))
+        risk_usd = max_quantity * unit_risk
         affordable = max_quantity > 0
         reason = None if affordable else "same equity instrument has no deterministic capacity"
     else:

@@ -1609,7 +1609,7 @@ def serve(root: str | Path) -> None:
             ["--eod-once"],
             "eod_worker_timeout_seconds",
             90,
-            resources={"main_account", "ai_account"},
+            resources={"main_account", "ai_account", "allocator_account"},
         )
 
     def run_evaluation() -> None:

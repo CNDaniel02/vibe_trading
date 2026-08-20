@@ -30,6 +30,19 @@ is rebuilt from fresh stock and option quotes and receives a maximum 300-second
 authorization window. Exa and Robinhood are read-only observations. No live
 Robinhood order tool is present in the pipeline.
 
+`entry_now=false` in an after-hours or premarket model response means "do not
+order during research". It does not reject an otherwise valid saved conditional
+plan at 09:32. This exception applies only to plans whose recorded source stage
+is `overnight`, `premarket_update`, or `preopen_revalidation`; regular-session
+fast proposals still require `entry_now=true`. `open_execution` is accepted only
+from 09:32 through 09:37 ET, so a late manual invocation cannot execute a stale
+opening plan. A newer completed analysis for
+the same ticker supersedes the older active plan. A newer fail-closed or
+no-trade analysis invalidates the older plan. Every event actually sent to the
+successful ranker enters event/ticker cooldown even when it is outside the
+deep-analysis top set or the final decision is no-trade. A failed ranking may be
+retried but cannot create a plan or order.
+
 ## Model contract
 
 The ranker may rank only deterministic candidates. News and Challenge may cite

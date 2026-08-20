@@ -759,6 +759,8 @@ def test_forward_cycle_falls_back_to_alpaca_and_records_stages(
 
 
 def test_forward_service_handles_keyboard_interrupt_and_releases_lock(paper_root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    worker_calls = []
+
     class FakeService:
         integration_config = {"runtime": {"forward_cycle_seconds": 300}}
 
@@ -779,6 +781,12 @@ def test_forward_service_handles_keyboard_interrupt_and_releases_lock(paper_root
 
         def start(self):
             self.running = True
+            eod = next(
+                callback
+                for callback, _args, kwargs in self.jobs
+                if kwargs.get("id") == "eod-guard"
+            )
+            eod()
             raise KeyboardInterrupt
 
         def shutdown(self, *, wait):
@@ -799,17 +807,48 @@ def test_forward_service_handles_keyboard_interrupt_and_releases_lock(paper_root
         def release(self):
             self.released = True
 
+    class FakeRunner:
+        def __init__(self, _root):
+            pass
+
+        def run(self, job_name, _args, *, resources, **_kwargs):
+            worker_calls.append((job_name, set(resources)))
+            return SimpleNamespace(
+                output={},
+                status="completed",
+                elapsed_seconds=0.0,
+                error=None,
+                to_dict=lambda: {"status": "completed"},
+            )
+
+        @staticmethod
+        def terminate_all():
+            return None
+
     monkeypatch.setattr(forward_service_module, "ForwardPaperService", lambda root: FakeService())
     monkeypatch.setattr(forward_service_module, "BlockingScheduler", FakeScheduler)
     monkeypatch.setattr(forward_service_module, "ProcessLock", FakeLock)
+    monkeypatch.setattr(forward_service_module, "SubprocessJobRunner", FakeRunner)
+    monkeypatch.setattr(forward_service_module, "_runtime_job_allowed", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(forward_service_module.signal, "signal", lambda *_: forward_service_module.signal.SIG_DFL)
 
     forward_service_module.serve(paper_root)
 
     events = [json.loads(line)["event"] for line in capsys.readouterr().out.splitlines()]
-    assert events == ["forward_service_started", "forward_service_stop_requested", "forward_service_stopped"]
+    assert events == [
+        "forward_service_started",
+        "supervised_worker_result",
+        "forward_service_stop_requested",
+        "forward_service_stopped",
+    ]
     assert FakeScheduler.instance is not None and not FakeScheduler.instance.running
     assert FakeLock.instance is not None and FakeLock.instance.released
+    assert worker_calls == [
+        (
+            "eod_guard",
+            {"main_account", "ai_account", "allocator_account"},
+        )
+    ]
 
 
 class _ReplayFixtureAdapter:

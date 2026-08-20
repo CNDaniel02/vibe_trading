@@ -269,6 +269,13 @@ and magnitude fields; raw values remain `uncalibrated` and never produce a
 displayed probability EV. Overnight Challenge and Decision may use thinking;
 fast stages do not. At 09:32 the system makes no model call: it reuses an active
 conditional plan, refreshes quotes, reprices instruments, and reruns risk.
+An after-hours or premarket signal must set `entry_now=false`; that field blocks
+an order during research but does not cancel the saved conditional plan. Only a
+plan created by an approved non-regular research stage can reach 09:32
+revalidation, and the configured execution window closes at 09:37 ET. Newer
+analysis for the same ticker supersedes the older plan, and
+no-trade or failed revalidation invalidates it. Intraday proposals still require
+`entry_now=true`.
 
 The news-drift lane does not wait for a technical buy candidate. DeepSeek sees
 only headline and source fields; ticker validation and all price, liquidity,

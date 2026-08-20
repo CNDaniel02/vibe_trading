@@ -90,6 +90,17 @@ An overnight or premarket plan can never create an order. Every executable
 entry receives a fresh quote and a deterministic authorization window no longer
 than 300 seconds.
 
+The model must set `entry_now=false` outside regular hours. That value prevents
+research-time execution; it does not discard a saved conditional plan. At the
+open, only a plan carrying an `overnight`, `premarket_update`, or
+`preopen_revalidation` source stage may proceed to fresh executable economics
+and deterministic risk. The open-execution window is 09:32 through 09:37 ET;
+late calls and plans originating from `intraday` are rejected. New completed analysis for the same ticker supersedes
+the older plan, while no-trade or fail-closed analysis invalidates it. Events
+included in a successful ranking enter cooldown even when they are outside the
+deep-analysis top set or the final action is no-trade. Failed ranking can be
+retried but cannot create a plan or order.
+
 ## 5. Model Output Contract
 
 The core prediction is one horizon and one complete set of mutually exclusive
@@ -285,4 +296,3 @@ Required tests cover:
 - `short_equity_counterfactual` remains shadow-only and separate from put PnL
 - append-only audit and exact cost identity
 - paper mode never exposes or calls Robinhood write tools
-

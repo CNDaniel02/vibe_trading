@@ -425,6 +425,12 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
         except (ProviderError, ValueError) as exc:
             skipped.append({"stage": "ranking", "reason": str(exc)})
             return {"plans": plans, "executions": executions, "skipped": skipped}
+        for item in researched:
+            self.evidence.mark_researched(
+                f"allocator:{item['ticker']}",
+                item["events"],
+                decision_time,
+            )
         ranked = self._validated_ranking(ranking, researched)
         for rank in ranked[: int(self.profile.get("top_deep_research_candidates", 3))]:
             item = next(value for value in researched if value["ticker"] == rank["ticker"])
@@ -443,7 +449,19 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                 f"strategy_sleeves/{self.namespace}/decisions.jsonl",
                 record,
             )
-            if analysis.get("fail_closed") or signal.get("action") != "propose_trade":
+            actionable = not analysis.get("fail_closed") and signal.get(
+                "action"
+            ) == "propose_trade"
+            for existing in self.plans.active_plans(snapshot["decision_time"]):
+                if existing["ticker"] != item["ticker"]:
+                    continue
+                self.plans.set_plan_status(
+                    str(existing["plan_id"]),
+                    "superseded" if actionable else "invalidated",
+                    reason=f"replaced by newer {stage} analysis",
+                    now=snapshot["decision_time"],
+                )
+            if not actionable:
                 skipped.append(
                     {"ticker": item["ticker"], "reason": signal.get("no_trade_reason")}
                 )
@@ -464,11 +482,6 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                 }
             )
             plans.append(plan)
-            self.evidence.mark_researched(
-                f"allocator:{item['ticker']}",
-                item["events"],
-                snapshot["decision_time"],
-            )
             if stage == "intraday":
                 executions.append(self._execute_plan(plan, decision_time, stage=stage))
         return {"plans": plans, "executions": executions, "skipped": skipped}
@@ -484,7 +497,14 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
             return {"status": "no_trade", "reason": "research stage cannot create orders", "order": None}
         ticker = str(plan["ticker"]).upper()
         signal = dict(plan["signal"])
-        if not signal.get("entry_now", False):
+        conditional_plan = plan.get("stage") in self.RESEARCH_STAGES - {"intraday"}
+        if stage == "open_execution" and not conditional_plan:
+            return {
+                "status": "no_trade",
+                "reason": "plan source is not eligible for open execution",
+                "order": None,
+            }
+        if stage == "intraday" and not signal.get("entry_now", False):
             return {"status": "no_trade", "reason": "model did not authorize entry", "order": None}
         try:
             quote = self.discovery.fetch_current_quote(ticker)
@@ -682,8 +702,20 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
         }
 
     def _stage_session_allowed(self, stage: str, now: str) -> bool:
-        session = self.clock.status(now).market_session
-        if stage in {"open_execution", "intraday"}:
+        clock = self.clock.status(now)
+        session = clock.market_session
+        if stage == "open_execution":
+            if session != "regular" or not clock.open_time:
+                return False
+            minutes_after_open = (
+                parse_ts(now) - parse_ts(clock.open_time)
+            ).total_seconds() / 60
+            start = float(
+                self.profile.get("open_execution_start_minutes_after_open", 2)
+            )
+            window = float(self.profile.get("open_execution_window_minutes", 5))
+            return start <= minutes_after_open <= start + window
+        if stage == "intraday":
             return session == "regular"
         if stage in {"premarket_update", "preopen_revalidation"}:
             return session == "pre_market"

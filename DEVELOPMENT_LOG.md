@@ -21,10 +21,18 @@
 - 新增按 horizon 隔离、label maturity 安全的 expanding walk-forward split，主要指标为 out-of-sample multiclass Brier score 和 log loss；ECE/reliability curve 仅作诊断。当前不拟合 calibrator，不显示 probability EV，每条记录保留 calibration version、training cutoff、sample size 和 horizon。
 - 绩效增加 round-trip 成本恒等式：midpoint gross PnL 减 spread、slippage/tick 和 commission 必须等于 executable net PnL。dashboard 新增独立 `$10,000` allocator、同工具 `$2,000` 对照、看跌影子基准、mandate 和未校准概率边界，并对 `null`/损坏状态降级显示而不返回 HTTP 500。
 - 正式规范见 `references/ai_instrument_allocator_policy.md`；README、SKILL、options/news policy、JSON Schema 和中文 Mermaid 架构图已同步。
-- 最终 `compileall` 通过，pytest 为 `217 passed`，仅有 4 条上游 `exchange_calendars` deprecation warning。只读 healthcheck/readiness 确认 Robinhood 54-tool manifest、期权数据、Exa、DeepSeek、Alpaca fallback 和 Vibe 均 ready，`ready_for_ai_instrument_allocator_paper=true`、`ready_for_full_forward_evaluation=true`、`paper_mode=true`、`live_trading=false`。
-- 三套离线 dry run 均为 `used_network=false`、`used_live_order_tools=false`；allocator 的 overnight、premarket、pre-open、09:32 execution、monitor 和 restart 临时目录验证为 6 项通过。执行时钟会推进到本轮最晚的股票或期权报价观察时间，新增回归确认晚到 5 秒的期权报价不会再被误拒为 future quote。Playwright 在 1440x1000 和 390x844 下确认无页面横向溢出、0 console error，并修复浏览器取消刷新时的 `ConnectionAbortedError` 终端 traceback。`graphify update .` 完成为 2,434 nodes / 6,380 edges。
+- 最终 `compileall` 通过，pytest 为 `225 passed`，仅有 4 条上游 `exchange_calendars` deprecation warning。只读 healthcheck/readiness 确认 Robinhood 54-tool manifest、期权数据、Exa、DeepSeek、Alpaca fallback 和 Vibe 均 ready，`ready_for_ai_instrument_allocator_paper=true`、`ready_for_full_forward_evaluation=true`、`paper_mode=true`、`live_trading=false`。
+- 三套离线 dry run 均为 `used_network=false`、`used_live_order_tools=false`；allocator 的 overnight、premarket、pre-open、09:32 execution、monitor 和 restart 临时目录验证为 6 项通过。执行时钟会推进到本轮最晚的股票或期权报价观察时间，新增回归确认晚到 5 秒的期权报价不会再被误拒为 future quote。Playwright 在 1440x1000 和 390x844 下确认无页面横向溢出、0 console error，并修复浏览器取消刷新时的 `ConnectionAbortedError` 终端 traceback。最终 `graphify update .` 完成为 2,451 nodes / 6,487 edges。
 - 测试后没有保留 forward service 或 dashboard 进程。连续 scheduler 配置只有在用户从自己的终端重新启动服务后才会生效。
 - 审计发现旧 `--readiness` 会因构造完整 service 而提前初始化空白 allocator state。本次运行已在 19:17 生成新的 `$10,000` 空白 namespace；它没有订单、成交或 PnL，且没有触碰旧账本，因此予以保留。CLI 已改为直接调用无状态 healthcheck，文件哈希验证后续 readiness 前后 state 完全一致。
+
+### 完成度复核与补充修复
+
+- 复核发现夜间 Prompt 正确要求 `entry_now=false`，但 09:32 执行路径曾把这个字段再次当作即时拒绝条件，导致真实 overnight conditional plan 永远不能成交。现在只有 `overnight`、`premarket_update` 或 `preopen_revalidation` 保存的 active plan 可在 09:32-09:37 ET 的 `open_execution` 窗口绕过“研究当下不可下单”的语义；窗口外调用和遗留 intraday plan 均拒绝。intraday 仍必须由模型明确给出 `entry_now=true`。开盘路径仍为 0 次 LLM 调用，并重新获取 quote、重算股票/期权经济性、生成最多 300 秒的授权记录并经过最终 deterministic risk veto。
+- 盘前或盘中同 ticker 的新分析现在会把更早 active plan 标记为 `superseded`；若新分析 fail closed 或 no-trade，则旧计划标记为 `invalidated`。因此新出现的反向证据不会与旧方向同时排队，也不会在 09:32 先执行过时计划。
+- 成功发送给 ranker 的全部候选事件都会写入 ticker/event cooldown，不限于进入 top-3 deep analysis 的候选；深度分析最终形成 plan 或 no-trade 都不会改变这项登记。同一 event fingerprint 在 cooldown 内不会每小时重复消耗 DeepSeek 调用；不可变 evidence snapshot 和 no-trade 决策日志仍保留。ranking 本身失败时允许后续重试，且仍不会形成计划或订单。
+- `$2,000` 股票 counterfactual 的 `proposed_risk_usd` 和 `risk_pct_of_nav` 改为按该账户实际可买的缩放后股数计算，不再错误复用 `$10,000` sleeve 的整笔风险。期权仍以同一离散 contract 的一张实际 premium 风险判断可负担性。
+- EOD guard 会调用 allocator monitor，因此 supervisor 的 EOD worker 资源集合补上 `allocator_account`；它现在不会与独立 allocator stage/monitor 并发写同一账户。完整 mock 流程覆盖 overnight、premarket、pre-open、open execution、monitor 和 restart，且确认 research-only 阶段 0 paper order、09:32 为 0 模型调用、所有结果 `live_order_tools_called=false`。
 
 ## 2026-08-16 (America/Los_Angeles) - 亏损根因修复、DeepSeek V4 Flash 迁移与方向性评估
 

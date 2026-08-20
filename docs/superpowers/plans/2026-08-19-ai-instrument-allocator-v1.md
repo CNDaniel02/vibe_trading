@@ -1,6 +1,6 @@
 # AI Instrument Allocator V1 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Add a $10,000 isolated AI paper sleeve that emits uncalibrated signed-return buckets, deterministically compares equity and long options by conservative repricing, and manages horizon-aware positions without altering legacy ledgers.
 
@@ -39,11 +39,11 @@
 - `OptionPaperBroker(root, config, *, namespace=None, initial_cash=None)`
 - profile field `new_entries_enabled: false`
 
-- [ ] Write tests proving the default profiles freeze new entries, old monitor/open-order processing remains callable, an existing account is not reset, and a fresh explicit namespace starts at $10,000.
-- [ ] Run the focused tests and verify failures show missing freeze/cash behavior.
-- [ ] Add explicit initial-cash constructor parameters without changing existing defaults; add optional strategy, planned-stop, and horizon metadata to order models with backward-compatible defaults.
-- [ ] Add the entry-frozen checks before any new discovery/network/order path while leaving monitors and exits enabled.
-- [ ] Run focused tests and commit `feat: isolate allocator cash and freeze legacy entries`.
+- [x] Write tests proving the default profiles freeze new entries, old monitor/open-order processing remains callable, an existing account is not reset, and a fresh explicit namespace starts at $10,000.
+- [x] Run the focused tests and verify failures show missing freeze/cash behavior.
+- [x] Add explicit initial-cash constructor parameters without changing existing defaults; add optional strategy, planned-stop, and horizon metadata to order models with backward-compatible defaults.
+- [x] Add the entry-frozen checks before any new discovery/network/order path while leaving monitors and exits enabled.
+- [x] Run focused tests and commit `feat: isolate allocator cash and freeze legacy entries`.
 
 ### Task 2: Signed Return Signal Contract
 
@@ -67,11 +67,11 @@
 - `AiInstrumentAllocatorTeam.rank(...) -> dict`
 - `AiInstrumentAllocatorTeam.analyze(snapshot, ranking, *, stage) -> dict`
 
-- [ ] Write failing tests for seven required buckets, exact sum-to-one tolerance, allowed horizons, mandatory `uncalibrated` status, Python-derived direction/magnitude, challenge veto, and no model-selected instrument.
-- [ ] Run focused tests and verify schema/implementation failures.
-- [ ] Add strict schemas, deterministic validation/derivation, prompts, provider-neutral team, and deterministic mock responses.
-- [ ] Configure overnight Challenge/Decision agent names with thinking enabled and every fast-stage agent with thinking disabled.
-- [ ] Export JSON schemas, rerun focused tests, and commit `feat: add signed return AI signal contract`.
+- [x] Write failing tests for seven required buckets, exact sum-to-one tolerance, allowed horizons, mandatory `uncalibrated` status, Python-derived direction/magnitude, challenge veto, and no model-selected instrument.
+- [x] Run focused tests and verify schema/implementation failures.
+- [x] Add strict schemas, deterministic validation/derivation, prompts, provider-neutral team, and deterministic mock responses.
+- [x] Configure overnight Challenge/Decision agent names with thinking enabled and every fast-stage agent with thinking disabled.
+- [x] Export JSON schemas, rerun focused tests, and commit `feat: add signed return AI signal contract`.
 
 ### Task 3: Option Candidate Set and Scenario Repricing
 
@@ -86,11 +86,11 @@
 - `fetch_contract_candidates(..., min_dte, target_dte, max_dte, max_premium_usd) -> (list[tuple[OptionContract, OptionQuote]], dict)`
 - `reprice_option_scenarios(contract, quote, *, spot, horizon_days, move_pct, iv_shifts, costs) -> dict`
 
-- [ ] Write failing tests proving the adapter returns bounded candidates across DTEs, rejects spread above 2%, marks spread above 1.5% non-preferred, and repricing changes with spot, elapsed time, and IV.
-- [ ] Run tests and confirm missing API/repricing failures.
-- [ ] Add bounded multi-expiration retrieval while preserving existing best-contract APIs for legacy callers.
-- [ ] Add midpoint-anchored Black-Scholes scenario repricing with conservative IV contraction, unchanged-IV, and expansion cases plus Delta/Gamma/Theta/Vega diagnostics.
-- [ ] Run tests and commit `feat: add conservative option scenario repricing`.
+- [x] Write failing tests proving the adapter returns bounded candidates across DTEs, rejects spread above 2%, marks spread above 1.5% non-preferred, and repricing changes with spot, elapsed time, and IV.
+- [x] Run tests and confirm missing API/repricing failures.
+- [x] Add bounded multi-expiration retrieval while preserving existing best-contract APIs for legacy callers.
+- [x] Add midpoint-anchored Black-Scholes scenario repricing with conservative IV contraction, unchanged-IV, and expansion cases plus Delta/Gamma/Theta/Vega diagnostics.
+- [x] Run tests and commit `feat: add conservative option scenario repricing`.
 
 ### Task 4: Deterministic Instrument Allocator and Counterfactuals
 
@@ -106,11 +106,11 @@
 - `build_same_instrument_counterfactual(allocation, *, nav_usd=2000) -> dict`
 - `build_short_equity_counterfactual(signal, quote, costs) -> dict | None`
 
-- [ ] Write failing tests for bullish equity/call comparison, bearish put-only execution, ambiguous no-trade, conservative hurdle rejection, null probability EV, exact same-instrument $2,000 affordability, and separate short benchmark.
-- [ ] Run tests and verify missing allocator behavior.
-- [ ] Implement deterministic scenario comparison, break-even calculations, quantity sizing, and explicit `probability_ev_available: false`.
-- [ ] Implement the no-reselection counterfactual and shadow-only short benchmark.
-- [ ] Run tests and commit `feat: add deterministic equity option allocator`.
+- [x] Write failing tests for bullish equity/call comparison, bearish put-only execution, ambiguous no-trade, conservative hurdle rejection, null probability EV, exact same-instrument $2,000 affordability, and separate short benchmark.
+- [x] Run tests and verify missing allocator behavior.
+- [x] Implement deterministic scenario comparison, break-even calculations, quantity sizing, and explicit `probability_ev_available: false`.
+- [x] Implement the no-reselection counterfactual and shadow-only short benchmark.
+- [x] Run tests and commit `feat: add deterministic equity option allocator`.
 
 ### Task 5: Shared Risk and Underlying Exposure Controls
 
@@ -130,11 +130,11 @@
 - equity fields `max_planned_loss_pct_of_equity: 0.01` and `require_planned_stop_for_strategies`
 - option fields `max_order_risk_pct_of_equity: 0.03`, `max_line_deployed_pct_of_equity: 0.08`, and `max_open_positions: 3`
 
-- [ ] Write failing tests for equity 25% notional, 1% planned-stop NAV loss, 3% option entry risk, 8% option aggregate risk, three total positions, one exposure per underlying, and same-session re-entry.
-- [ ] Run tests and verify each intended rejection is absent.
-- [ ] Add shared exposure counting and cross-line underlying checks to both final broker risk gates.
-- [ ] Add planned-stop metadata validation for the new strategy only and update exact risk configuration.
-- [ ] Run all risk tests and commit `feat: enforce allocator portfolio risk controls`.
+- [x] Write failing tests for equity 25% notional, 1% planned-stop NAV loss, 3% option entry risk, 8% option aggregate risk, three total positions, one exposure per underlying, and same-session re-entry.
+- [x] Run tests and verify each intended rejection is absent.
+- [x] Add shared exposure counting and cross-line underlying checks to both final broker risk gates.
+- [x] Add planned-stop metadata validation for the new strategy only and update exact risk configuration.
+- [x] Run all risk tests and commit `feat: enforce allocator portfolio risk controls`.
 
 ### Task 6: Conditional Plans, Position Mandates, and New Pipeline
 
@@ -156,13 +156,13 @@
 - `AiInstrumentAllocatorPipeline.run_stage(stage, now=None) -> dict`
 - `AiInstrumentAllocatorPipeline.monitor_only(now=None, *, force_flatten=False) -> dict`
 
-- [ ] Write failing tests that overnight/08:00/09:25 stages create no orders, 09:32 uses fresh quotes without LLM, intraday uses fast agents, and all state stays in the new namespace.
-- [ ] Write failing restart tests for intraday, next-close, 2-5-day, missing-mandate, stop-loss, thesis-invalidation, and one-underlying exits.
-- [ ] Run tests and confirm missing store/pipeline/exit behavior.
-- [ ] Implement restart-safe plan and mandate stores with append-only events.
-- [ ] Implement the new pipeline by reusing existing discovery/evidence methods, removing direction quotas, invoking the deterministic allocator, registering broker orders/mandates, and reconciling fills.
-- [ ] Wire separate overnight, premarket update, pre-open revalidation, open execution, bounded intraday, monitor, and EOD jobs. Keep legacy monitors active even while entries are frozen.
-- [ ] Run focused tests and commit `feat: run horizon aware allocator paper sleeve`.
+- [x] Write failing tests that overnight/08:00/09:25 stages create no orders, 09:32 uses fresh quotes without LLM, intraday uses fast agents, and all state stays in the new namespace.
+- [x] Write failing restart tests for intraday, next-close, 2-5-day, missing-mandate, stop-loss, thesis-invalidation, and one-underlying exits.
+- [x] Run tests and confirm missing store/pipeline/exit behavior.
+- [x] Implement restart-safe plan and mandate stores with append-only events.
+- [x] Implement the new pipeline by reusing existing discovery/evidence methods, removing direction quotas, invoking the deterministic allocator, registering broker orders/mandates, and reconciling fills.
+- [x] Wire separate overnight, premarket update, pre-open revalidation, open execution, bounded intraday, monitor, and EOD jobs. Keep legacy monitors active even while entries are frozen.
+- [x] Run focused tests and commit `feat: run horizon aware allocator paper sleeve`.
 
 ### Task 7: Calibration-Safe Samples and Cost Accounting
 
@@ -178,11 +178,11 @@
 - `multiclass_log_loss(probabilities, actual_bucket) -> float`
 - metrics field `execution_cost_decomposition`
 
-- [ ] Write failing tests that folds never include labels maturing after their cutoff, horizons never mix, Brier/log loss match exact fixtures, and raw signals expose no probability EV.
-- [ ] Write failing closed-round-trip tests for midpoint PnL minus spread, slippage/tick, and commission equaling executable net PnL with near-zero residual.
-- [ ] Implement maturity-safe split construction and scoring without fitting a calibrator.
-- [ ] Add exact equity and option round-trip cost decomposition to metrics.
-- [ ] Run focused tests and commit `feat: add calibration safe evaluation records`.
+- [x] Write failing tests that folds never include labels maturing after their cutoff, horizons never mix, Brier/log loss match exact fixtures, and raw signals expose no probability EV.
+- [x] Write failing closed-round-trip tests for midpoint PnL minus spread, slippage/tick, and commission equaling executable net PnL with near-zero residual.
+- [x] Implement maturity-safe split construction and scoring without fitting a calibrator.
+- [x] Add exact equity and option round-trip cost decomposition to metrics.
+- [x] Run focused tests and commit `feat: add calibration safe evaluation records`.
 
 ### Task 8: Dashboard, Architecture, and Development Log
 
@@ -198,11 +198,11 @@
 - dashboard field `ai_instrument_allocator`
 - separate displayed sections for legacy main, old AI sleeve, new allocator sleeve, and short counterfactual
 
-- [ ] Write failing dashboard tests for safe handling of absent/null state and separate $10,000 sleeve, horizon, instrument rationale, costs, and $2,000 affordability fields.
-- [ ] Run tests and verify the new section is absent.
-- [ ] Add beginner-facing labels and separate strategy/account views without exposing raw secrets or private reasoning.
-- [ ] Update natural-language architecture, Mermaid diagrams, startup behavior, and the dated development log.
-- [ ] Run dashboard tests and commit `docs: document allocator pipeline and dashboard`.
+- [x] Write failing dashboard tests for safe handling of absent/null state and separate $10,000 sleeve, horizon, instrument rationale, costs, and $2,000 affordability fields.
+- [x] Run tests and verify the new section is absent.
+- [x] Add beginner-facing labels and separate strategy/account views without exposing raw secrets or private reasoning.
+- [x] Update natural-language architecture, Mermaid diagrams, startup behavior, and the dated development log.
+- [x] Run dashboard tests and commit `docs: document allocator pipeline and dashboard`.
 
 ### Task 9: Full Verification and Repository Audit
 
@@ -211,11 +211,11 @@
 
 **Interfaces:** None.
 
-- [ ] Run `python -m compileall -q scripts tests`.
-- [ ] Run `python -m pytest -q` and require zero failures.
-- [ ] Run `python -m scripts.runtime.healthcheck --root .` and record read-only provider readiness.
-- [ ] Run mock overnight, premarket, open-execution, monitor, and restart dry runs in a temporary root; assert paper-only mode and zero live-order tool calls.
-- [ ] Run `graphify update .` and verify graph output completes.
-- [ ] Run `git diff --check`, inspect every changed file, scan tracked/staged content for credential patterns and runtime state, and confirm legacy state/log files are not staged.
-- [ ] Commit any verification fixes, then commit remaining reviewed changes with `feat: complete AI instrument allocator v1`.
+- [x] Run `python -m compileall -q scripts tests`.
+- [x] Run `python -m pytest -q` and require zero failures.
+- [x] Run `python -m scripts.runtime.healthcheck --root .` and record read-only provider readiness.
+- [x] Run mock overnight, premarket, open-execution, monitor, and restart dry runs in a temporary root; assert paper-only mode and zero live-order tool calls.
+- [x] Run `graphify update .` and verify graph output completes.
+- [x] Run `git diff --check`, inspect every changed file, scan tracked/staged content for credential patterns and runtime state, and confirm legacy state/log files are not staged.
+- [x] Commit any verification fixes, then commit remaining reviewed changes with `feat: complete AI instrument allocator v1`.
 

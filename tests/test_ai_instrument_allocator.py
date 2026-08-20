@@ -19,6 +19,7 @@ from scripts.simulation.paper_broker import PaperBroker
 
 
 REGULAR_NOW = "2026-07-13T15:00:00+00:00"
+OPEN_EXECUTION_NOW = "2026-07-13T13:32:00+00:00"
 
 SIGNED_BUCKETS = {
     "return_lt_minus_5_pct": 0.02,
@@ -747,6 +748,30 @@ def test_two_thousand_counterfactual_never_reselects_instrument() -> None:
     assert counterfactual["alternative_instrument_considered"] is False
 
 
+def test_two_thousand_equity_counterfactual_reports_scaled_position_risk() -> None:
+    from scripts.decision.instrument_allocator import build_same_instrument_counterfactual
+
+    selected = {
+        "allocation_id": "allocation-equity",
+        "selected_instrument": {
+            "instrument_type": "equity",
+            "ticker": "AAPL",
+            "entry_price": 100.0,
+            "planned_stop_price": 97.0,
+            "quantity": 25.0,
+            "risk_usd": 75.0,
+        },
+    }
+
+    counterfactual = build_same_instrument_counterfactual(selected, nav_usd=2_000)
+
+    assert counterfactual["affordable"] is True
+    assert counterfactual["max_affordable_quantity"] == 5.0
+    assert counterfactual["proposed_risk_usd"] == 15.0
+    assert counterfactual["risk_pct_of_nav"] == 0.0075
+    assert counterfactual["alternative_instrument_considered"] is False
+
+
 def test_allocator_risk_configuration_has_effective_portfolio_caps(
     paper_root: Path,
 ) -> None:
@@ -1040,6 +1065,9 @@ def test_position_mandate_exit_is_horizon_aware_and_fails_closed() -> None:
 
 
 class _AllocatorExecutionDiscovery:
+    def __init__(self, quote_asof=REGULAR_NOW):
+        self.quote_asof = quote_asof
+
     def collect_seed_candidates(self, _now, _watchlist):
         return []
 
@@ -1054,10 +1082,105 @@ class _AllocatorExecutionDiscovery:
             100.00,
             100.01,
             100.005,
-            REGULAR_NOW,
+            self.quote_asof,
             source="allocator-test",
             avg_daily_volume_usd=500_000_000,
         )
+
+
+class _AllocatorResearchDiscovery(_AllocatorExecutionDiscovery):
+    def collect_seed_candidates(self, _now, _watchlist):
+        return [{"ticker": "AAPL", "sources": ["fixture_scan"]}]
+
+    def fetch_market_context(self, _tickers, decision_time):
+        return {
+            "AAPL": {
+                "ticker": "AAPL",
+                "eligible": True,
+                "quote": {
+                    "symbol": "AAPL",
+                    "bid": 100.00,
+                    "ask": 100.01,
+                    "last": 100.005,
+                    "asof": decision_time,
+                    "source": "allocator-test",
+                    "avg_daily_volume_usd": 500_000_000,
+                    "asset_class": "us_equity",
+                    "is_otc": False,
+                    "is_leveraged_etf": False,
+                    "is_inverse_etf": False,
+                    "halted": False,
+                    "session_volume": 2_000_000,
+                    "previous_close": 98.00,
+                },
+                "fundamentals": {"market_cap": 3_000_000_000_000},
+                "technical_signals": {
+                    "price_change_1d_pct": 2.0,
+                    "price_change_5d_pct": 6.0,
+                    "relative_strength_20d": 5.0,
+                    "volume_ratio": 1.5,
+                },
+            }
+        }
+
+    @staticmethod
+    def validate_instrument(symbol):
+        return {"valid": True, "name": "Apple Inc.", "symbol": symbol}
+
+
+class _AllocatorResearchNews:
+    def __init__(self, direction="positive", *, already_priced_in=False):
+        self.direction = direction
+        self.already_priced_in = already_priced_in
+
+    def search(self, ticker, decision_time, company_name=None):
+        del company_name
+        positive = self.direction == "positive"
+        return [
+            {
+                "ticker": ticker,
+                "headline": (
+                    "Company raises full-year guidance"
+                    if positive
+                    else "Company withdraws full-year guidance"
+                ),
+                "published_at": (
+                    "2026-07-12T23:30:00+00:00"
+                    if positive
+                    else "2026-07-13T11:30:00+00:00"
+                ),
+                "event_at": (
+                    "2026-07-12T23:25:00+00:00"
+                    if positive
+                    else "2026-07-13T11:25:00+00:00"
+                ),
+                "first_seen_at": (
+                    "2026-07-12T23:31:00+00:00"
+                    if positive
+                    else "2026-07-13T11:31:00+00:00"
+                ),
+                "retrieved_at": decision_time,
+                "source": "company.example",
+                "source_tier": 1,
+                "ticker_relevance": 1.0,
+                "direction": self.direction,
+                "novelty": 0.95,
+                "already_priced_in": self.already_priced_in,
+                "confidence": 0.9,
+                "url": "https://company.example/investors/guidance",
+                "highlights": [
+                    "Full-year revenue guidance increased."
+                    if positive
+                    else "Full-year revenue guidance was withdrawn."
+                ],
+            }
+        ], [
+            {
+                "source": "company.example",
+                "source_tier": 1,
+                "retrieved_at": decision_time,
+            }
+        ]
 
 
 class _AllocatorNoOptions:
@@ -1073,12 +1196,12 @@ class _AllocatorFutureOptionData(_AllocatorNoOptions):
         contract = _option_contract("aapl-put-future", "2026-08-21", "put")
         quote = replace(
             _option_quote("aapl-put-future", bid=1.95, ask=1.96),
-            updated_at="2026-07-13T15:00:05+00:00",
+            updated_at="2026-07-13T13:32:05+00:00",
         )
         return [(contract, quote)], {"candidate_count": 1}
 
 
-def test_open_execution_uses_saved_plan_without_llm_and_only_new_namespace(
+def test_open_execution_uses_saved_conditional_plan_without_llm_and_only_new_namespace(
     paper_root: Path,
 ) -> None:
     from scripts.discovery.ai_instrument_allocator_pipeline import (
@@ -1093,7 +1216,7 @@ def test_open_execution_uses_saved_plan_without_llm_and_only_new_namespace(
         config,
         MockProvider(tracker),
         tracker,
-        discovery_adapter=_AllocatorExecutionDiscovery(),
+        discovery_adapter=_AllocatorExecutionDiscovery(OPEN_EXECUTION_NOW),
         news_adapter=_NoNews(),
         option_data=_AllocatorNoOptions(),
     )
@@ -1102,15 +1225,16 @@ def test_open_execution_uses_saved_plan_without_llm_and_only_new_namespace(
             "plan_id": "open-plan-aapl",
             "strategy": "ai_instrument_allocator_v1",
             "ticker": "AAPL",
-            "created_at": "2026-07-13T14:55:00+00:00",
-            "valid_until": "2026-07-13T15:05:00+00:00",
+            "created_at": "2026-07-13T13:27:00+00:00",
+            "valid_until": "2026-07-13T13:37:00+00:00",
             "status": "active",
-            "signal": _signed_signal(),
+            "stage": "overnight",
+            "signal": _signed_signal(entry_now=False),
             "snapshot": {"snapshot_id": "allocator-open-snapshot"},
         }
     )
 
-    result = pipeline.run_stage("open_execution", REGULAR_NOW)
+    result = pipeline.run_stage("open_execution", OPEN_EXECUTION_NOW)
 
     assert result["event"] == "ai_instrument_allocator_stage_complete"
     assert result["model_calls"] == 0
@@ -1121,6 +1245,288 @@ def test_open_execution_uses_saved_plan_without_llm_and_only_new_namespace(
     assert set(pipeline.broker.store.positions()) == {"AAPL"}
     assert pipeline.mandates.for_exposure("equity:AAPL")["status"] == "open"
     assert (paper_root / "state" / "paper_account.json").read_bytes() == legacy_account_before
+
+
+def test_allocator_mock_dry_run_survives_overnight_open_and_restart(
+    paper_root: Path,
+) -> None:
+    from scripts.discovery.ai_instrument_allocator_pipeline import (
+        AiInstrumentAllocatorPipeline,
+    )
+
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    pipeline = AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=_AllocatorResearchDiscovery(OPEN_EXECUTION_NOW),
+        news_adapter=_AllocatorResearchNews(),
+        option_data=_AllocatorNoOptions(),
+    )
+
+    overnight = pipeline.run_stage("overnight", "2026-07-13T00:00:00+00:00")
+
+    assert overnight["model_calls"] == 4
+    assert overnight["paper_orders_created"] == 0
+    assert len(overnight["plans"]) == 1
+    assert overnight["plans"][0]["signal"]["entry_now"] is False
+    assert pipeline.broker.store.orders() == {}
+    assert pipeline.option_broker.store.orders() == {}
+
+    premarket = pipeline.run_stage(
+        "premarket_update",
+        "2026-07-13T12:00:00+00:00",
+    )
+    preopen = pipeline.run_stage(
+        "preopen_revalidation",
+        "2026-07-13T13:25:00+00:00",
+    )
+
+    assert premarket["paper_orders_created"] == 0
+    assert preopen["paper_orders_created"] == 0
+    assert len(pipeline.plans.active_plans(OPEN_EXECUTION_NOW)) == 1
+
+    opened = pipeline.run_stage("open_execution", OPEN_EXECUTION_NOW)
+
+    assert opened["model_calls"] == 0
+    assert opened["paper_orders_created"] == 1
+    assert opened["executions"][0]["status"] == "filled"
+    assert opened["live_order_tools_called"] is False
+
+    restart_tracker = UsageTracker()
+    restarted = AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(restart_tracker),
+        restart_tracker,
+        discovery_adapter=_AllocatorExecutionDiscovery(OPEN_EXECUTION_NOW),
+        news_adapter=_NoNews(),
+        option_data=_AllocatorNoOptions(),
+    )
+    monitored = restarted.monitor_only(OPEN_EXECUTION_NOW)
+
+    assert set(restarted.broker.store.positions()) == {"AAPL"}
+    assert restarted.mandates.for_exposure("equity:AAPL")["status"] == "open"
+    assert monitored["event"] == "ai_instrument_allocator_monitor_complete"
+    assert monitored["live_order_tools_called"] is False
+
+
+def test_open_execution_rejects_outside_configured_open_window(
+    paper_root: Path,
+) -> None:
+    from scripts.discovery.ai_instrument_allocator_pipeline import (
+        AiInstrumentAllocatorPipeline,
+    )
+
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    pipeline = AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=_AllocatorExecutionDiscovery(),
+        news_adapter=_NoNews(),
+        option_data=_AllocatorNoOptions(),
+    )
+    pipeline.plans.save_plan(
+        {
+            "plan_id": "late-open-plan",
+            "strategy": "ai_instrument_allocator_v1",
+            "ticker": "AAPL",
+            "created_at": "2026-07-13T13:00:00+00:00",
+            "valid_until": "2026-07-13T16:00:00+00:00",
+            "status": "active",
+            "stage": "overnight",
+            "signal": _signed_signal(entry_now=False),
+            "snapshot": {"snapshot_id": "late-open-snapshot"},
+        }
+    )
+
+    result = pipeline.run_stage("open_execution", REGULAR_NOW)
+
+    assert result["paper_orders_created"] == 0
+    assert result["executions"] == []
+    assert result["reason"] == "stage is outside its market window: regular"
+
+
+def test_open_execution_rejects_intraday_plan_source(
+    paper_root: Path,
+) -> None:
+    from scripts.discovery.ai_instrument_allocator_pipeline import (
+        AiInstrumentAllocatorPipeline,
+    )
+
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    pipeline = AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=_AllocatorExecutionDiscovery(OPEN_EXECUTION_NOW),
+        news_adapter=_NoNews(),
+        option_data=_AllocatorNoOptions(),
+    )
+    pipeline.plans.save_plan(
+        {
+            "plan_id": "intraday-carry-plan",
+            "strategy": "ai_instrument_allocator_v1",
+            "ticker": "AAPL",
+            "created_at": "2026-07-13T13:30:00+00:00",
+            "valid_until": "2026-07-13T13:37:00+00:00",
+            "status": "active",
+            "stage": "intraday",
+            "signal": _signed_signal(entry_now=True),
+            "snapshot": {"snapshot_id": "intraday-carry-snapshot"},
+        }
+    )
+
+    result = pipeline.run_stage("open_execution", OPEN_EXECUTION_NOW)
+
+    assert result["paper_orders_created"] == 0
+    assert result["executions"][0]["reason"] == "plan source is not eligible for open execution"
+
+
+def test_premarket_research_replaces_older_plan_for_same_ticker(
+    paper_root: Path,
+) -> None:
+    from scripts.decision.signed_return_signal import derive_signal_summary
+    from scripts.discovery.ai_instrument_allocator_pipeline import (
+        AiInstrumentAllocatorPipeline,
+    )
+
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    news = _AllocatorResearchNews()
+    pipeline = AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=_AllocatorResearchDiscovery(),
+        news_adapter=news,
+        option_data=_AllocatorNoOptions(),
+    )
+
+    overnight = pipeline.run_stage("overnight", "2026-07-13T00:00:00+00:00")
+    old_plan_id = overnight["plans"][0]["plan_id"]
+    news.direction = "negative"
+
+    updated = pipeline.run_stage(
+        "premarket_update",
+        "2026-07-13T12:00:00+00:00",
+    )
+
+    active = pipeline.plans.active_plans(REGULAR_NOW)
+    assert updated["model_calls"] == 4
+    assert updated["paper_orders_created"] == 0
+    assert len(active) == 1
+    assert active[0]["plan_id"] != old_plan_id
+    assert derive_signal_summary(active[0]["signal"])["direction"] == "bearish"
+    assert pipeline.plans.plans()[old_plan_id]["status"] == "superseded"
+
+
+def test_premarket_no_trade_invalidates_older_plan_for_same_ticker(
+    paper_root: Path,
+) -> None:
+    from scripts.discovery.ai_instrument_allocator_pipeline import (
+        AiInstrumentAllocatorPipeline,
+    )
+
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    news = _AllocatorResearchNews()
+    pipeline = AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=_AllocatorResearchDiscovery(),
+        news_adapter=news,
+        option_data=_AllocatorNoOptions(),
+    )
+
+    overnight = pipeline.run_stage("overnight", "2026-07-13T00:00:00+00:00")
+    old_plan_id = overnight["plans"][0]["plan_id"]
+    news.direction = "negative"
+    news.already_priced_in = True
+
+    updated = pipeline.run_stage(
+        "premarket_update",
+        "2026-07-13T12:00:00+00:00",
+    )
+
+    assert updated["model_calls"] == 4
+    assert updated["plans"] == []
+    assert pipeline.plans.active_plans(OPEN_EXECUTION_NOW) == []
+    assert pipeline.plans.plans()[old_plan_id]["status"] == "invalidated"
+
+
+def test_no_trade_event_enters_cooldown_after_model_research(
+    paper_root: Path,
+) -> None:
+    from scripts.discovery.ai_instrument_allocator_pipeline import (
+        AiInstrumentAllocatorPipeline,
+    )
+
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    pipeline = AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=_AllocatorResearchDiscovery(),
+        news_adapter=_AllocatorResearchNews(already_priced_in=True),
+        option_data=_AllocatorNoOptions(),
+    )
+
+    first = pipeline.run_stage("overnight", "2026-07-13T00:00:00+00:00")
+    repeated = pipeline.run_stage(
+        "premarket_update",
+        "2026-07-13T12:00:00+00:00",
+    )
+
+    assert first["model_calls"] == 4
+    assert first["plans"] == []
+    assert repeated["model_calls"] == 0
+    assert repeated["plans"] == []
+
+
+def test_rank_only_event_enters_cooldown_after_successful_ranking(
+    paper_root: Path,
+) -> None:
+    from scripts.discovery.ai_instrument_allocator_pipeline import (
+        AiInstrumentAllocatorPipeline,
+    )
+
+    config = load_runtime_config(paper_root)
+    config["strategies"]["ai_instrument_allocator_v1"][
+        "top_deep_research_candidates"
+    ] = 0
+    tracker = UsageTracker()
+    pipeline = AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=_AllocatorResearchDiscovery(),
+        news_adapter=_AllocatorResearchNews(),
+        option_data=_AllocatorNoOptions(),
+    )
+
+    ranked = pipeline.run_stage("overnight", "2026-07-13T00:00:00+00:00")
+    repeated = pipeline.run_stage(
+        "premarket_update",
+        "2026-07-13T12:00:00+00:00",
+    )
+
+    assert ranked["model_calls"] == 1
+    assert ranked["plans"] == []
+    assert repeated["model_calls"] == 0
 
 
 def test_allocator_execution_advances_to_latest_observed_option_quote(
@@ -1140,7 +1546,7 @@ def test_allocator_execution_advances_to_latest_observed_option_quote(
         config,
         MockProvider(tracker),
         tracker,
-        discovery_adapter=_AllocatorExecutionDiscovery(),
+        discovery_adapter=_AllocatorExecutionDiscovery(OPEN_EXECUTION_NOW),
         news_adapter=_NoNews(),
         option_data=_AllocatorFutureOptionData(),
     )
@@ -1149,21 +1555,22 @@ def test_allocator_execution_advances_to_latest_observed_option_quote(
             "plan_id": "future-option-quote-plan",
             "strategy": "ai_instrument_allocator_v1",
             "ticker": "AAPL",
-            "created_at": "2026-07-13T14:55:00+00:00",
-            "valid_until": "2026-07-13T15:05:00+00:00",
-            "status": "active",
-            "signal": _bearish_signal(),
+            "created_at": "2026-07-13T13:27:00+00:00",
+                "valid_until": "2026-07-13T13:37:00+00:00",
+                "status": "active",
+                "stage": "overnight",
+                "signal": _bearish_signal(),
             "snapshot": {"snapshot_id": "future-option-quote-snapshot"},
         }
     )
 
-    result = pipeline.run_stage("open_execution", REGULAR_NOW)
+    result = pipeline.run_stage("open_execution", OPEN_EXECUTION_NOW)
     execution = result["executions"][0]
 
     assert execution["status"] == "filled"
-    assert execution["order"]["updated_at"] == "2026-07-13T15:00:05+00:00"
-    assert execution["allocation"]["decision_time"] == "2026-07-13T15:00:05+00:00"
-    assert execution["allocation"]["data_cutoff_time"] == "2026-07-13T15:00:05+00:00"
+    assert execution["order"]["updated_at"] == "2026-07-13T13:32:05+00:00"
+    assert execution["allocation"]["decision_time"] == "2026-07-13T13:32:05+00:00"
+    assert execution["allocation"]["data_cutoff_time"] == "2026-07-13T13:32:05+00:00"
     assert execution["live_order_tools_called"] is False
 
 
@@ -1191,7 +1598,7 @@ def test_allocator_research_stages_never_create_orders(
         config,
         MockProvider(tracker),
         tracker,
-        discovery_adapter=_AllocatorExecutionDiscovery(),
+        discovery_adapter=_AllocatorExecutionDiscovery(OPEN_EXECUTION_NOW),
         news_adapter=_NoNews(),
         option_data=_AllocatorNoOptions(),
     )
@@ -1215,7 +1622,7 @@ def test_allocator_missing_mandate_exits_after_restart(paper_root: Path) -> None
         config,
         MockProvider(tracker),
         tracker,
-        discovery_adapter=_AllocatorExecutionDiscovery(),
+        discovery_adapter=_AllocatorExecutionDiscovery(OPEN_EXECUTION_NOW),
         news_adapter=_NoNews(),
         option_data=_AllocatorNoOptions(),
     )
@@ -1224,14 +1631,15 @@ def test_allocator_missing_mandate_exits_after_restart(paper_root: Path) -> None
             "plan_id": "missing-mandate-plan",
             "strategy": "ai_instrument_allocator_v1",
             "ticker": "AAPL",
-            "created_at": "2026-07-13T14:55:00+00:00",
-            "valid_until": "2026-07-13T15:05:00+00:00",
-            "status": "active",
-            "signal": _signed_signal(),
+            "created_at": "2026-07-13T13:27:00+00:00",
+                "valid_until": "2026-07-13T13:37:00+00:00",
+                "status": "active",
+                "stage": "overnight",
+                "signal": _signed_signal(),
             "snapshot": {"snapshot_id": "missing-mandate-snapshot"},
         }
     )
-    assert pipeline.run_stage("open_execution", REGULAR_NOW)["paper_orders_created"] == 1
+    assert pipeline.run_stage("open_execution", OPEN_EXECUTION_NOW)["paper_orders_created"] == 1
     pipeline.mandates.store.write_json("position_mandates.json", {})
 
     restarted = AiInstrumentAllocatorPipeline(
@@ -1239,11 +1647,11 @@ def test_allocator_missing_mandate_exits_after_restart(paper_root: Path) -> None
         config,
         MockProvider(tracker),
         tracker,
-        discovery_adapter=_AllocatorExecutionDiscovery(),
+        discovery_adapter=_AllocatorExecutionDiscovery(OPEN_EXECUTION_NOW),
         news_adapter=_NoNews(),
         option_data=_AllocatorNoOptions(),
     )
-    result = restarted.monitor_only(REGULAR_NOW)
+    result = restarted.monitor_only(OPEN_EXECUTION_NOW)
 
     assert restarted.broker.store.positions() == {}
     assert result["exits"][0]["reason"] == "missing position mandate; fail closed"

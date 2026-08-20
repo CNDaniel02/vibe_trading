@@ -385,7 +385,7 @@ flowchart TD
     V --> B["short_equity_counterfactual shadow-only"]
 ```
 
-两速时钟：20:00 ET 生成慢速 conditional plans；08:00 和 09:25 只更新/失效计划；09:32 ET 不调用 LLM，只用 active plan 和 fresh quote 重建执行经济性；正常交易时段以有界间隔运行 fast research。每次真正执行授权最多有效 300 秒。
+两速时钟：20:00 ET 生成慢速 conditional plans；08:00 和 09:25 只更新/失效计划；09:32 ET 不调用 LLM，只用 active plan 和 fresh quote 重建执行经济性；正常交易时段以有界间隔运行 fast research。夜间和盘前模型的 `entry_now=false` 只禁止研究阶段下单，不会取消已保存计划；只有带合法非正常时段来源的计划能在 09:32-09:37 ET 重验，窗口外调用和 intraday plan 均拒绝。相同 ticker 的更新分析会 supersede 旧计划，no-trade/fail-closed 会 invalidate 旧计划。成功 rank 后全部候选事件都进入 cooldown，不只 top-3 deep analysis。每次真正执行授权最多有效 300 秒。
 
 概率校准按 horizon 完全分开。expanding walk-forward 的每个训练 fold 只能使用在该 test decision time 前已经成熟的标签；主要比较 out-of-sample Brier score 与 log loss，ECE 和 reliability curve 仅作诊断。每条记录保存 calibration version、training cutoff、sample size 和 horizon。
 
