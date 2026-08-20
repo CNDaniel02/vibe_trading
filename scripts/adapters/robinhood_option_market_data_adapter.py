@@ -196,6 +196,106 @@ class RobinhoodOptionMarketDataAdapter:
         diagnostics["accepted_after_premium_cap"] = len(ranked)
         return (ranked[0] if ranked else None), diagnostics
 
+    def fetch_contract_candidates(
+        self,
+        *,
+        underlying: str,
+        underlying_price: float,
+        option_type: str,
+        now: str,
+        min_dte: int,
+        target_dte: int,
+        max_dte: int,
+        max_premium_usd: float | None = None,
+    ) -> tuple[list[tuple[OptionContract, OptionQuote]], dict[str, Any]]:
+        """Return a bounded, entry-eligible set for deterministic repricing."""
+        self._require_local_ready()
+        chain_payload = self._run(
+            self.client.get_option_chains(underlying),
+            "get_option_chains",
+        )
+        chain = self._select_chain(chain_payload, underlying)
+        expirations = self._select_expirations(
+            chain,
+            now,
+            min_dte=min_dte,
+            target_dte=target_dte,
+            max_dte=max_dte,
+        )
+        raw_instruments: list[dict[str, Any]] = []
+        for expiration in expirations:
+            raw_instruments.extend(
+                self._fetch_instruments(chain, expiration, option_type)
+            )
+        cap = min(
+            20,
+            int(
+                self.runtime_config["options_universe"].get(
+                    "max_contracts_considered_per_side",
+                    20,
+                )
+            ),
+        )
+        raw_instruments.sort(
+            key=lambda item: (
+                abs(float(item.get("strike_price", 0)) - underlying_price),
+                abs(
+                    (
+                        date.fromisoformat(str(item.get("expiration_date")))
+                        - parse_ts(now).date()
+                    ).days
+                    - target_dte
+                ),
+            )
+        )
+        contracts = [self._parse_contract(item, chain) for item in raw_instruments[:cap]]
+        quote_payload = self._run(
+            self.client.get_option_quotes([item.option_id for item in contracts]),
+            "get_option_quotes",
+        )
+        quotes = self._parse_quotes(quote_payload)
+        quotes_observed_at = utc_now(timespec="microseconds")
+        ranked, diagnostics = rank_contracts_with_diagnostics(
+            contracts,
+            quotes,
+            quotes_observed_at,
+            self.runtime_config,
+        )
+        preferred_spread = float(
+            self.runtime_config["options_universe"].get(
+                "preferred_max_spread_pct",
+                self.runtime_config["options_universe"].get("max_spread_pct", 1),
+            )
+        )
+        diagnostics.update(
+            {
+                "underlying": underlying,
+                "option_type": option_type,
+                "expirations_considered": expirations,
+                "quotes_observed_at": quotes_observed_at,
+                "preferred_max_spread_pct": preferred_spread,
+                "hard_max_spread_pct": float(
+                    self.runtime_config["options_universe"].get("max_spread_pct", 1)
+                ),
+                "non_preferred_spread_count": sum(
+                    item[1].spread_pct() > preferred_spread for item in ranked
+                ),
+                "max_premium_usd": max_premium_usd,
+            }
+        )
+        if max_premium_usd is not None:
+            before = len(ranked)
+            ranked = [
+                item
+                for item in ranked
+                if item[1].ask * item[0].multiplier <= max_premium_usd
+            ]
+            diagnostics["rejections"]["premium above deterministic budget"] = (
+                before - len(ranked)
+            )
+        diagnostics["accepted_after_premium_cap"] = len(ranked)
+        return ranked, diagnostics
+
     def fetch_quotes(self, option_ids: list[str]) -> dict[str, OptionQuote]:
         if not option_ids:
             return {}
@@ -232,6 +332,44 @@ class RobinhoodOptionMarketDataAdapter:
         if not expirations:
             raise AdapterDataError("no option expiration inside configured DTE window")
         return min(expirations)[2]
+
+    def _select_expirations(
+        self,
+        chain: dict[str, Any],
+        now: str,
+        *,
+        min_dte: int,
+        target_dte: int,
+        max_dte: int,
+    ) -> list[str]:
+        current = parse_ts(now).date()
+        eligible = [
+            str(value)
+            for value in chain.get("expiration_dates", []) or []
+            if min_dte <= (date.fromisoformat(str(value)) - current).days <= max_dte
+        ]
+        if not eligible:
+            raise AdapterDataError("no option expiration inside allocator DTE window")
+        cap = max(
+            1,
+            min(
+                5,
+                int(
+                    self.runtime_config["options_universe"].get(
+                        "max_expirations_considered",
+                        3,
+                    )
+                ),
+            ),
+        )
+        nearest = sorted(
+            eligible,
+            key=lambda value: (
+                abs((date.fromisoformat(value) - current).days - target_dte),
+                value,
+            ),
+        )[:cap]
+        return sorted(nearest)
 
     def _fetch_instruments(self, chain: dict[str, Any], expiration: str, option_type: str) -> list[dict[str, Any]]:
         instruments: list[dict[str, Any]] = []

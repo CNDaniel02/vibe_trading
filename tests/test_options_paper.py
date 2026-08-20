@@ -34,7 +34,7 @@ def contract(option_type: str = "call") -> OptionContract:
     )
 
 
-def quote(option_type: str = "call", *, bid: float = 0.97, ask: float = 1.0, asof: str = NOW) -> OptionQuote:
+def quote(option_type: str = "call", *, bid: float = 0.99, ask: float = 1.0, asof: str = NOW) -> OptionQuote:
     return OptionQuote(
         option_id=contract(option_type).option_id,
         bid=bid,
@@ -80,7 +80,7 @@ def test_option_sell_fill_uses_bid_and_adverse_slippage(paper_root):
     config = load_runtime_config(paper_root)
     decision = simulate_option_fill(order(intent="sell_to_close", limit_price=None), quote(), config["options_costs"], NOW)
     assert decision.fill is not None
-    assert decision.fill.price == 0.96
+    assert decision.fill.price == 0.98
 
 
 def test_option_limit_not_reached_remains_open(paper_root):

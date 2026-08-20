@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -364,3 +365,176 @@ def test_allocator_team_enforces_challenge_veto_as_no_trade(paper_root: Path) ->
         "ai_allocator_fast_challenge_agent",
         "ai_allocator_fast_decision_manager",
     ]
+
+
+def _option_contract(option_id: str, expiration: str, option_type: str = "call"):
+    from scripts.options.models import OptionContract
+
+    return OptionContract(
+        option_id=option_id,
+        chain_id="chain-AAPL",
+        underlying="AAPL",
+        option_type=option_type,
+        strike_price=100.0,
+        expiration_date=expiration,
+    )
+
+
+def _option_quote(option_id: str, *, bid: float = 1.0, ask: float = 1.01):
+    from scripts.options.models import OptionQuote
+
+    return OptionQuote(
+        option_id=option_id,
+        bid=bid,
+        ask=ask,
+        mark=(bid + ask) / 2,
+        updated_at=REGULAR_NOW,
+        source="fixture",
+        delta=0.50,
+        gamma=0.03,
+        theta=-0.04,
+        vega=0.12,
+        implied_volatility=0.30,
+        volume=5_000,
+        open_interest=10_000,
+    )
+
+
+def test_option_hard_spread_is_two_percent_and_preferred_is_one_point_five(
+    paper_root: Path,
+) -> None:
+    from scripts.options.risk_gate import validate_option_quote
+
+    config = load_runtime_config(paper_root)
+    assert config["options_universe"]["preferred_max_spread_pct"] == 0.015
+    assert config["options_universe"]["max_spread_pct"] == 0.02
+
+    too_wide = _option_quote("wide", bid=0.99, ask=1.02)
+    assert validate_option_quote(too_wide, REGULAR_NOW, config).reason == "option spread too wide"
+
+
+def test_robinhood_adapter_returns_bounded_candidates_across_expirations(
+    paper_root: Path,
+) -> None:
+    from scripts.adapters.robinhood_option_market_data_adapter import (
+        RobinhoodOptionMarketDataAdapter,
+    )
+
+    config = load_runtime_config(paper_root)
+    adapter = RobinhoodOptionMarketDataAdapter({"enabled": True}, config, paper_root)
+    expirations = ["2026-08-07", "2026-08-14", "2026-08-21"]
+    chain = {
+        "id": "chain-AAPL",
+        "symbol": "AAPL",
+        "can_open_position": True,
+        "trade_value_multiplier": "100",
+        "underlying_instruments": ["equity-AAPL"],
+        "expiration_dates": expirations,
+    }
+
+    async def instruments(*, expiration_date, **_kwargs):
+        index = expirations.index(expiration_date)
+        return {
+            "data": {
+                "instruments": [
+                    {
+                        "id": f"call-{index}",
+                        "chain_id": "chain-AAPL",
+                        "chain_symbol": "AAPL",
+                        "type": "call",
+                        "strike_price": "100",
+                        "expiration_date": expiration_date,
+                    }
+                ],
+                "next": None,
+            }
+        }
+
+    async def quotes(option_ids):
+        return {
+            "data": {
+                "results": [
+                    {
+                        "quote": {
+                            **_option_quote(option_id).to_dict(),
+                            "instrument_id": option_id,
+                            "bid_price": 1.0,
+                            "ask_price": 1.01,
+                            "mark_price": 1.005,
+                        }
+                    }
+                    for option_id in option_ids
+                ]
+            }
+        }
+
+    with (
+        patch.object(adapter, "readiness", return_value={"ready": True}),
+        patch.object(
+            adapter.client,
+            "get_option_chains",
+            return_value={"data": {"chains": [chain]}},
+        ),
+        patch.object(adapter.client, "get_option_instruments", side_effect=instruments),
+        patch.object(adapter.client, "get_option_quotes", side_effect=quotes),
+        patch(
+            "scripts.adapters.robinhood_option_market_data_adapter.utc_now",
+            return_value=REGULAR_NOW,
+        ),
+    ):
+        candidates, diagnostics = adapter.fetch_contract_candidates(
+            underlying="AAPL",
+            underlying_price=100.0,
+            option_type="call",
+            now=REGULAR_NOW,
+            min_dte=21,
+            target_dte=30,
+            max_dte=45,
+            max_premium_usd=200,
+        )
+
+    assert len(candidates) == 3
+    assert diagnostics["expirations_considered"] == expirations
+    assert diagnostics["accepted_after_premium_cap"] == 3
+    assert all(item[0].expiration_date in expirations for item in candidates)
+
+
+def test_option_scenario_repricing_uses_spot_time_iv_and_reports_vega() -> None:
+    from scripts.options.scenario_pricing import reprice_option_scenarios
+
+    contract = _option_contract("call-reprice", "2026-08-21")
+    quote = _option_quote("call-reprice", bid=4.95, ask=5.05)
+    costs = {
+        "slippage_bps": 20,
+        "minimum_slippage_usd_per_contract": 0.01,
+        "commission_per_contract_usd": 0,
+        "price_tick_usd": 0.01,
+    }
+    up = reprice_option_scenarios(
+        contract,
+        quote,
+        spot=100,
+        now=REGULAR_NOW,
+        horizon_days=1,
+        move_pct=3.0,
+        iv_shifts=[-0.05, 0.0, 0.05],
+        costs=costs,
+    )
+    flat_later = reprice_option_scenarios(
+        contract,
+        quote,
+        spot=100,
+        now=REGULAR_NOW,
+        horizon_days=5,
+        move_pct=0.0,
+        iv_shifts=[0.0],
+        costs=costs,
+    )
+
+    assert up["method"] == "midpoint_anchored_black_scholes_repricing"
+    assert up["greeks"]["vega"] == 0.12
+    by_iv = {item["iv_shift"]: item for item in up["scenarios"]}
+    assert by_iv[0.05]["repriced_mid"] > by_iv[-0.05]["repriced_mid"]
+    assert up["conservative_exit_bid"] > flat_later["conservative_exit_bid"]
+    assert up["probability_ev_available"] is False
+    assert up["probability_ev_usd"] is None
