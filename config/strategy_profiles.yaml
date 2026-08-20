@@ -52,6 +52,7 @@ long_directional_options_v1:
 
 long_directional_options_v2_weighted:
   execution: options_paper_broker
+  new_entries_enabled: false
   allow_model_calls: false
   minimum_entry_score: 0.54
   hard_max_chase_score: 0.95
@@ -106,6 +107,7 @@ multi_agent_relative_strength_v2_candidate:
 
 ai_gated_technical_v1:
   execution: isolated_paper_sleeve
+  new_entries_enabled: false
   allow_model_calls: true
   may_replace_active_strategy: false
   state_namespace: ai_gated_technical_v1

@@ -17,13 +17,24 @@ from scripts.options.virtual_account import apply_option_fill
 class OptionPaperBroker:
     """Local long-premium broker. It has no live broker order methods."""
 
-    def __init__(self, root: str | Path, config: dict, *, namespace: str | None = None) -> None:
+    def __init__(
+        self,
+        root: str | Path,
+        config: dict,
+        *,
+        namespace: str | None = None,
+        initial_cash: float | None = None,
+    ) -> None:
         self.root = Path(root)
         self.config = config
         self.namespace = namespace
         self.store = OptionStateStore(
             self.root,
-            float(config["paper"].get("paper_initial_cash_usd", 2000)),
+            float(
+                initial_cash
+                if initial_cash is not None
+                else config["paper"].get("paper_initial_cash_usd", 2000)
+            ),
             namespace=namespace,
         )
         self.log_prefix = f"strategy_sleeves/{namespace}/" if namespace else ""

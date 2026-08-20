@@ -1097,6 +1097,34 @@ class ForwardPaperService:
             return [], []
         baseline_decisions = [decide_option_direction(snapshot, self.config) for snapshot in snapshots.values()]
         decisions = [decide_weighted_option_direction(snapshot, self.config) for snapshot in snapshots.values()]
+        entry_profile = self.config.get("strategies", {}).get(
+            "long_directional_options_v2_weighted",
+            {},
+        )
+        if not entry_profile.get("new_entries_enabled", True):
+            for decision in decisions:
+                decision["execution_status"] = "entry_frozen"
+            for decision in decisions:
+                append_jsonl(
+                    self.root,
+                    "decisions.jsonl",
+                    {
+                        "event": "option_strategy_decision",
+                        "decision": decision,
+                        "snapshot_id": decision["snapshot_id"],
+                    },
+                )
+            for decision in baseline_decisions:
+                append_jsonl(
+                    self.root,
+                    "decisions.jsonl",
+                    {
+                        "event": "option_baseline_shadow_decision",
+                        "decision": decision,
+                        "snapshot_id": decision["snapshot_id"],
+                    },
+                )
+            return [], decisions
         candidates = [item for item in decisions if item["action"] == "buy_to_open"]
         candidates.sort(key=lambda item: float(item.get("score", 0)), reverse=True)
         max_candidates = int(self.integration_config.get("runtime", {}).get("max_option_candidates_per_cycle", 1))

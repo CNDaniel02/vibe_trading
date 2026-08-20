@@ -89,6 +89,21 @@ class AiGatedPaperPipeline:
         cycle_id = f"aigt_{uuid4().hex}"
         calls_before = len(self.tracker.records)
         monitor = self.monitor_only(decision_time)
+        if not self.profile.get("new_entries_enabled", True):
+            result = {
+                "event": "ai_gated_entries_frozen",
+                "strategy": self.STRATEGY,
+                "cycle_id": cycle_id,
+                "decision_time": decision_time,
+                "reason": "legacy strategy accepts exits and open-order updates only",
+                "monitor": monitor,
+                "model_calls": 0,
+                "paper_orders_created": 0,
+                "paper_sleeve": self.namespace,
+                "live_order_tools_called": False,
+            }
+            append_jsonl(self.root, "ai_gated_cycles.jsonl", result)
+            return result
         research_cutoff = int(
             self.profile.get("minimum_minutes_to_close_for_research", 30)
         )

@@ -1155,6 +1155,7 @@ def test_ai_premarket_research_never_creates_order(
     paper_root: Path,
 ) -> None:
     config = load_runtime_config(paper_root)
+    config["strategies"]["ai_gated_technical_v1"]["new_entries_enabled"] = True
     tracker = UsageTracker()
     pipeline = AiGatedPaperPipeline(
         paper_root,
@@ -1183,6 +1184,7 @@ def test_ai_premarket_research_never_creates_order(
 
 def test_ai_gated_pipeline_executes_only_in_isolated_paper_sleeve(paper_root: Path) -> None:
     config = load_runtime_config(paper_root)
+    config["strategies"]["ai_gated_technical_v1"]["new_entries_enabled"] = True
     tracker = UsageTracker()
     pipeline = AiGatedPaperPipeline(
         paper_root,
@@ -1217,6 +1219,7 @@ def test_ai_gated_pipeline_does_not_research_existing_position(
             return super().search(ticker, decision_time, company_name)
 
     config = load_runtime_config(paper_root)
+    config["strategies"]["ai_gated_technical_v1"]["new_entries_enabled"] = True
     tracker = UsageTracker()
     news = CountingNews()
     pipeline = AiGatedPaperPipeline(
@@ -1250,6 +1253,7 @@ def test_ai_gated_pipeline_skips_model_research_near_close(
     paper_root: Path,
 ) -> None:
     config = load_runtime_config(paper_root)
+    config["strategies"]["ai_gated_technical_v1"]["new_entries_enabled"] = True
     tracker = UsageTracker()
     pipeline = AiGatedPaperPipeline(
         paper_root,
@@ -1271,6 +1275,7 @@ def test_ai_gated_pipeline_skips_research_when_all_entry_lines_are_daily_blocked
     paper_root: Path,
 ) -> None:
     config = load_runtime_config(paper_root)
+    config["strategies"]["ai_gated_technical_v1"]["new_entries_enabled"] = True
     config["paper"]["strategy_lines"]["options"] = True
     tracker = UsageTracker()
     pipeline = AiGatedPaperPipeline(
