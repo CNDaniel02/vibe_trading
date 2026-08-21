@@ -11,6 +11,7 @@ import argparse
 import json
 import sqlite3
 from collections import Counter
+from datetime import timedelta
 from functools import lru_cache
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,6 +21,7 @@ from urllib.parse import urlparse
 
 from scripts.core.config import load_runtime_config
 from scripts.core.models import parse_ts, utc_now
+from scripts.decision.signed_return_signal import derive_signal_summary
 from scripts.runtime.process_lock import ProcessLock
 from scripts.evaluation.calculate_metrics import calculate_metrics
 from scripts.evaluation.evaluate_news_drift import calculate_news_drift_metrics
@@ -200,6 +202,279 @@ def _read_jsonl(path: Path, limit: int = 400) -> list[dict[str, Any]]:
                 break
     records.reverse()
     return records
+
+
+def _build_trade_funnel(
+    *,
+    now: str,
+    allocator_profile: dict[str, Any],
+    audit_records: list[dict[str, Any]],
+    allocator_cycles: list[dict[str, Any]],
+    allocator_decisions: list[dict[str, Any]],
+    allocator_fill_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Summarize the rolling paper-entry path without changing runtime state."""
+    current = parse_ts(now)
+    cutoff = current - timedelta(hours=48)
+
+    def recent(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        kept: list[dict[str, Any]] = []
+        for record in records:
+            nested_fill = _as_dict(record.get("fill"))
+            raw_time = next(
+                (
+                    value
+                    for value in (
+                        record.get("ts"),
+                        record.get("decision_time"),
+                        record.get("asof"),
+                        nested_fill.get("filled_at"),
+                    )
+                    if value
+                ),
+                None,
+            )
+            if raw_time is None:
+                continue
+            try:
+                observed = parse_ts(str(raw_time))
+            except (TypeError, ValueError):
+                continue
+            if cutoff <= observed <= current:
+                kept.append(record)
+        return kept
+
+    recent_audit = recent(audit_records)
+    forward_cycles = [
+        record
+        for record in recent_audit
+        if record.get("event") == "forward_cycle_complete"
+    ]
+    equity_screened = sum(int(record.get("snapshots") or 0) for record in forward_cycles)
+    equity_signals = sum(
+        int(record.get("active_candidates") or 0) for record in forward_cycles
+    )
+    equity_orders = sum(
+        len(record.get("orders") or []) for record in forward_cycles
+    )
+    option_decisions = [
+        decision
+        for record in forward_cycles
+        for decision in (record.get("option_decisions") or [])
+        if isinstance(decision, dict)
+    ]
+    option_signals = sum(
+        decision.get("action") == "buy_to_open" for decision in option_decisions
+    )
+    option_orders = sum(
+        len(record.get("option_entries") or []) for record in forward_cycles
+    )
+    equity_executable = any(
+        record.get("active_execution")
+        and record.get("active_execution") != "shadow_only"
+        for record in forward_cycles
+    )
+    option_executable = any(
+        decision.get("action") == "buy_to_open"
+        and decision.get("execution_status") != "entry_frozen"
+        for decision in option_decisions
+    )
+
+    cycles = recent(allocator_cycles)
+    decisions = recent(allocator_decisions)
+    fills = recent(allocator_fill_records)
+    skipped = [
+        item
+        for cycle in cycles
+        for item in (cycle.get("skipped") or [])
+        if isinstance(item, dict)
+    ]
+    plans = [
+        item
+        for cycle in cycles
+        for item in (cycle.get("plans") or [])
+        if isinstance(item, dict)
+    ]
+    executions = [
+        item
+        for cycle in cycles
+        for item in (cycle.get("executions") or [])
+        if isinstance(item, dict)
+    ]
+    proposals = [
+        record
+        for record in decisions
+        if _as_dict(record.get("signal")).get("action") == "propose_trade"
+    ]
+
+    minimum_mass = float(allocator_profile.get("minimum_direction_mass", 0.55))
+    minimum_margin = float(
+        allocator_profile.get("minimum_direction_margin", 0.15)
+    )
+    direction_threshold_passes = 0
+    for record in proposals:
+        try:
+            summary = derive_signal_summary(_as_dict(record.get("signal")))
+        except ValueError:
+            continue
+        masses = sorted(
+            (
+                float(summary["bearish_probability"]),
+                float(summary["neutral_probability"]),
+                float(summary["bullish_probability"]),
+            ),
+            reverse=True,
+        )
+        if (
+            summary["direction"] != "neutral"
+            and masses[0] >= minimum_mass
+            and masses[0] - masses[1] >= minimum_margin
+        ):
+            direction_threshold_passes += 1
+
+    blocker_counts: Counter[str] = Counter()
+    for item in skipped:
+        reason = str(item.get("reason") or "").lower()
+        if "cooldown" in reason:
+            blocker_counts["cooldown"] += 1
+        elif "holding period does not match horizon" in reason:
+            blocker_counts["holding_period_mismatch"] += 1
+        elif "unsupported evidence" in reason:
+            blocker_counts["unsupported_evidence"] += 1
+        else:
+            blocker_counts["challenge_or_no_trade"] += 1
+    for execution in executions:
+        if execution.get("status") != "no_trade":
+            continue
+        reason = str(execution.get("reason") or "").lower()
+        if "risk" in reason:
+            blocker_counts["deterministic_risk"] += 1
+        else:
+            blocker_counts["execution_data"] += 1
+
+    blocker_labels = {
+        "cooldown": (
+            "冷却期避免重复研究",
+            "同一股票或同一事件没有新信息，系统不重复花费模型调用。",
+            "info",
+        ),
+        "holding_period_mismatch": (
+            "模型持仓期限字段不合法",
+            "模型给出的 horizon 与持仓天数冲突，系统按 fail-closed 拒绝。",
+            "bad",
+        ),
+        "unsupported_evidence": (
+            "模型引用了快照外证据",
+            "引用无法在当时保存的证据快照中核对，因此不能交易。",
+            "warn",
+        ),
+        "challenge_or_no_trade": (
+            "Challenge / Decision 认为不值得交易",
+            "反证、追高风险或信息不足使模型主动输出 no-trade。",
+            "info",
+        ),
+        "deterministic_risk": (
+            "确定性风控拒绝",
+            "提案未通过账户、仓位或交易规则检查。",
+            "warn",
+        ),
+        "execution_data": (
+            "执行前行情或数据失败",
+            "提案存在，但执行所需的最新报价或合约数据未通过检查。",
+            "bad",
+        ),
+    }
+    blockers = [
+        {
+            "code": code,
+            "label": blocker_labels[code][0],
+            "explanation": blocker_labels[code][1],
+            "kind": blocker_labels[code][2],
+            "count": count,
+        }
+        for code, count in sorted(
+            blocker_counts.items(), key=lambda item: (-item[1], item[0])
+        )
+    ]
+
+    entry_fills = 0
+    for record in fills:
+        fill = _as_dict(record.get("fill")) or record
+        if fill.get("side") == "buy" or fill.get("intent") == "buy_to_open":
+            entry_fills += 1
+    paper_orders = sum(int(cycle.get("paper_orders_created") or 0) for cycle in cycles)
+    rejected_by_model = max(0, len(decisions) - len(proposals))
+    if paper_orders:
+        root_cause = {
+            "code": "orders_created",
+            "title": "漏斗已经产生模拟订单",
+            "detail": f"过去 48 小时创建了 {paper_orders} 笔模拟订单。",
+        }
+    elif rejected_by_model >= max(1, len(executions)):
+        root_cause = {
+            "code": "allocator_proposal_bottleneck",
+            "title": "多数候选停在 AI 研究与质询阶段",
+            "detail": (
+                f"{len(decisions)} 次结构化模型决策仅形成 {len(proposals)} 个交易提案；"
+                "确定性执行层没有足够提案可处理。"
+            ),
+        }
+    elif executions:
+        root_cause = {
+            "code": "allocator_execution_bottleneck",
+            "title": "提案停在执行前数据或风控检查",
+            "detail": (
+                f"已尝试执行 {len(executions)} 次，但没有创建模拟订单；"
+                "请查看下方执行前行情、合约数据和风控原因。"
+            ),
+        }
+    elif proposals:
+        root_cause = {
+            "code": "allocator_waiting_for_execution",
+            "title": "已有提案，但尚未进入允许的执行窗口",
+            "detail": f"过去 48 小时形成 {len(proposals)} 个提案，尚无执行尝试。",
+        }
+    else:
+        root_cause = {
+            "code": "allocator_no_proposal",
+            "title": "没有候选形成可执行提案",
+            "detail": "研究仍在运行，但所有候选均为 no-trade 或失败关闭。",
+        }
+
+    return {
+        "window_hours": 48,
+        "window_started_at": cutoff.isoformat(),
+        "asof": current.isoformat(),
+        "root_cause": root_cause,
+        "allocator": {
+            "candidate_reviews": len(skipped) + len(plans),
+            "model_decisions": len(decisions),
+            "trade_proposals": len(proposals),
+            "direction_threshold_passes": direction_threshold_passes,
+            "execution_attempts": len(executions),
+            "paper_orders": paper_orders,
+            "paper_fills": entry_fills,
+            "minimum_direction_mass": minimum_mass,
+            "minimum_direction_margin": minimum_margin,
+        },
+        "baselines": {
+            "equity": {
+                "screened": equity_screened,
+                "signals": equity_signals,
+                "orders": equity_orders,
+                "executable": equity_executable,
+                "mode": "paper" if equity_executable else "shadow_only",
+            },
+            "options": {
+                "screened": len(option_decisions),
+                "signals": option_signals,
+                "orders": option_orders,
+                "executable": option_executable,
+                "mode": "paper" if option_executable else "entry_frozen",
+            },
+        },
+        "blockers": blockers,
+    }
 
 
 def _bounded_orders(
@@ -1007,7 +1282,7 @@ def build_dashboard_state(root: str | Path) -> dict[str, Any]:
     state_dir = root_path / "state"
     logs_dir = root_path / "logs"
     runtime = load_runtime_config(root_path)
-    audit_records = _read_jsonl(logs_dir / "audit.jsonl", limit=2000)
+    audit_records = _read_jsonl(logs_dir / "audit.jsonl", limit=5000)
     decision_records = _read_jsonl(logs_dir / "decisions.jsonl", limit=2500)
     shadow_records = _read_jsonl(logs_dir / "shadow_decisions.jsonl", limit=100)
     catalyst_discovery_records = _read_jsonl(logs_dir / "catalyst_discovery.jsonl", limit=50)
@@ -1114,8 +1389,15 @@ def build_dashboard_state(root: str | Path) -> dict[str, Any]:
     )
     allocator_cycles = _read_jsonl(
         allocator_log_dir / "cycles.jsonl",
-        limit=50,
+        limit=100,
     )
+    allocator_fill_records = [
+        *_read_jsonl(allocator_log_dir / "paper_fills.jsonl", limit=1000),
+        *_read_jsonl(
+            allocator_log_dir / "paper_option_fills.jsonl",
+            limit=1000,
+        ),
+    ]
     short_counterfactuals = _read_jsonl(
         allocator_log_dir / "short_equity_counterfactual.jsonl",
         limit=100,
@@ -1138,6 +1420,16 @@ def build_dashboard_state(root: str | Path) -> dict[str, Any]:
         option_diagnostics=option_diagnostics,
         ai_cycle_records=ai_cycle_records,
         llm_usage_records=llm_usage_records,
+    )
+    trade_funnel = _build_trade_funnel(
+        now=now,
+        allocator_profile=_as_dict(
+            runtime.get("strategies", {}).get("ai_instrument_allocator_v1")
+        ),
+        audit_records=audit_records,
+        allocator_cycles=allocator_cycles,
+        allocator_decisions=allocator_decisions,
+        allocator_fill_records=allocator_fill_records,
     )
     market_data = _market_data_observations(
         decision_records,
@@ -1227,6 +1519,7 @@ def build_dashboard_state(root: str | Path) -> dict[str, Any]:
         "option_decisions": option_decisions,
         "metrics": metrics,
         "beginner_summary": beginner_summary,
+        "trade_funnel": trade_funnel,
         "last_shadow_decision": last_shadow,
         "latest_catalyst_discovery": catalyst_discovery_records[-1] if catalyst_discovery_records else None,
         "catalyst_decisions": [_safe_catalyst_record(record) for record in catalyst_decision_records[-20:]],
@@ -2053,10 +2346,28 @@ function strategyDetailRows(state){
     {name:"llm_news_drift_v1",label:"新闻漂移实验",mode:"只观察",kind:"info",account:"不进入账户",decisions:newsMetrics.proposal_count,entries:0,closed:"—",pnl:null,win:newsNext.hit_rate,reason:`${newsMetrics.valid_return_label_count||0} 个有效结果标签 · ${newsMetrics.profitability||"insufficient_forward_evidence"}`},
   ];
 }
+function renderOpportunityFunnel(state){
+  const funnel=state.trade_funnel||{},a=funnel.allocator||{},root=funnel.root_cause||{},baselines=funnel.baselines||{},equity=baselines.equity||{},options=baselines.options||{};
+  const steps=[
+    {label:"候选被查看",value:a.candidate_reviews,detail:"发现、筛选或冷却判断"},
+    {label:"完成 AI 判断",value:a.model_decisions,detail:"News + Challenge + Decision"},
+    {label:"AI 建议交易",value:a.trade_proposals,detail:"不代表订单"},
+    {label:"尝试确定性执行",value:a.execution_attempts,detail:"报价、工具选择和风控"},
+    {label:"订单 / 成交",value:`${a.paper_orders||0} / ${a.paper_fills||0}`,detail:"仅 $10,000 paper sleeve"},
+  ];
+  const stepHtml=steps.map(step=>`<div class="pipeline-step"><strong>${esc(step.label)} · ${esc(step.value??0)}</strong><span>${esc(step.detail)}</span></div>`).join("");
+  const blockers=array(funnel.blockers).slice(0,6).map(item=>`<div class="issue ${item.kind==="bad"?"error":""}"><span class="issue-mark"></span><div><div class="issue-title">${esc(item.label)}</div><div class="issue-copy">${esc(item.explanation)}</div></div><div class="issue-count">${esc(item.count)} 次</div></div>`).join("");
+  return `<section class="section-block"><div class="section-head"><div><h3>过去 48 小时机会漏斗</h3><p>只统计真正允许新增仓的 AI 工具分配器；候选和建议都不代表订单。</p></div>${statusBadge(root.title||"正在统计",(a.paper_orders||0)>0?"good":"warn")}</div>
+    <div class="pipeline">${stepHtml}</div>
+    <div class="issue-list"><div class="issue"><span class="issue-mark"></span><div><div class="issue-title">自动定位：${esc(root.title||"暂无结论")}</div><div class="issue-copy">${esc(root.detail||"等待更多运行记录。")}</div></div></div>${blockers}</div>
+    <div class="definition-grid"><div class="definition"><strong>为什么股票信号没有下单</strong><span>股票加权过去 48 小时产生 ${esc(equity.signals||0)} 次候选信号，但当前是 shadow_only，只观察不新增仓。</span></div><div class="definition"><strong>为什么期权信号没有下单</strong><span>方向期权产生 ${esc(options.signals||0)} 次 buy_to_open 判断，但旧策略 entry_frozen，只管理旧仓。</span></div><div class="definition"><strong>当前 paper 方向门槛</strong><span>单侧未校准概率质量至少 ${(number(a.minimum_direction_mass)*100).toFixed(0)}%，且领先第二方向 ${(number(a.minimum_direction_margin)*100).toFixed(0)} 个百分点；仍须通过全部确定性风控。</span></div></div>
+  </section>`;
+}
 function renderStrategies(state){
   const rows=strategyDetailRows(state).map(row=>`<tr><td data-label="策略"><strong>${esc(row.label)}</strong><div class="small muted">${esc(row.name)}</div></td><td data-label="状态">${statusBadge(row.mode,row.kind)}</td><td data-label="账户">${esc(row.account)}</td><td data-label="决策" class="num">${row.decisions??"—"}</td><td data-label="入场" class="num">${row.entries??"—"}</td><td data-label="平仓" class="num">${row.closed??"—"}</td><td data-label="累计 PnL" class="num ${tone(row.pnl)}">${signedMoney(row.pnl)}</td><td data-label="胜率" class="num">${row.win==null?"—":pct(number(row.win)*100)}</td><td data-label="最近结论" class="reason">${esc(row.reason)}</td></tr>`).join("");
   document.getElementById("view-strategies").className="";
   document.getElementById("view-strategies").innerHTML=`<div class="page-heading"><div><h2>策略表现</h2><p>同一行比较权限、账户、交易数量和结果；影子实验不会混入账户 PnL。</p></div></div>
+    ${renderOpportunityFunnel(state)}
     <section class="section-block"><div class="table-wrap"><table class="mobile-table"><thead><tr><th>策略</th><th>当前模式</th><th>账户</th><th>决策</th><th>入场</th><th>平仓</th><th>累计 PnL</th><th>胜率</th><th>最近结论</th></tr></thead><tbody>${rows}</tbody></table></div>
       <div class="definition-grid"><div class="definition"><strong>胜率</strong><span>盈利交易数除以已平仓交易数，不能单独代表是否赚钱。</span></div><div class="definition"><strong>累计 PnL</strong><span>当前净值减去初始资金，包含已实现和当前未实现盈亏。</span></div><div class="definition"><strong>影子研究 / 管理旧仓</strong><span>继续记录不执行的 AI 决策，同时只对原有持仓执行退出管理。</span></div></div></section>`;
 }

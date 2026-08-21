@@ -154,7 +154,7 @@ ai_instrument_allocator_v1:
   max_entry_validity_seconds: 300
   open_execution_start_minutes_after_open: 2
   open_execution_window_minutes: 5
-  minimum_direction_mass: 0.55
+  minimum_direction_mass: 0.50
   minimum_direction_margin: 0.15
   equity_minimum_scenario_return_pct: 0.0025
   option_minimum_scenario_return_pct: 0.08

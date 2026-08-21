@@ -10,6 +10,7 @@ import scripts.dashboard.paper_dashboard as dashboard
 
 from scripts.dashboard.paper_dashboard import (
     _BEGINNER_PAGE,
+    _build_trade_funnel,
     _read_jsonl,
     build_dashboard_state,
     make_handler,
@@ -985,3 +986,133 @@ def test_dashboard_separates_ten_thousand_allocator_and_counterfactual(
     assert allocator["mandates"][0]["horizon"] == "next_close"
     assert allocator["short_equity_counterfactual"]["creates_order"] is False
     assert "reasoning_content" not in allocator["decisions"][0]
+
+
+def test_trade_funnel_finds_allocator_proposal_bottleneck() -> None:
+    now = "2026-08-21T20:00:00+00:00"
+    audit_records = [
+        {
+            "ts": "2026-08-21T18:00:00+00:00",
+            "event": "forward_cycle_complete",
+            "snapshots": 25,
+            "active_candidates": 4,
+            "orders": [],
+            "option_decisions": [
+                {
+                    "action": "buy_to_open",
+                    "execution_status": "entry_frozen",
+                }
+            ],
+            "option_entries": [],
+        },
+        {
+            "ts": "2026-08-18T18:00:00+00:00",
+            "event": "forward_cycle_complete",
+            "snapshots": 999,
+            "active_candidates": 999,
+        },
+    ]
+    allocator_cycles = [
+        {
+            "ts": "2026-08-21T18:05:00+00:00",
+            "event": "ai_instrument_allocator_stage_complete",
+            "stage": "intraday",
+            "skipped": [
+                {
+                    "ticker": "A",
+                    "reason": "structured model failure: actionable signal holding period does not match horizon",
+                },
+                {
+                    "ticker": "B",
+                    "reason": "Model cited unsupported evidence.",
+                },
+                {
+                    "ticker": "C",
+                    "reason": "Challenge veto recommended no_trade.",
+                },
+                {
+                    "ticker": "D",
+                    "reason": "ticker cooldown active and no new event",
+                },
+            ],
+            "plans": [{"plan_id": "plan-e"}],
+            "executions": [
+                {
+                    "status": "no_trade",
+                    "reason": "fresh executable data failed closed: quote unavailable",
+                }
+            ],
+            "paper_orders_created": 0,
+        }
+    ]
+    allocator_decisions = [
+        {
+            "ts": "2026-08-21T18:01:00+00:00",
+            "signal": {"action": "no_trade"},
+        },
+        {
+            "ts": "2026-08-21T18:02:00+00:00",
+            "signal": {
+                "action": "propose_trade",
+                "horizon": "next_close",
+                "probability_status": "uncalibrated",
+                "signed_return_probability_buckets": {
+                    "return_lt_minus_5_pct": 0.05,
+                    "return_minus_5_to_minus_2_pct": 0.10,
+                    "return_minus_2_to_minus_0_5_pct": 0.15,
+                    "return_minus_0_5_to_plus_0_5_pct": 0.20,
+                    "return_plus_0_5_to_plus_2_pct": 0.25,
+                    "return_plus_2_to_plus_5_pct": 0.15,
+                    "return_gt_plus_5_pct": 0.10,
+                },
+            },
+        },
+        {
+            "ts": "2026-08-21T18:03:00+00:00",
+            "signal": {
+                "action": "propose_trade",
+                "horizon": "next_close",
+                "probability_status": "uncalibrated",
+                "signed_return_probability_buckets": {
+                    "return_lt_minus_5_pct": 0.02,
+                    "return_minus_5_to_minus_2_pct": 0.03,
+                    "return_minus_2_to_minus_0_5_pct": 0.05,
+                    "return_minus_0_5_to_plus_0_5_pct": 0.60,
+                    "return_plus_0_5_to_plus_2_pct": 0.10,
+                    "return_plus_2_to_plus_5_pct": 0.10,
+                    "return_gt_plus_5_pct": 0.10,
+                },
+            },
+        },
+    ]
+
+    funnel = _build_trade_funnel(
+        now=now,
+        allocator_profile={
+            "minimum_direction_mass": 0.50,
+            "minimum_direction_margin": 0.15,
+        },
+        audit_records=audit_records,
+        allocator_cycles=allocator_cycles,
+        allocator_decisions=allocator_decisions,
+        allocator_fill_records=[],
+    )
+
+    assert funnel["window_hours"] == 48
+    assert funnel["allocator"]["candidate_reviews"] == 5
+    assert funnel["allocator"]["model_decisions"] == 3
+    assert funnel["allocator"]["trade_proposals"] == 2
+    assert funnel["allocator"]["direction_threshold_passes"] == 1
+    assert funnel["allocator"]["execution_attempts"] == 1
+    assert funnel["allocator"]["paper_orders"] == 0
+    assert funnel["allocator"]["paper_fills"] == 0
+    assert funnel["baselines"]["equity"]["signals"] == 4
+    assert funnel["baselines"]["options"]["signals"] == 1
+    assert funnel["baselines"]["equity"]["executable"] is False
+    assert funnel["root_cause"]["code"] == "allocator_proposal_bottleneck"
+    assert funnel["blockers"][0]["count"] >= 1
+
+
+def test_beginner_dashboard_contains_rolling_opportunity_funnel() -> None:
+    assert "过去 48 小时机会漏斗" in _BEGINNER_PAGE
+    assert "不代表订单" in _BEGINNER_PAGE

@@ -100,6 +100,13 @@ compare eligible long puts. Neutral or weakly dominant signals are no-trade.
 The option candidate set is bounded across at most three expirations. A spread
 at or below 1.5% is preferred; above 2% is rejected.
 
+The current paper exploration gate requires the selected bullish or bearish
+mass to be at least `0.50` and to exceed the second-largest directional mass by
+at least `0.15`. This threshold only decides whether an uncalibrated model
+scenario may proceed to deterministic instrument comparison. It is not a
+calibrated probability, does not authorize an order, and does not relax quote,
+liquidity, cost, account, position, or loss limits.
+
 Option comparison uses observed top-of-book and scenario repricing across the
 remaining predicted underlying move, elapsed holding time, and configured IV
 shifts. At execution, Python keeps the original forecast target and calculates:

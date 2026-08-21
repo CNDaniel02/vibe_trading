@@ -33,6 +33,27 @@ SIGNED_BUCKETS = {
 }
 
 
+def test_allocator_paper_threshold_and_prompt_match_observed_forward_contract(
+    paper_root: Path,
+) -> None:
+    config = load_runtime_config(paper_root)
+    profile = config["strategies"]["ai_instrument_allocator_v1"]
+    prompt_text = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "llm"
+        / "prompts"
+        / "ai_allocator_decision_manager.md"
+    ).read_text(encoding="utf-8")
+    normalized_prompt = " ".join(prompt_text.split())
+
+    assert profile["minimum_direction_mass"] == 0.50
+    assert profile["minimum_direction_margin"] == 0.15
+    assert "intraday_close -> 0" in normalized_prompt
+    assert "next_close -> 1" in normalized_prompt
+    assert "two_to_five_days -> 2, 3, 4, or 5" in normalized_prompt
+
+
 class _MustNotDiscover:
     def collect_seed_candidates(self, *_args, **_kwargs):
         raise AssertionError("entry-frozen strategy must not start discovery")

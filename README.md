@@ -248,7 +248,10 @@ The dashboard is a five-view read-only control center:
 - `持仓与订单` keeps positions, open orders, and completed order history
   distinct; completed history is collapsed by default.
 - `策略表现` compares execution mode, account ownership, decisions, entries,
-  closed trades, PnL, win rate, and the latest no-trade reason by strategy.
+  closed trades, PnL, win rate, and the latest no-trade reason by strategy. It
+  also shows a rolling 48-hour allocator funnel from reviewed candidates to
+  model decisions, proposals, deterministic execution, paper orders, and fills,
+  with an automatic plain-language diagnosis of the largest zero-trade drop.
 - `AI 决策` shows candidate ranking, Exa evidence, structured DeepSeek output,
   Challenge review, and the deterministic Python risk verdict without raw
   private chain-of-thought.

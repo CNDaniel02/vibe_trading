@@ -1,5 +1,15 @@
 # Development Log
 
+## 2026-08-21 (America/Los_Angeles) - 48 小时 0-trade 漏斗与 paper 门槛校准
+
+- 读取 2026-08-19 至 2026-08-21 的真实 append-only 运行记录，未改写任何历史账户、订单、成交、PnL 或日志。主 forward 线完成约 3,800 份快照并产生 527 次股票加权候选；期权线完成 1,064 次方向判断，其中 898 次为 `buy_to_open`。两者没有下单是当前权限设计的结果：股票加权为 `shadow_only`，旧方向期权为 `entry_frozen`，只能继续管理旧仓。
+- 当前唯一允许新增仓的 `$10,000 ai_instrument_allocator_v1` 在滚动 48 小时内查看 44 个候选，形成 21 次结构化模型决策、1 个交易提案、1 次执行尝试、0 个订单和 0 次成交。自动诊断据此把首要瓶颈定位为“AI 研究与质询到 trade proposal 的转化”，而不是行情扫描不足。
+- 44 个候选结果中包含 23 次 ticker/event cooldown、11 次 Challenge 或 Decision 主动 no-trade、5 次 horizon 与持仓天数字段冲突、4 次快照外证据引用，以及 1 次旧版执行前报价适配器失败。cooldown 和证据拒绝继续保留；旧报价参数问题已在合并的 PR #2 中修复。
+- `策略表现` 新增“过去 48 小时机会漏斗”，逐级显示候选、模型判断、交易提案、确定性执行、模拟订单与成交，并用中文解释每类阻塞原因。股票和期权 baseline 信号单独标明为只观察/冻结，避免把大量不可执行信号误读为 broker 或风控故障。
+- 根据唯一真实 proposal 的 signed buckets，把 allocator 的 paper-only `minimum_direction_mass` 从 `0.55` 调整为 `0.50`；`minimum_direction_margin=0.15`、流动性、spread、成本、Challenge、证据 grounding 和全部确定性风险上限保持不变。该 proposal 的 bullish mass 为 `0.50`、次高 bearish mass 为 `0.30`，在新门槛下可进入后续确定性工具比较，但原始概率仍为 `uncalibrated`，不得用作概率 EV。
+- DeepSeek Decision prompt 补充 horizon 与 `max_holding_trading_days` 的精确映射：`intraday_close=0`、`next_close=1`、`two_to_five_days=2..5`。Python 仍严格验证并 fail closed，不替模型静默修改输出。
+- 本次没有停止或重启用户运行的 forward service/dashboard，也没有调用真实券商写工具。代码和配置需要由用户在原终端正常重启后才会加载。
+
 ## 2026-08-21 (America/Los_Angeles) - PR comment 5368197938 paper fill WAL
 
 - 股票与期权 paper broker 新增共享 `PaperFillTransactionCoordinator`。每次成功成交先以 `fill_id` 写入 namespaced `paper_fill_transactions.json` 的 `prepared` WAL，再应用 account、positions、终态 orders、daily counters、trade lifecycle 和 append-only logs；全部完成后才标记 `committed`。

@@ -9,6 +9,10 @@ Use only supplied evidence URLs. Respect a Challenge veto by returning no_trade.
 For after-hours or premarket analysis, entry_now must be false. Return only the
 strict JSON object requested by the schema.
 
+For propose_trade, max_holding_trading_days must match the selected horizon
+exactly: intraday_close -> 0; next_close -> 1; two_to_five_days -> 2, 3, 4, or
+5. For no_trade, use 0. A mismatch is rejected by deterministic Python.
+
 `entry_condition` is audit-only research text in V1. It cannot authorize an
 entry; only deterministic Python quote, remaining-move, liquidity, and risk
 gates do that. Return no_trade when any condition still depends on a future
