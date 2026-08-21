@@ -445,7 +445,9 @@ stateDiagram-v2
 
 股票买入成交价基于 ask 加不利滑点；卖出基于 bid 减不利滑点。期权使用真实合约 bid/ask 和单独配置的不利滑点。limit 不可达到时订单保持 open，之后由新报价重试、过期或取消。
 
-账户、positions、orders 和 counters 使用原子文件替换保存。JSONL 审计使用跨进程锁和 durable append。idempotency key、duplicate order gate、已有持仓 gate、禁止 average down 和 AI 同日 stop-loss ticker block 共同阻止重复下单。
+单个 JSON 文件仍使用原子替换，但一次成交不再依赖多个文件碰巧全部写完。股票和期权 paper broker 共用 `PaperFillTransactionCoordinator`：先把以 `fill_id` 为键的 `prepared` WAL 写入各自账户 namespace 的 `paper_fill_transactions.json`，其中保存成交后的 account、对应 positions、终态 orders、daily counters、trade lifecycle 目标快照和待追加日志；然后才依次应用这些目标状态。进程在任一边界中断时，下一次任一 broker 初始化或提交订单前都会重放同一快照并标记 `committed`，不会重新执行现金运算、PnL 运算或计数器增量。JSONL 使用 `fill_transaction_id` 去重，成交与审计记录最多追加一次；已提交事务保留 fill 与受影响文件清单，但移除临时完整快照以控制账本增长。
+
+broker state mutation 使用同一跨进程 fill lock，避免创建、取消或过期订单与成交快照互相覆盖。idempotency key、terminal-order short circuit、duplicate order gate、已有持仓 gate、禁止 average down 和 AI 同日 stop-loss ticker block 共同阻止重复下单。WAL 提供进程崩溃恢复，不改变真实 broker 边界，也不迁移或改写已有历史成交。
 
 ## 13. Monitor、Exit 和 EOD
 

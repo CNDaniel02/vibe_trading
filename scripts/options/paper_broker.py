@@ -12,6 +12,10 @@ from scripts.options.models import OptionContract, OptionOrder, OptionQuote
 from scripts.options.risk_gate import check_option_order
 from scripts.options.state import OptionStateStore
 from scripts.options.virtual_account import apply_option_fill
+from scripts.simulation.fill_transaction import (
+    PaperFillTransactionCoordinator,
+    counters_after_fill,
+)
 
 
 class OptionPaperBroker:
@@ -40,6 +44,8 @@ class OptionPaperBroker:
         self.log_prefix = f"strategy_sleeves/{namespace}/" if namespace else ""
         self.audit = AuditLog(self.root, f"{self.log_prefix}audit.jsonl")
         self.lifecycle = TradeLifecycleJournal(self.root, namespace=namespace)
+        self.transactions = PaperFillTransactionCoordinator(self.store.base)
+        self.transactions.recover()
 
     def create_order(
         self,
@@ -72,9 +78,11 @@ class OptionPaperBroker:
             signal_horizon=signal_horizon,
             created_at=now or utc_now(),
         )
-        orders = self.store.orders()
-        orders[order.order_id] = order
-        self.store.save_orders(orders)
+        with self.transactions.lock():
+            self.transactions.recover_locked()
+            orders = self.store.orders()
+            orders[order.order_id] = order
+            self.store.save_orders(orders)
         self.audit.append("paper_option_order_created", {"order": order.to_dict()})
         return order
 
@@ -86,8 +94,33 @@ class OptionPaperBroker:
         *,
         entry_nav_usd: float | None = None,
     ) -> OptionOrder:
+        with self.transactions.lock():
+            self.transactions.recover_locked()
+            return self._submit_order_locked(
+                order,
+                quote,
+                now,
+                entry_nav_usd=entry_nav_usd,
+            )
+
+    def _submit_order_locked(
+        self,
+        order: OptionOrder,
+        quote: OptionQuote | None,
+        now: str | None = None,
+        *,
+        entry_nav_usd: float | None = None,
+    ) -> OptionOrder:
         now = now or utc_now()
         orders = self.store.orders()
+        persisted = orders.get(order.order_id)
+        if persisted is not None and persisted.status in {
+            "filled",
+            "cancelled",
+            "rejected",
+            "expired",
+        }:
+            return persisted
         account = self.store.base.account()
         equity_positions = self.store.base.positions()
         option_positions = self.store.positions()
@@ -155,17 +188,82 @@ class OptionPaperBroker:
         order.average_fill_price = fill.price
         order.updated_at = fill.filled_at
         orders[order.order_id] = order
-        self.store.base.save_account(account, fill.filled_at)
-        self.store.save_positions(option_positions)
-        self.store.save_orders(orders)
-        if fill.intent == "buy_to_open":
-            self.store.base.increment_trades(now, line="options")
-        else:
-            self.store.base.add_daily_realized_pnl(account.realized_pnl - realized_before, now, line="options")
-        append_jsonl(self.root, f"{self.log_prefix}paper_option_orders.jsonl", {"event": "filled", "order": order.to_dict(), "quote": quote.to_dict()})
-        append_jsonl(self.root, f"{self.log_prefix}paper_option_fills.jsonl", {"fill": fill.to_dict(), "contract": order.contract.to_dict(), "quote": quote.to_dict()})
-        self.lifecycle.record_option_fill(fill, order.thesis)
-        self.audit.append("paper_option_order_filled", {"order": order.to_dict(), "fill": fill.to_dict(), "quote": quote.to_dict()})
+        account.updated_at = fill.filled_at
+        updated_counters = counters_after_fill(
+            counters,
+            line="options",
+            is_entry=fill.intent == "buy_to_open",
+            realized_pnl_delta=account.realized_pnl - realized_before,
+        )
+        lifecycle = self.lifecycle.prepare_option_fill(fill, order.thesis)
+        lifecycle_writes = self.lifecycle.transaction_writes(
+            lifecycle,
+            transaction_id=fill.fill_id,
+            ts=fill.filled_at,
+        )
+        self.transactions.commit_locked(
+            {
+                "transaction_id": fill.fill_id,
+                "order_id": order.order_id,
+                "instrument": f"option_{fill.option_type}",
+                "prepared_at": fill.filled_at,
+                "fill": fill.to_dict(),
+                "state_writes": [
+                    {"name": "paper_account.json", "data": account.to_dict()},
+                    {
+                        "name": "paper_option_positions.json",
+                        "data": {
+                            option_id: position.to_dict()
+                            for option_id, position in option_positions.items()
+                        },
+                    },
+                    {
+                        "name": "paper_option_orders.json",
+                        "data": {
+                            order_id: current.to_dict()
+                            for order_id, current in orders.items()
+                        },
+                    },
+                    {"name": "daily_counters.json", "data": updated_counters},
+                    lifecycle_writes["state_write"],
+                ],
+                "jsonl_writes": [
+                    {
+                        "filename": f"{self.log_prefix}paper_option_orders.jsonl",
+                        "record": {
+                            "ts": fill.filled_at,
+                            "event": "filled",
+                            "order": order.to_dict(),
+                            "quote": quote.to_dict(),
+                        },
+                    },
+                    {
+                        "filename": f"{self.log_prefix}paper_option_fills.jsonl",
+                        "record": {
+                            "ts": fill.filled_at,
+                            "fill": fill.to_dict(),
+                            "contract": order.contract.to_dict(),
+                            "quote": quote.to_dict(),
+                        },
+                    },
+                    lifecycle_writes["jsonl_write"],
+                    {
+                        "filename": f"{self.log_prefix}audit.jsonl",
+                        "record": {
+                            "audit_id": f"pa_fill_{fill.fill_id}",
+                            "ts": fill.filled_at,
+                            "event_type": "paper_option_order_filled",
+                            "payload": {
+                                "order": order.to_dict(),
+                                "fill": fill.to_dict(),
+                                "quote": quote.to_dict(),
+                            },
+                        },
+                    },
+                ],
+                "text_writes": lifecycle_writes["text_writes"],
+            }
+        )
         return order
 
     def process_open_orders(
@@ -183,13 +281,22 @@ class OptionPaperBroker:
                 continue
             submitted = parse_ts(order.submitted_at or order.created_at)
             if parse_ts(now) - submitted >= timedelta(seconds=expiry_seconds):
-                orders = self.store.orders()
-                current = orders[order.order_id]
-                current.status = "expired"
-                current.reject_reason = "paper option order expired before fill"
-                current.updated_at = now
-                orders[current.order_id] = current
-                self.store.save_orders(orders)
+                with self.transactions.lock():
+                    self.transactions.recover_locked()
+                    orders = self.store.orders()
+                    current = orders[order.order_id]
+                    if current.status not in {
+                        "open",
+                        "submitted_to_paper_broker",
+                        "partially_filled",
+                    }:
+                        processed.append(current)
+                        continue
+                    current.status = "expired"
+                    current.reject_reason = "paper option order expired before fill"
+                    current.updated_at = now
+                    orders[current.order_id] = current
+                    self.store.save_orders(orders)
                 self.audit.append("paper_option_order_expired", {"order": current.to_dict()})
                 processed.append(current)
             else:
@@ -210,14 +317,16 @@ class OptionPaperBroker:
         *,
         now: str | None = None,
     ) -> OptionOrder:
-        orders = self.store.orders()
-        order = orders[order_id]
-        if order.status in {"filled", "cancelled", "rejected", "expired"}:
-            return order
-        order.status = "cancelled"
-        order.reject_reason = reason
-        order.updated_at = now or utc_now()
-        orders[order_id] = order
-        self.store.save_orders(orders)
+        with self.transactions.lock():
+            self.transactions.recover_locked()
+            orders = self.store.orders()
+            order = orders[order_id]
+            if order.status in {"filled", "cancelled", "rejected", "expired"}:
+                return order
+            order.status = "cancelled"
+            order.reject_reason = reason
+            order.updated_at = now or utc_now()
+            orders[order_id] = order
+            self.store.save_orders(orders)
         self.audit.append("paper_option_order_cancelled", {"reason": reason, "order": order.to_dict()})
         return order

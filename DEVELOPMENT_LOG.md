@@ -1,5 +1,12 @@
 # Development Log
 
+## 2026-08-21 (America/Los_Angeles) - PR comment 5368197938 paper fill WAL
+
+- 股票与期权 paper broker 新增共享 `PaperFillTransactionCoordinator`。每次成功成交先以 `fill_id` 写入 namespaced `paper_fill_transactions.json` 的 `prepared` WAL，再应用 account、positions、终态 orders、daily counters、trade lifecycle 和 append-only logs；全部完成后才标记 `committed`。
+- 重启和每次订单提交前都会恢复未完成事务。恢复覆盖到已保存的目标快照，不重新执行现金、PnL 或计数器增量；重复提交已持久化终态订单直接返回原订单。成交、trade journal 和 audit JSONL 使用 `fill_transaction_id` 去重，退出 postmortem 也由同一事务补完。
+- 创建、提交、取消和过期订单的状态写入使用同一跨进程 fill lock，避免与成交快照互相覆盖。WAL 位于各自 strategy sleeve state 目录，不合并或迁移历史 `$2,000` 主账本与 `$10,000 ai_instrument_allocator_v1` 账本。
+- 新增 16 个 crash-injection 回归，覆盖股票和期权的开仓、退出，以及 account、positions、orders、counters 四个中断边界；每个场景验证两次重启和重复提交后现金、持仓、终态订单、交易计数与 fill log 都恰好一次。全套 pytest 为 `364 passed`，仅有 4 条既有上游 `exchange_calendars` deprecation warning。本次没有读取或修改真实券商账户，也没有调用或新增任何真实下单工具。
+
 ## 2026-08-21 (America/Los_Angeles) - PR comment 5366684988 提交后恢复与 live observation clock
 
 - allocator 重启恢复现在会把全部已持久化 entry order 状态反向同步到关联 plan：有效 `submitted/open/partially_filled` 和 `filled` 令 plan 进入 `executed`，`rejected/expired/cancelled` 进入对应终态；这一同步发生在 active plan 查询前，因此提交、成交或 mandate reconcile 后崩溃都不会再次执行同一 plan。

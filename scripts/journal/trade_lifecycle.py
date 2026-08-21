@@ -22,6 +22,11 @@ class TradeLifecycleJournal:
         self.log_prefix = f"strategy_sleeves/{namespace}/" if namespace else ""
 
     def record_equity_fill(self, fill: Fill, thesis: str) -> dict[str, Any]:
+        prepared = self.prepare_equity_fill(fill, thesis)
+        self._persist_prepared(prepared)
+        return prepared["event"]
+
+    def prepare_equity_fill(self, fill: Fill, thesis: str) -> dict[str, Any]:
         state = self._state()
         key = f"equity:{fill.symbol}"
         if fill.side == "buy":
@@ -57,12 +62,14 @@ class TradeLifecycleJournal:
                     multiplier=1,
                 )
                 state["closed"].append(event)
-                self._write_postmortem(event)
-        self.store.write_json(self.FILENAME, state)
-        append_jsonl(self.root, f"{self.log_prefix}trade_journal.jsonl", event)
-        return event
+        return self._prepared(state, event)
 
     def record_option_fill(self, fill: OptionFill, thesis: str) -> dict[str, Any]:
+        prepared = self.prepare_option_fill(fill, thesis)
+        self._persist_prepared(prepared)
+        return prepared["event"]
+
+    def prepare_option_fill(self, fill: OptionFill, thesis: str) -> dict[str, Any]:
         state = self._state()
         key = f"option:{fill.option_id}"
         if fill.intent == "buy_to_open":
@@ -100,10 +107,27 @@ class TradeLifecycleJournal:
                     multiplier=fill.multiplier,
                 )
                 state["closed"].append(event)
-                self._write_postmortem(event)
-        self.store.write_json(self.FILENAME, state)
-        append_jsonl(self.root, f"{self.log_prefix}trade_journal.jsonl", event)
-        return event
+        return self._prepared(state, event)
+
+    def transaction_writes(
+        self,
+        prepared: dict[str, Any],
+        *,
+        transaction_id: str,
+        ts: str,
+    ) -> dict[str, Any]:
+        return {
+            "state_write": {"name": self.FILENAME, "data": prepared["state"]},
+            "jsonl_write": {
+                "filename": f"{self.log_prefix}trade_journal.jsonl",
+                "record": {
+                    "ts": ts,
+                    "fill_transaction_id": transaction_id,
+                    **prepared["event"],
+                },
+            },
+            "text_writes": prepared["text_writes"],
+        }
 
     def mark_equity_quotes(self, quotes: dict[str, Quote], asof: str) -> None:
         state = self._state()
@@ -177,12 +201,23 @@ class TradeLifecycleJournal:
             "outcome": "win" if pnl > 0 else ("loss" if pnl < 0 else "flat"),
         }
 
-    def _write_postmortem(self, trade: dict[str, Any]) -> None:
-        journal_dir = self.root / "logs" / "journal"
-        if self.namespace:
-            journal_dir = self.root / "logs" / "strategy_sleeves" / self.namespace / "journal"
-        journal_dir.mkdir(parents=True, exist_ok=True)
-        path = journal_dir / f"{trade['trade_id']}.md"
+    def _prepared(self, state: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
+        text_writes = self._postmortem_writes(event) if event.get("event") == "trade_closed" else []
+        return {"state": state, "event": event, "text_writes": text_writes}
+
+    def _persist_prepared(self, prepared: dict[str, Any]) -> None:
+        self.store.write_json(self.FILENAME, prepared["state"])
+        append_jsonl(
+            self.root,
+            f"{self.log_prefix}trade_journal.jsonl",
+            prepared["event"],
+        )
+        for write in prepared["text_writes"]:
+            path = self.root / "logs" / write["filename"]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(write["content"], encoding="utf-8")
+
+    def _postmortem_writes(self, trade: dict[str, Any]) -> list[dict[str, str]]:
         lines = [
             f"# Paper Trade Journal: {trade['trade_id']}",
             "",
@@ -206,10 +241,22 @@ class TradeLifecycleJournal:
             "",
         ]
         content = "\n".join(lines)
-        path.write_text(content, encoding="utf-8")
+        journal_prefix = f"{self.log_prefix}journal/"
+        writes = [
+            {
+                "filename": f"{journal_prefix}{trade['trade_id']}.md",
+                "content": content,
+            }
+        ]
         entry_order_id = trade.get("entry_order_id")
         if entry_order_id:
-            (journal_dir / f"{entry_order_id}.md").write_text(content, encoding="utf-8")
+            writes.append(
+                {
+                    "filename": f"{journal_prefix}{entry_order_id}.md",
+                    "content": content,
+                }
+            )
+        return writes
 
     def _state(self) -> dict[str, Any]:
         state = self.store.read_json(self.FILENAME, {"open": {}, "closed": []})

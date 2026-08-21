@@ -365,6 +365,11 @@ Fills use bid/ask plus adverse slippage and can never violate the agent's limit.
 
 Equity and options have separate orders, fills, positions, journals, win rates, and PnL. Inside each executable sleeve they share cash, a 60% total deployment cap, at most three total positions, at most three daily entries, and one executable exposure per underlying. Allocator equity positions also require a planned stop with at most 1% NAV planned loss, while the 25% single-stock limit remains a notional cap.
 
+Successful paper fills use a namespaced write-ahead ledger keyed by `fill_id`.
+If the process stops after writing cash, positions, orders, counters, or only
+part of the journals, the next broker startup completes the exact saved target
+state and deduplicates log records instead of applying the fill a second time.
+
 Allocator entry limits use cash plus fresh executable bid marks for every
 existing sleeve holding. Missing, stale, future, invalid, or identity-mismatched
 position marks block both new entries and pending-entry retries. Free-text
