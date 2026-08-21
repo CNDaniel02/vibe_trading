@@ -169,6 +169,13 @@ invalid, or identity-mismatched, no new or retrying entry may proceed. Cost
 basis remains an explicit deployment diagnostic; it is never passed as
 `nav_usd`.
 
+Live execution and monitor calls preserve `now=None` until all required network
+quotes have returned, then validate them against a fresh wall-clock observation
+cutoff. The final execution/data cutoff is not earlier than any underlying,
+option-candidate, or holding-mark timestamp actually used. An explicitly
+supplied replay time never advances; any later observation is rejected as
+lookahead.
+
 The deterministic broker risk gate has final veto. The model cannot modify any
 limit or create an order object.
 
@@ -200,6 +207,11 @@ never auto-submitted. A retryable `submitted_to_paper_broker`, `open`, or
 `partially_filled` entry may continue only when a valid `pending_fill` or `open`
 mandate matches its order id, strategy, exposure id, ticker, and instrument
 type. Otherwise the order is cancelled and any matching mandate is closed.
+Valid retryable entries and filled entries move their associated plan out of
+`active` before plan execution is considered; rejected, expired, and cancelled
+entries restore the corresponding terminal plan state. Registration is
+idempotent only for the same order/mandate identity and cannot replace an
+existing `pending_fill` or `open` mandate for that exposure.
 
 New mandates use `mandate_version: 2` and persist the exact
 `max_holding_trading_days`. Registration and every restart-time exit evaluation
@@ -265,3 +277,6 @@ are the primary promotion evidence.
 - 2026-08-20: added fail-closed orphan-order recovery, exposure-bound mandate
   validation, bid-marked entry NAV, and the audit-only `entry_condition`
   boundary.
+- 2026-08-21: completed post-submit plan recovery, active-mandate overwrite
+  protection, live post-fetch quote cutoffs, and persisted-position identity
+  validation.

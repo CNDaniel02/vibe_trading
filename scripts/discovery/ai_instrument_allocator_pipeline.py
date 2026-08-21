@@ -73,7 +73,7 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                 decision_time,
                 reason="strategy disabled",
             )
-        monitor = self.monitor_only(decision_time)
+        monitor = self.monitor_only(now)
         if not self.profile.get("new_entries_enabled", True):
             return self._stage_result(
                 stage,
@@ -92,7 +92,7 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
         calls_before = len(self.tracker.records)
         if stage == "open_execution":
             executions = [
-                self._execute_plan(plan, decision_time, stage=stage)
+                self._execute_plan(plan, now, stage=stage)
                 for plan in self.plans.active_plans(decision_time)
             ]
             return self._stage_result(
@@ -108,7 +108,11 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
         elif stage == "preopen_revalidation":
             research = self._preopen_revalidation(decision_time)
         else:
-            research = self._research_stage(stage, decision_time)
+            research = self._research_stage(
+                stage,
+                decision_time,
+                live_execution=now is None,
+            )
         return self._stage_result(
             stage,
             decision_time,
@@ -125,6 +129,7 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
         *,
         force_flatten: bool = False,
     ) -> dict[str, Any]:
+        live_clock = now is None
         decision_time = now or utc_now()
         clock = self.clock.status(decision_time)
         recovery_updates = self._recover_allocator_entry_orders(decision_time)
@@ -180,14 +185,17 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
 
         entry_nav_usd: float | None = None
         try:
-            entry_nav_usd = float(
-                self._account_state(
-                    decision_time,
-                    equity_quotes=quotes,
-                    option_quotes=option_quotes,
-                )["nav_usd"]
+            entry_account = self._account_state(
+                None if live_clock else decision_time,
+                equity_quotes=quotes,
+                option_quotes=option_quotes,
             )
+            entry_nav_usd = float(entry_account["nav_usd"])
+            if live_clock:
+                decision_time = entry_account["nav_calculated_at"]
         except (TypeError, ValueError) as exc:
+            if live_clock:
+                decision_time = utc_now()
             errors["marked_nav"] = f"{type(exc).__name__}: {exc}"
             recovery_updates.extend(
                 self._recover_allocator_entry_orders(
@@ -695,7 +703,13 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
         )
         return snapshot, new_events, evidence_snapshot
 
-    def _research_stage(self, stage: str, decision_time: str) -> dict[str, Any]:
+    def _research_stage(
+        self,
+        stage: str,
+        decision_time: str,
+        *,
+        live_execution: bool = False,
+    ) -> dict[str, Any]:
         skipped: list[dict[str, Any]] = []
         plans: list[dict[str, Any]] = []
         executions: list[dict[str, Any]] = []
@@ -866,25 +880,33 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
             )
             plans.append(plan)
             if stage == "intraday":
-                executions.append(self._execute_plan(plan, decision_time, stage=stage))
+                executions.append(
+                    self._execute_plan(
+                        plan,
+                        None if live_execution else decision_time,
+                        stage=stage,
+                    )
+                )
         return {"plans": plans, "executions": executions, "skipped": skipped}
 
     def _execute_plan(
         self,
         plan: dict[str, Any],
-        now: str,
+        now: str | None,
         *,
         stage: str,
     ) -> dict[str, Any]:
         if stage not in self.EXECUTION_STAGES:
             return {"status": "no_trade", "reason": "research stage cannot create orders", "order": None}
+        live_clock = now is None
+        decision_time = now or utc_now()
         try:
             ticker = str(plan["ticker"]).upper()
             raw_signal = plan["signal"]
             if not isinstance(raw_signal, dict):
                 raise TypeError("plan signal must be an object")
             signal = dict(raw_signal)
-            validate_actionable_signal(signal, now)
+            validate_actionable_signal(signal, decision_time)
         except (KeyError, TypeError, ValueError) as exc:
             return {
                 "status": "no_trade",
@@ -900,12 +922,12 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
             }
         if stage == "open_execution":
             revalidated_at = plan.get("preopen_revalidated_at")
-            clock = self.clock.status(now)
+            clock = self.clock.status(decision_time)
             try:
                 current_revalidation = bool(revalidated_at) and (
                     parse_ts(str(revalidated_at)).date()
                     == parse_ts(str(clock.open_time)).date()
-                    and parse_ts(str(revalidated_at)) <= parse_ts(now)
+                    and parse_ts(str(revalidated_at)) <= parse_ts(decision_time)
                 )
             except (TypeError, ValueError):
                 current_revalidation = False
@@ -928,7 +950,9 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                 signal["horizon"],
                 {},
             )
-            account_state = self._account_state(now)
+            account_state = self._account_state(
+                None if live_clock else decision_time
+            )
             max_premium = float(account_state["nav_usd"]) * float(
                 self.config["options_risk"].get("max_order_risk_pct_of_equity", 0.03)
             )
@@ -936,7 +960,7 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                 underlying=ticker,
                 underlying_price=quote.last,
                 option_type=option_type,
-                now=now,
+                now=decision_time,
                 min_dte=int(dte.get("min_dte", self.config["options_universe"]["min_dte"])),
                 target_dte=int(dte.get("target_dte", self.config["options_universe"]["target_dte"])),
                 max_dte=int(dte.get("max_dte", self.config["options_universe"]["max_dte"])),
@@ -949,16 +973,55 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                 "order": None,
             }
         try:
-            execution_now = max(
-                [
-                    parse_ts(now),
-                    parse_ts(quote.asof),
-                    *(
-                        parse_ts(option_quote.updated_at)
-                        for _, option_quote in option_candidates
-                    ),
-                ]
-            ).isoformat()
+            observation_cutoff = utc_now() if live_clock else decision_time
+            if quote.symbol.upper() != ticker:
+                raise ValueError("underlying quote identity mismatch")
+            quote_validation = validate_quote(
+                quote,
+                observation_cutoff,
+                int(self.config["paper"].get("quote_stale_after_seconds", 60)),
+                self.config["universe"],
+            )
+            if not quote_validation.approved:
+                raise ValueError(quote_validation.reason)
+            for contract, option_quote in option_candidates:
+                if option_quote.option_id != contract.option_id:
+                    raise ValueError("option quote identity mismatch")
+                option_validation = validate_option_quote(
+                    option_quote,
+                    observation_cutoff,
+                    self.config,
+                )
+                if not option_validation.approved:
+                    raise ValueError(option_validation.reason)
+            observed_times = [
+                parse_ts(quote.asof),
+                *(
+                    parse_ts(option_quote.updated_at)
+                    for _, option_quote in option_candidates
+                ),
+                *(
+                    parse_ts(value)
+                    for value in account_state.get("equity_mark_times", {}).values()
+                ),
+                *(
+                    parse_ts(value)
+                    for value in account_state.get("option_mark_times", {}).values()
+                ),
+            ]
+            if not live_clock and any(
+                observed > parse_ts(decision_time) for observed in observed_times
+            ):
+                raise ValueError("future executable quote would create lookahead")
+            execution_now = (
+                max(
+                    parse_ts(observation_cutoff),
+                    parse_ts(account_state["nav_calculated_at"]),
+                    *observed_times,
+                ).isoformat()
+                if live_clock
+                else decision_time
+            )
             planned_exit_at = planned_exit_time(
                 execution_now,
                 signal["horizon"],
@@ -1154,7 +1217,10 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
 
         updates: list[dict[str, Any]] = []
         retryable = {"submitted_to_paper_broker", "open", "partially_filled"}
+        allocations = self.plans.allocations()
         for broker, order, exposure_id, ticker, instrument_type in entries:
+            allocation = allocations.get(str(order.decision_id), {})
+            plan_id = allocation.get("plan_id")
             reason = None
             if order.status == "created":
                 reason = "allocator created entry cancelled during restart recovery"
@@ -1174,38 +1240,62 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                     reason = (
                         "allocator entry mandate invalid during restart recovery"
                     )
-            if reason is None:
+            if reason is not None:
+                if plan_id:
+                    self.plans.set_plan_status(
+                        str(plan_id),
+                        "invalidated",
+                        reason=reason,
+                        now=now,
+                    )
+                cancelled = broker.cancel_order(order.order_id, reason=reason, now=now)
+                for mandate_key, mandate in self.mandates.mandates().items():
+                    if (
+                        mandate_key == exposure_id
+                        or str(mandate.get("order_id")) == order.order_id
+                    ):
+                        self.mandates.close(mandate_key, reason=reason, now=now)
+                updates.append(
+                    {
+                        "event": "allocator_entry_recovered_fail_closed",
+                        "reason": reason,
+                        "exposure_id": exposure_id,
+                        "order": cancelled.to_dict(),
+                    }
+                )
                 continue
 
-            allocation = self.plans.allocations().get(str(order.decision_id), {})
-            plan_id = allocation.get("plan_id")
-            if plan_id:
+            plan_status = {
+                "submitted_to_paper_broker": "executed",
+                "open": "executed",
+                "partially_filled": "executed",
+                "filled": "executed",
+                "rejected": "rejected",
+                "expired": "expired",
+                "cancelled": "cancelled",
+            }.get(order.status)
+            plan = self.plans.plans().get(str(plan_id)) if plan_id else None
+            if plan_status and plan is not None and plan.get("status") == "active":
                 self.plans.set_plan_status(
                     str(plan_id),
-                    "invalidated",
-                    reason=reason,
+                    plan_status,
+                    reason=f"recovered from persisted entry order {order.status}",
                     now=now,
                 )
-            cancelled = broker.cancel_order(order.order_id, reason=reason, now=now)
-            for mandate_key, mandate in self.mandates.mandates().items():
-                if (
-                    mandate_key == exposure_id
-                    or str(mandate.get("order_id")) == order.order_id
-                ):
-                    self.mandates.close(mandate_key, reason=reason, now=now)
-            updates.append(
-                {
-                    "event": "allocator_entry_recovered_fail_closed",
-                    "reason": reason,
-                    "exposure_id": exposure_id,
-                    "order": cancelled.to_dict(),
-                }
-            )
+                updates.append(
+                    {
+                        "event": "allocator_entry_plan_reconciled",
+                        "plan_id": str(plan_id),
+                        "plan_status": plan_status,
+                        "exposure_id": exposure_id,
+                        "order": order.to_dict(),
+                    }
+                )
         return updates
 
     def _account_state(
         self,
-        now: str,
+        now: str | None,
         *,
         equity_quotes: dict[str, Quote] | None = None,
         option_quotes: dict[str, Any] | None = None,
@@ -1213,6 +1303,21 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
         account = self.broker.store.account()
         equity_positions = self.broker.store.positions()
         option_positions = self.option_broker.store.positions()
+        for symbol, position in equity_positions.items():
+            if str(position.symbol).upper() != symbol.upper():
+                raise ValueError(
+                    f"marked NAV unavailable for equity {symbol}: position identity mismatch"
+                )
+        for option_id, position in option_positions.items():
+            contract = position.contract
+            if (
+                contract.option_id != option_id
+                or not str(contract.underlying).strip()
+                or contract.option_type not in {"call", "put"}
+            ):
+                raise ValueError(
+                    f"marked NAV unavailable for option {option_id}: position identity mismatch"
+                )
         marks = dict(equity_quotes or {})
         if equity_quotes is None:
             for symbol, position in equity_positions.items():
@@ -1223,6 +1328,7 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
         option_marks = dict(option_quotes or {})
         if option_quotes is None and option_positions:
             option_marks = self.option_data.fetch_quotes(sorted(option_positions))
+        calculation_time = now or utc_now()
 
         nav = float(account.cash)
         equity_mark_times: dict[str, str] = {}
@@ -1231,7 +1337,7 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
             quote = marks.get(symbol)
             validation = validate_quote(
                 quote,
-                now,
+                calculation_time,
                 int(self.config["paper"].get("quote_stale_after_seconds", 60)),
                 self.config["universe"],
                 enforce_entry_liquidity=False,
@@ -1244,13 +1350,17 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                 raise ValueError(
                     f"marked NAV unavailable for equity {symbol}: quote identity mismatch"
                 )
+            if parse_ts(quote.asof) > parse_ts(calculation_time):
+                raise ValueError(
+                    f"marked NAV unavailable for equity {symbol}: future quote would create lookahead"
+                )
             nav += float(position.quantity) * float(quote.bid)
             equity_mark_times[symbol] = quote.asof
         for option_id, position in option_positions.items():
             quote = option_marks.get(option_id)
             validation = validate_option_quote(
                 quote,
-                now,
+                calculation_time,
                 self.config,
                 enforce_entry_liquidity=False,
             )
@@ -1261,6 +1371,10 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
             if quote.option_id != option_id:
                 raise ValueError(
                     f"marked NAV unavailable for option {option_id}: quote identity mismatch"
+                )
+            if parse_ts(quote.updated_at) > parse_ts(calculation_time):
+                raise ValueError(
+                    f"marked NAV unavailable for option {option_id}: future quote would create lookahead"
                 )
             nav += (
                 float(position.quantity)
@@ -1283,7 +1397,7 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
             "cash_usd": float(account.cash),
             "nav_usd": nav,
             "nav_valuation_method": "conservative_liquidation_bid_v1",
-            "nav_calculated_at": now,
+            "nav_calculated_at": calculation_time,
             "equity_mark_times": equity_mark_times,
             "option_mark_times": option_mark_times,
             "equity_deployed_usd": float(deployment["equity_deployed"]),

@@ -331,6 +331,9 @@ entry stranded in `created` and rejects retryable entries whose order identity
 does not match a valid pending/open mandate. Monitor validation also binds each
 mandate to the actual equity symbol or option contract, so corrupt identity
 fields produce a structured fail-closed exit instead of an exception.
+Persisted retryable/filled entry orders also move their linked plan out of
+`active`; terminal orders restore the matching terminal plan state. An active
+pending/open mandate cannot be replaced by a different order identity.
 
 New position mandates are V2 records that freeze exact
 `max_holding_trading_days`. Registration and restart monitoring reject a
@@ -367,3 +370,6 @@ existing sleeve holding. Missing, stale, future, invalid, or identity-mismatched
 position marks block both new entries and pending-entry retries. Free-text
 `entry_condition` remains audit-only; only Python quote, remaining-move,
 liquidity, authorization-time, and risk checks can authorize an order.
+Live allocator calls validate quotes against a wall-clock cutoff captured after
+network collection and record an execution cutoff no earlier than every quote
+used. Explicit replay cutoffs remain fixed and reject all later observations.

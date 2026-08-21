@@ -1,5 +1,13 @@
 # Development Log
 
+## 2026-08-21 (America/Los_Angeles) - PR comment 5366684988 提交后恢复与 live observation clock
+
+- allocator 重启恢复现在会把全部已持久化 entry order 状态反向同步到关联 plan：有效 `submitted/open/partially_filled` 和 `filled` 令 plan 进入 `executed`，`rejected/expired/cancelled` 进入对应终态；这一同步发生在 active plan 查询前，因此提交、成交或 mandate reconcile 后崩溃都不会再次执行同一 plan。
+- `PositionMandateStore.register_order()` 不再覆盖同 exposure 的 `pending_fill/open` mandate。完全相同的 order/mandate identity 可幂等返回原记录，任何不同 identity 都 fail closed，原 live position mandate 保持不变。
+- allocator 的 live 调用保留 `now=None` 到网络采集结束，再用真实 post-fetch wall clock 验证 underlying、option candidate 和全部 holding marks；最终 execution/data cutoff 不早于任何实际使用的报价。显式传入的 replay 时间保持固定，任何晚于 cutoff 的报价都作为 lookahead 拒绝。
+- marked NAV 新增持仓对象与 map key 的身份校验：股票 position symbol、期权 contract id、非空 underlying 和 call/put type 任一损坏都会阻止 entry。forward monitor wrapper 和 live EOD 调用不再提前冻结 allocator 时间。
+- allocator focused 测试为 `132 passed`，其中新增定向回归 `16 passed`；全套 pytest 为 `348 passed`，仅有 4 条既有上游 `exchange_calendars` deprecation warning。本次仍为严格 paper-only 修改，没有调用 Robinhood 真实下单工具，也没有修改历史账户、订单、成交、PnL、OAuth、state 或 logs。
+
 ## 2026-08-21 (America/Los_Angeles) - PR comment 5366041274 fail-closed 恢复与 marked NAV
 
 - `ai_instrument_allocator_v1` 启动或 monitor 时先恢复未完成 entry：`created` 永远取消，`submitted_to_paper_broker`、`open`、`partially_filled` 只有在存在与 order、strategy、ticker、instrument 和 exposure 完全匹配的 pending/open mandate 时才允许重试。取消前先 invalidated 关联 plan，随后关闭 mandate；中途再次崩溃时由下一次 reconcile 继续 fail closed。

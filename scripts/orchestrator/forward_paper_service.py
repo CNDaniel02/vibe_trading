@@ -642,7 +642,7 @@ class ForwardPaperService:
         self,
         now: str | None = None,
     ) -> dict[str, Any]:
-        result = self.ai_instrument_allocator_pipeline.monitor_only(now or utc_now())
+        result = self.ai_instrument_allocator_pipeline.monitor_only(now)
         append_jsonl(
             self.root,
             "audit.jsonl",
@@ -762,7 +762,7 @@ class ForwardPaperService:
             option_exits.append({"option_id": option_id, "status": submitted.status, "order": submitted.to_dict()})
         ai_gated = self.ai_gated_pipeline.monitor_only(decision_time, force_flatten=preclose)
         ai_instrument_allocator = self.ai_instrument_allocator_pipeline.monitor_only(
-            decision_time,
+            decision_time if now is not None else None,
             force_flatten=False,
         )
         current_account = self.broker.store.account()

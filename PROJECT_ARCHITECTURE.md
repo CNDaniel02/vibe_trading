@@ -364,7 +364,7 @@ flowchart TD
 7. 股票 25% 是 notional cap，同时 planned stop loss 不得超过 NAV 1%。期权单笔 premium 不得超过 3%、aggregate 不得超过 8%。这里的 entry NAV 是现金加所有既有股票和 long option 按最新可执行 bid 计价的保守净值；任一持仓报价缺失、过期、来自未来、异常或 identity 不匹配时，新增和重试 entry 都 fail closed。股票与期权合计最多 3 个仓位、每日 3 次 entry，同 underlying 只能有一个 executable exposure。
 8. `$2,000` counterfactual 只检查 allocator 已选中的完全相同 instrument 的可负担数量、风险比例和拒绝原因，不能重新选择 ticker、strike 或 expiration。
 9. `short_equity_counterfactual` 只是假设直接做空 underlying 的 shadow benchmark；它没有账户、没有订单，PnL 不与 long put 合并。
-10. 每个订单先注册 restart-safe mandate。新建 V2 mandate 会冻结 `max_holding_trading_days` 和股票 `planned_stop_price`。`intraday_close` 当日退出，`next_close` 下一交易日退出，`two_to_five_days` 只持有指定 2-5 个交易日；每次恢复和监控都会验证 `planned_exit_at` 位于 horizon 对应的 XNYS 正常 session、session 距离等于冻结天数且 `thesis_valid_until >= planned_exit_at`。重启会在普通 open-order 处理前取消遗留 `created` entry；只有 order id、strategy、exposure id、ticker 和股票/期权类型均匹配有效 pending/open mandate 的 retryable entry 才能继续。实际持仓的 mandate identity 不匹配会结构化 fail closed 退出，不会进入字段转换异常。allocator 以计划时间作为最长持仓期限，以持久化价格作为股票权威止损，不会因后续 risk config 改变而重算；旧 V1 mandate 不迁移，只在 horizon 固有范围内兼容读取。旧策略仍使用原百分比止损和自然日 time stop。止盈、期权 DTE/到期/sellout、确定性失效和收盘强平继续生效；缺失、矛盾、损坏、到期或已触发失效的 mandate 会 fail closed 退出。
+10. 每个订单先注册 restart-safe mandate。新建 V2 mandate 会冻结 `max_holding_trading_days` 和股票 `planned_stop_price`。`intraday_close` 当日退出，`next_close` 下一交易日退出，`two_to_five_days` 只持有指定 2-5 个交易日；每次恢复和监控都会验证 `planned_exit_at` 位于 horizon 对应的 XNYS 正常 session、session 距离等于冻结天数且 `thesis_valid_until >= planned_exit_at`。重启会在普通 open-order 处理前取消遗留 `created` entry；只有 order id、strategy、exposure id、ticker 和股票/期权类型均匹配有效 pending/open mandate 的 retryable entry 才能继续。已持久化 retryable/filled entry 会先把关联 plan 移出 `active`，终态订单会恢复对应 plan 终态，避免提交后崩溃导致二次入场。同 exposure 的 pending/open mandate 只允许同一 identity 幂等注册，不允许新订单覆盖。实际持仓和 map key、mandate identity 任一不匹配都会结构化 fail closed，不会进入字段转换异常。allocator 以计划时间作为最长持仓期限，以持久化价格作为股票权威止损，不会因后续 risk config 改变而重算；旧 V1 mandate 不迁移，只在 horizon 固有范围内兼容读取。旧策略仍使用原百分比止损和自然日 time stop。止盈、期权 DTE/到期/sellout、确定性失效和收盘强平继续生效；缺失、矛盾、损坏、到期或已触发失效的 mandate 会 fail closed 退出。
 
 ```mermaid
 flowchart TD
@@ -386,6 +386,8 @@ flowchart TD
 ```
 
 两速时钟：20:00 ET 生成慢速 conditional plans；08:00 和 09:25 只更新/失效计划；09:32 ET 不调用 LLM，只用 active plan 和 fresh quote 重建执行经济性；正常交易时段以有界间隔运行 fast research。09:25 无论是否出现新证据，都必须成功写入当日 `preopen_revalidated_at` 执行许可；任务缺席或状态写入失败时，09:32 必须拒绝旧计划。夜间和盘前模型的 `entry_now=false` 只禁止研究阶段下单，不会取消已保存计划；只有带合法非正常时段来源且通过当日盘前复核的计划能在 09:32-09:37 ET 重验，窗口外调用和 intraday plan 均拒绝。相同 ticker 的更新分析会 supersede 旧计划，no-trade/fail-closed 会 invalidate 旧计划。成功 rank 后全部候选事件都进入 cooldown，不只 top-3 deep analysis。每次真正执行授权最多有效 300 秒。
+
+allocator live 路径不会把网络请求开始时间冒充数据 cutoff。`now=None` 会在 underlying、option 和 holding mark 返回后读取新的 wall clock，最终 execution/data cutoff 不早于任何实际使用的报价；显式 replay 时间保持固定，晚于它的报价一律按 lookahead 拒绝。
 
 mandate 中的 `invalidation_condition` 是研究与审计自由文本，V1 不会用周期性 LLM 自动判断它。只有确定性规则、明确人工动作或 replay 事件设置 `invalidation_triggered` 后，monitor 才以 thesis invalidation 退出；Dashboard 也会明确区分“仅记录条件”和真正已触发状态。
 

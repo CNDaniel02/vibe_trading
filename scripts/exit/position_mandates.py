@@ -203,6 +203,32 @@ class PositionMandateStore:
         if _validated_mandate_times(mandate) is None:
             raise ValueError("position mandate semantics are invalid")
         values = self.mandates()
+        existing = values.get(exposure_id)
+        if existing is not None and existing.get("status") in {
+            "pending_fill",
+            "open",
+        }:
+            identity_fields = (
+                "mandate_version",
+                "exposure_id",
+                "order_id",
+                "strategy",
+                "snapshot_id",
+                "ticker",
+                "instrument_type",
+                "horizon",
+                "max_holding_trading_days",
+                "created_at",
+                "planned_exit_at",
+                "thesis_valid_until",
+                "invalidation_condition",
+                "planned_stop_price",
+            )
+            if all(existing.get(field) == mandate.get(field) for field in identity_fields):
+                return existing
+            raise ValueError(
+                f"active position mandate already exists for {exposure_id}"
+            )
         values[exposure_id] = mandate
         self.store.write_json("position_mandates.json", values)
         self._append("position_mandate_registered", mandate)

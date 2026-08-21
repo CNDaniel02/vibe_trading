@@ -305,6 +305,16 @@ auto-submitted. Retryable entry states continue only when order id, strategy,
 exposure id, ticker, and instrument type match a valid pending/open mandate.
 The monitor repeats the same identity binding against the actual equity symbol
 or option contract before consuming mandate fields.
+Valid retryable and filled entry orders restore their linked plan to
+`executed`; rejected, expired, and cancelled orders restore corresponding
+terminal plan states before active plans are queried. Registering a mandate is
+idempotent only for the same order/mandate identity and cannot replace an
+existing pending/open mandate for an exposure.
+
+Live quote acquisition retains a live clock marker until network collection is
+complete. Its final execution/data cutoff must be at least every underlying,
+option, and holding-mark timestamp used. A caller-supplied replay cutoff remains
+fixed and rejects observations after that timestamp.
 
 Registration and every restart-time monitor validate that `planned_exit_at` is
 inside the XNYS regular session implied by the horizon, the exchange-session

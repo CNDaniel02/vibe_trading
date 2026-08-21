@@ -63,6 +63,22 @@ def test_legacy_executors_are_entry_frozen_by_default(paper_root: Path) -> None:
     )
 
 
+def test_forward_service_preserves_live_allocator_monitor_clock(
+    paper_root: Path,
+) -> None:
+    observed: list[str | None] = []
+    service = object.__new__(forward_service_module.ForwardPaperService)
+    service.root = paper_root
+    service.ai_instrument_allocator_pipeline = SimpleNamespace(
+        monitor_only=lambda now: observed.append(now)
+        or {"event": "allocator-monitor-test"}
+    )
+
+    service.run_ai_instrument_allocator_monitor()
+
+    assert observed == [None]
+
+
 def test_readiness_cli_never_constructs_stateful_service(
     paper_root: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2428,7 +2444,7 @@ def test_rank_only_event_enters_cooldown_after_successful_ranking(
     assert repeated["model_calls"] == 0
 
 
-def test_allocator_execution_advances_to_latest_observed_option_quote(
+def test_allocator_explicit_replay_rejects_future_option_quote(
     paper_root: Path,
 ) -> None:
     from scripts.discovery.ai_instrument_allocator_pipeline import (
@@ -2471,10 +2487,80 @@ def test_allocator_execution_advances_to_latest_observed_option_quote(
     result = pipeline.run_stage("open_execution", OPEN_EXECUTION_NOW)
     execution = result["executions"][0]
 
+    assert execution["status"] == "no_trade"
+    assert "future" in execution["reason"]
+    assert pipeline.broker.store.orders() == {}
+    assert pipeline.option_broker.store.orders() == {}
+
+
+def test_allocator_live_execution_accepts_quote_seen_after_stage_start(
+    paper_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.discovery import ai_instrument_allocator_pipeline as allocator_module
+    from scripts.discovery.ai_instrument_allocator_pipeline import (
+        AiInstrumentAllocatorPipeline,
+    )
+
+    post_fetch = "2026-07-13T13:32:06+00:00"
+    config = load_runtime_config(paper_root)
+    config["strategies"]["ai_instrument_allocator_v1"][
+        "option_minimum_scenario_return_pct"
+    ] = -1
+    tracker = UsageTracker()
+    pipeline = AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=_AllocatorExecutionDiscovery(OPEN_EXECUTION_NOW),
+        news_adapter=_NoNews(),
+        option_data=_AllocatorFutureOptionData(),
+    )
+    pipeline.plans.save_plan({
+        "plan_id": "live-delayed-option-plan",
+        "strategy": "ai_instrument_allocator_v1",
+        "ticker": "AAPL",
+        "created_at": "2026-07-13T13:27:00+00:00",
+        "valid_until": "2026-07-13T13:37:00+00:00",
+        "status": "active",
+        "stage": "overnight",
+        "preopen_revalidated_at": "2026-07-13T13:25:00+00:00",
+        "signal": {
+            **_bearish_signal(),
+            "forecast_reference_price": 100.0,
+            "forecast_reference_time": OPEN_EXECUTION_NOW,
+        },
+        "snapshot": {"snapshot_id": "live-delayed-option-snapshot"},
+    })
+    observed_monitor_times: list[str | None] = []
+    monkeypatch.setattr(
+        pipeline,
+        "monitor_only",
+        lambda now: observed_monitor_times.append(now)
+        or {"event": "live-clock-monitor-stub"},
+    )
+    times = iter(
+        [
+            OPEN_EXECUTION_NOW,
+            OPEN_EXECUTION_NOW,
+            "2026-07-13T13:32:03+00:00",
+            post_fetch,
+        ]
+    )
+    monkeypatch.setattr(allocator_module, "utc_now", lambda: next(times))
+
+    result = pipeline.run_stage("open_execution")
+    execution = result["executions"][0]
+
+    assert observed_monitor_times == [None]
     assert execution["status"] == "filled"
-    assert execution["order"]["updated_at"] == "2026-07-13T13:32:05+00:00"
-    assert execution["allocation"]["decision_time"] == "2026-07-13T13:32:05+00:00"
-    assert execution["allocation"]["data_cutoff_time"] == "2026-07-13T13:32:05+00:00"
+    assert execution["order"]["updated_at"] == post_fetch
+    assert execution["allocation"]["decision_time"] == post_fetch
+    assert execution["allocation"]["data_cutoff_time"] == post_fetch
+    assert execution["allocation"]["account_nav_snapshot"]["calculated_at"] == (
+        "2026-07-13T13:32:03+00:00"
+    )
     assert execution["live_order_tools_called"] is False
 
 
@@ -3435,6 +3521,37 @@ def _register_pending_equity_mandate(pipeline, order_id: str) -> None:
     )
 
 
+def _seed_active_restart_plan(
+    pipeline,
+    *,
+    plan_id: str,
+    allocation_id: str,
+) -> None:
+    pipeline.plans.save_plan(
+        {
+            "plan_id": plan_id,
+            "strategy": "ai_instrument_allocator_v1",
+            "ticker": "AAPL",
+            "created_at": "2026-07-13T13:27:00+00:00",
+            "valid_until": "2026-07-13T13:37:00+00:00",
+            "status": "active",
+            "stage": "overnight",
+            "preopen_revalidated_at": "2026-07-13T13:25:00+00:00",
+            "signal": _anchored_signal(
+                entry_now=False,
+                forecast_reference_time="2026-07-13T13:27:00+00:00",
+            ),
+            "snapshot": {"snapshot_id": "restart-snapshot"},
+        }
+    )
+    pipeline.plans.record_allocation(
+        {
+            "allocation_id": allocation_id,
+            "plan_id": plan_id,
+        }
+    )
+
+
 @pytest.mark.parametrize("with_mandate", [False, True])
 def test_allocator_restart_cancels_created_entry_in_both_crash_windows(
     paper_root: Path,
@@ -3558,6 +3675,150 @@ def test_allocator_restart_cancels_orphan_created_option_entry(
     restarted.monitor_only("2026-07-13T13:30:00+00:00")
 
     assert restarted.option_broker.store.orders()[order.order_id].status == "cancelled"
+
+
+@pytest.mark.parametrize(
+    ("order_status", "mandate_status"),
+    [
+        pytest.param(
+            "submitted_to_paper_broker",
+            "pending_fill",
+            id="after-submit-persistence",
+        ),
+        pytest.param("filled", "pending_fill", id="after-fill-persistence"),
+        pytest.param(
+            "filled",
+            "open",
+            id="after-mandate-reconcile-before-plan-status",
+        ),
+    ],
+)
+def test_allocator_restart_reconciles_persisted_entry_before_reexecution(
+    paper_root: Path,
+    order_status: str,
+    mandate_status: str,
+) -> None:
+    from scripts.core.models import Account, Position
+
+    pipeline = _restart_test_allocator(paper_root, now=OPEN_EXECUTION_NOW)
+    plan_id = f"post-submit-{order_status}-{mandate_status}"
+    allocation_id = f"allocation-{order_status}-{mandate_status}"
+    _seed_active_restart_plan(
+        pipeline,
+        plan_id=plan_id,
+        allocation_id=allocation_id,
+    )
+    order = pipeline.broker.create_order(
+        decision_id=allocation_id,
+        symbol="AAPL",
+        side="buy",
+        order_type="limit",
+        quantity=1,
+        limit_price=99.0,
+        quote_seen_at="2026-07-13T13:31:00+00:00",
+        strategy="ai_instrument_allocator_v1",
+        planned_stop_price=97.0,
+        signal_horizon="next_close",
+        now="2026-07-13T13:31:00+00:00",
+    )
+    order.status = order_status
+    order.submitted_at = "2026-07-13T13:31:00+00:00"
+    order.updated_at = "2026-07-13T13:31:00+00:00"
+    if order_status == "filled":
+        order.filled_quantity = 1
+        order.average_fill_price = 100.0
+        pipeline.broker.store.save_account(
+            Account(9_900, 10_000),
+            "2026-07-13T13:31:00+00:00",
+        )
+        pipeline.broker.store.save_positions(
+            {
+                "AAPL": Position(
+                    "AAPL",
+                    1,
+                    100.0,
+                    "2026-07-13T13:31:00+00:00",
+                    "2026-07-13T13:31:00+00:00",
+                )
+            }
+        )
+    pipeline.broker.store.save_orders({order.order_id: order})
+    _register_pending_equity_mandate(pipeline, order.order_id)
+    if mandate_status == "open":
+        mandates = pipeline.mandates.mandates()
+        mandates["equity:AAPL"]["status"] = "open"
+        mandates["equity:AAPL"]["entered_at"] = order.updated_at
+        pipeline.mandates.store.write_json("position_mandates.json", mandates)
+
+    restarted = _restart_test_allocator(paper_root, now=OPEN_EXECUTION_NOW)
+    result = restarted.run_stage("open_execution", OPEN_EXECUTION_NOW)
+
+    assert result["paper_orders_created"] == 0
+    assert len(restarted.broker.store.orders()) == 1
+    assert restarted.plans.plans()[plan_id]["status"] == "executed"
+    assert restarted.plans.active_plans(OPEN_EXECUTION_NOW) == []
+    mandate = restarted.mandates.for_exposure("equity:AAPL")
+    assert mandate["order_id"] == order.order_id
+    assert mandate["status"] == ("open" if order_status == "filled" else "pending_fill")
+
+
+@pytest.mark.parametrize("order_status", ["rejected", "expired", "cancelled"])
+def test_allocator_restart_maps_terminal_entry_status_to_plan(
+    paper_root: Path,
+    order_status: str,
+) -> None:
+    pipeline = _restart_test_allocator(paper_root, now=OPEN_EXECUTION_NOW)
+    plan_id = f"terminal-{order_status}"
+    allocation_id = f"terminal-allocation-{order_status}"
+    _seed_active_restart_plan(
+        pipeline,
+        plan_id=plan_id,
+        allocation_id=allocation_id,
+    )
+    order = pipeline.broker.create_order(
+        decision_id=allocation_id,
+        symbol="AAPL",
+        side="buy",
+        order_type="limit",
+        quantity=1,
+        limit_price=99.0,
+        quote_seen_at="2026-07-13T13:31:00+00:00",
+        strategy="ai_instrument_allocator_v1",
+        planned_stop_price=97.0,
+        signal_horizon="next_close",
+        now="2026-07-13T13:31:00+00:00",
+    )
+    order.status = order_status
+    order.updated_at = "2026-07-13T13:31:00+00:00"
+    pipeline.broker.store.save_orders({order.order_id: order})
+
+    restarted = _restart_test_allocator(paper_root, now=OPEN_EXECUTION_NOW)
+    restarted.monitor_only(OPEN_EXECUTION_NOW)
+
+    assert restarted.plans.plans()[plan_id]["status"] == order_status
+    assert restarted.plans.active_plans(OPEN_EXECUTION_NOW) == []
+
+
+@pytest.mark.parametrize("existing_status", ["pending_fill", "open"])
+def test_position_mandate_store_refuses_active_exposure_replacement(
+    paper_root: Path,
+    existing_status: str,
+) -> None:
+    pipeline = _restart_test_allocator(paper_root)
+    _register_pending_equity_mandate(pipeline, "original-order")
+    if existing_status == "open":
+        mandates = pipeline.mandates.mandates()
+        mandates["equity:AAPL"]["status"] = "open"
+        mandates["equity:AAPL"]["entered_at"] = "2026-07-13T13:28:00+00:00"
+        pipeline.mandates.store.write_json("position_mandates.json", mandates)
+
+    _register_pending_equity_mandate(pipeline, "original-order")
+    with pytest.raises(ValueError, match="active position mandate already exists"):
+        _register_pending_equity_mandate(pipeline, "replacement-order")
+
+    mandate = pipeline.mandates.for_exposure("equity:AAPL")
+    assert mandate["order_id"] == "original-order"
+    assert mandate["status"] == existing_status
 
 
 @pytest.mark.parametrize(
@@ -3707,6 +3968,120 @@ def test_allocator_account_state_uses_fresh_liquidation_marks(
     assert state["nav_valuation_method"] == "conservative_liquidation_bid_v1"
     assert state["equity_mark_times"] == {"MSFT": REGULAR_NOW}
     assert state["option_mark_times"] == {contract.option_id: REGULAR_NOW}
+
+
+def test_allocator_live_monitor_uses_post_fetch_observation_cutoff(
+    paper_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.core.models import Position
+    from scripts.discovery import ai_instrument_allocator_pipeline as allocator_module
+
+    stage_start = "2026-07-13T15:00:00+00:00"
+    quote_time = "2026-07-13T15:00:03+00:00"
+    post_fetch = "2026-07-13T15:00:05+00:00"
+    pipeline = _restart_test_allocator(
+        paper_root,
+        discovery=_AllocatorExecutionDiscovery(quote_time),
+    )
+    pipeline.broker.store.save_positions(
+        {"AAPL": Position("AAPL", 1, 100, stage_start, stage_start)}
+    )
+    pipeline.mandates.store.write_json(
+        "position_mandates.json",
+        {
+            "equity:AAPL": _open_allocator_mandate(
+                "equity:AAPL",
+                horizon="next_close",
+                max_holding_trading_days=1,
+                opened_at=stage_start,
+                planned_exit_at=NEXT_CLOSE_EXIT,
+                planned_stop_price=97.0,
+            )
+        },
+    )
+    times = iter([stage_start, post_fetch])
+    monkeypatch.setattr(allocator_module, "utc_now", lambda: next(times))
+
+    result = pipeline.monitor_only()
+
+    assert result["quote_errors"] == {}
+    assert result["portfolio"]["asof"] == post_fetch
+    assert result["portfolio"]["nav_calculated_at"] == post_fetch
+    assert result["portfolio"]["equity_mark_times"] == {"AAPL": quote_time}
+    assert set(pipeline.broker.store.positions()) == {"AAPL"}
+
+
+def test_allocator_explicit_replay_rejects_post_cutoff_holding_mark(
+    paper_root: Path,
+) -> None:
+    from scripts.core.models import Position
+
+    decision_time = "2026-07-13T15:00:00+00:00"
+    pipeline = _restart_test_allocator(
+        paper_root,
+        discovery=_AllocatorExecutionDiscovery("2026-07-13T15:00:03+00:00"),
+    )
+    pipeline.broker.store.save_positions(
+        {"AAPL": Position("AAPL", 1, 100, decision_time, decision_time)}
+    )
+
+    with pytest.raises(ValueError, match="future"):
+        pipeline._account_state(decision_time)
+
+
+def test_allocator_account_state_rejects_equity_position_key_mismatch(
+    paper_root: Path,
+) -> None:
+    from scripts.core.models import Position
+
+    pipeline = _restart_test_allocator(paper_root, now=REGULAR_NOW)
+    pipeline.broker.store.save_positions(
+        {"MSFT": Position("AAPL", 1, 100, REGULAR_NOW, REGULAR_NOW)}
+    )
+
+    with pytest.raises(ValueError, match="position identity mismatch"):
+        pipeline._account_state(REGULAR_NOW)
+
+
+@pytest.mark.parametrize(
+    "contract_changes",
+    [
+        {"option_id": "different-option"},
+        {"underlying": ""},
+        {"option_type": "straddle"},
+    ],
+)
+def test_allocator_account_state_rejects_option_position_identity_corruption(
+    paper_root: Path,
+    contract_changes: dict,
+) -> None:
+    from scripts.options.models import OptionPosition
+
+    option_id = "position-map-option"
+    contract = replace(
+        _option_contract(option_id, "2026-08-21", "call"),
+        **contract_changes,
+    )
+    pipeline = _restart_test_allocator(
+        paper_root,
+        now=REGULAR_NOW,
+        option_data=_AllocatorMonitoringOptions(REGULAR_NOW),
+    )
+    pipeline.option_broker.store.save_positions(
+        {
+            option_id: OptionPosition(
+                contract,
+                1,
+                1.0,
+                REGULAR_NOW,
+                REGULAR_NOW,
+            )
+        }
+    )
+
+    with pytest.raises(ValueError, match="position identity mismatch"):
+        pipeline._account_state(REGULAR_NOW)
 
 
 def test_allocator_entry_fails_closed_when_existing_position_mark_is_stale(
