@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
+import math
 
 from scripts.core.models import Account, Order, Position, Quote, parse_ts
 from scripts.risk.shared_portfolio_risk import check_shared_entry, daily_entry_limit_reason
@@ -90,6 +91,7 @@ def check_order(
     now: str,
     option_positions: dict | None = None,
     option_orders: dict | None = None,
+    entry_nav_usd: float | None = None,
 ) -> RiskDecision:
     risk = config["risk"]
     universe = config["universe"]
@@ -139,7 +141,15 @@ def check_order(
 
     estimated_price = quote.ask if order.side == "buy" else quote.bid
     notional = estimated_price * order.quantity
-    equity = account.equity(positions, {quote.symbol: quote})
+    if entry_nav_usd is not None and (
+        not math.isfinite(float(entry_nav_usd)) or float(entry_nav_usd) <= 0
+    ):
+        return RiskDecision(False, "invalid marked NAV")
+    equity = (
+        float(entry_nav_usd)
+        if entry_nav_usd is not None
+        else account.equity(positions, {quote.symbol: quote})
+    )
     if order.side == "buy":
         if notional >= equity:
             return RiskDecision(False, "all-in order blocked")
@@ -178,6 +188,7 @@ def check_order(
             counters=counters,
             shared_config=config.get("shared_risk", {}),
             new_underlying=order.symbol,
+            account_nav_usd=equity,
         )
         if not shared.approved:
             return RiskDecision(False, shared.reason)

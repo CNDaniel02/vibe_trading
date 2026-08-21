@@ -37,6 +37,32 @@
     "probability_ev_available": {"const": false},
     "probability_ev_usd": {"type": "null"},
     "raw_probability_used_for_ev": {"const": false},
+    "account_nav_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "nav_usd",
+        "valuation_method",
+        "calculated_at",
+        "equity_mark_times",
+        "option_mark_times"
+      ],
+      "properties": {
+        "nav_usd": {"type": "number", "exclusiveMinimum": 0},
+        "valuation_method": {
+          "enum": ["conservative_liquidation_bid_v1", "provided_account_nav"]
+        },
+        "calculated_at": {"type": "string", "format": "date-time"},
+        "equity_mark_times": {
+          "type": "object",
+          "additionalProperties": {"type": "string", "format": "date-time"}
+        },
+        "option_mark_times": {
+          "type": "object",
+          "additionalProperties": {"type": "string", "format": "date-time"}
+        }
+      }
+    },
     "forecast_reference_price": {"type": "number", "exclusiveMinimum": 0},
     "forecast_reference_time": {"type": "string", "format": "date-time"},
     "forecast_conservative_move_pct": {"type": "number"},
@@ -109,7 +135,8 @@
           "market_implied_volatility",
           "forecast_exceeds_market_implied_move",
           "planned_exit_at",
-          "scenario_elapsed_calendar_days"
+          "scenario_elapsed_calendar_days",
+          "account_nav_snapshot"
         ]
       }
     }

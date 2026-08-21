@@ -89,6 +89,8 @@ repricing with Vega diagnostics, not a local Delta/Gamma/Theta approximation.
 The executable allocator ranks eligible instruments on conservative scenario
 PnL divided by deterministic capital at risk using the same sleeve NAV, rather
 than directly comparing equity notional return with option premium return.
+For executable allocator entries, that NAV is cash plus fresh conservative bid
+marks for every existing sleeve holding; unavailable or stale marks fail closed.
 Scenario decay uses the exchange-calendar-derived `planned_exit_at`, including
 weekends and holidays, and scenario/fill paths share one contract tick rule.
 Every selected instrument then passes the same deterministic broker risk gate.

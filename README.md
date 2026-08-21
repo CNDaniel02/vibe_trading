@@ -79,7 +79,7 @@ read-only scans and technical top 8 + Exa evidence
         -> Python derives direction and conservative move (raw probabilities remain uncalibrated)
         -> fresh stock quote + bounded option candidates across expirations
         -> stock/IV/time scenario repricing and executable-cost comparison
-        -> deterministic shared risk veto
+        -> fresh bid-marked sleeve NAV -> deterministic shared risk veto
         -> isolated $10,000 paper sleeve + horizon-aware position mandate
         -> separate $2,000 same-instrument affordability check
         -> separate short_equity_counterfactual shadow benchmark
@@ -326,6 +326,12 @@ force-flatten exits remain active. Free-text `invalidation_condition` is stored
 for research and audit only in V1. An exit requires a deterministic, manual, or
 replay transition to set `invalidation_triggered`.
 
+Before normal open-order processing, allocator restart recovery cancels every
+entry stranded in `created` and rejects retryable entries whose order identity
+does not match a valid pending/open mandate. Monitor validation also binds each
+mandate to the actual equity symbol or option contract, so corrupt identity
+fields produce a structured fail-closed exit instead of an exception.
+
 New position mandates are V2 records that freeze exact
 `max_holding_trading_days`. Registration and restart monitoring reject a
 planned exit outside the XNYS session implied by the horizon, a mismatched
@@ -355,3 +361,9 @@ capped at 3% of account equity, and aggregate option premium is capped at 8%.
 Fills use bid/ask plus adverse slippage and can never violate the agent's limit.
 
 Equity and options have separate orders, fills, positions, journals, win rates, and PnL. Inside each executable sleeve they share cash, a 60% total deployment cap, at most three total positions, at most three daily entries, and one executable exposure per underlying. Allocator equity positions also require a planned stop with at most 1% NAV planned loss, while the 25% single-stock limit remains a notional cap.
+
+Allocator entry limits use cash plus fresh executable bid marks for every
+existing sleeve holding. Missing, stale, future, invalid, or identity-mismatched
+position marks block both new entries and pending-entry retries. Free-text
+`entry_condition` remains audit-only; only Python quote, remaining-move,
+liquidity, authorization-time, and risk checks can authorize an order.

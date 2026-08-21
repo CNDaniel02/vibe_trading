@@ -1,5 +1,13 @@
 # Development Log
 
+## 2026-08-21 (America/Los_Angeles) - PR comment 5366041274 fail-closed 恢复与 marked NAV
+
+- `ai_instrument_allocator_v1` 启动或 monitor 时先恢复未完成 entry：`created` 永远取消，`submitted_to_paper_broker`、`open`、`partially_filled` 只有在存在与 order、strategy、ticker、instrument 和 exposure 完全匹配的 pending/open mandate 时才允许重试。取消前先 invalidated 关联 plan，随后关闭 mandate；中途再次崩溃时由下一次 reconcile 继续 fail closed。
+- mandate 校验现在绑定实际持仓身份。股票要求 `equity:{ticker}`、`instrument_type=equity` 和正数有限止损；期权要求精确 option exposure id、underlying ticker 与 call/put 类型。缺失、损坏或错配统一形成结构化退出，不再因坏字段抛异常中断 monitor。
+- allocator 的仓位比例、股票 notional/计划止损、期权 premium 和共享总风险上限改用同一时点的保守 liquidation NAV：现金加全部股票 bid mark 加全部期权 bid mark。任一必要报价缺失、过期、future、非有限或 identity 错配时禁止新建或重试 entry；成本基准只保留为 deployment diagnostic，不再标记为 NAV。allocation 和 portfolio snapshot 保存估值方法、计算时间及逐持仓 mark 时间。
+- `entry_condition` 明确为研究与审计文本，不是订单授权表达式。V1 不解析 LLM 自然语言条件；只有 Python 的新鲜报价、remaining move、流动性、instrument economics 和 deterministic risk gates 可以创建或重试 paper order。
+- allocator focused 测试为 `116 passed`，全套 pytest 为 `332 passed`，仅有 4 条既有上游 `exchange_calendars` deprecation warning。没有修改历史账本、state、logs、OAuth 或敏感配置，也没有调用 Robinhood 真实下单工具。
+
 ## 2026-08-20 (America/Los_Angeles) - PR comment 5364112198 mandate 语义与冻结止损
 
 - 新建 position mandate 升级为 V2，并持久化精确 `max_holding_trading_days`。注册和 monitor 恢复都会用 XNYS 日历确认 `planned_exit_at` 位于 horizon 对应的正常 session、session 距离与冻结天数一致且 `thesis_valid_until >= planned_exit_at`；可解析但矛盾的记录统一 fail closed。

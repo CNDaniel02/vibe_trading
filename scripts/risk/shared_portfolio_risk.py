@@ -10,7 +10,7 @@ from scripts.core.models import Account, Order, Position
 class SharedRiskDecision:
     approved: bool
     reason: str
-    account_equity_at_cost: float
+    account_nav_usd: float
     total_deployed_after: float
     line_deployed_after: float
 
@@ -223,6 +223,7 @@ def check_shared_entry(
     counters: dict[str, Any],
     shared_config: dict[str, Any],
     new_underlying: str | None = None,
+    account_nav_usd: float | None = None,
 ) -> SharedRiskDecision:
     deployment = shared_deployment(
         account,
@@ -232,7 +233,11 @@ def check_shared_entry(
         option_orders,
         reserve_open_orders=bool(shared_config.get("reserve_open_orders", True)),
     )
-    account_equity = deployment["account_equity_at_cost"]
+    account_equity = (
+        float(account_nav_usd)
+        if account_nav_usd is not None
+        else deployment["account_equity_at_cost"]
+    )
     line_deployed = deployment["options_deployed" if line == "options" else "equity_deployed"]
     total_after = deployment["total_deployed"] + new_risk_usd
     line_after = line_deployed + new_risk_usd

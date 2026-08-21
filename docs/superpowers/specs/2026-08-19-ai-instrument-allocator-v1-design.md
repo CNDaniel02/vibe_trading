@@ -139,6 +139,11 @@ are present and their sum is within `1e-6` of 1. The output also contains:
   condition, thesis validity, and a no-trade reason
 - `probability_status: uncalibrated`
 
+`entry_condition` and `invalidation_condition` are audit-only free text in V1.
+Only deterministic Python quote, remaining-move, liquidity, authorization-time,
+risk, or explicit invalidation transitions can affect execution. A model still
+waiting for a future price or confirmation must return `no_trade`.
+
 The model does not output a final instrument. Python derives bullish, bearish,
 and neutral mass, the dominant signed bucket, and conservative move scenarios.
 The conservative magnitude is a weighted multi-scenario estimate over the
@@ -236,6 +241,12 @@ fields are null.
 
 The deterministic risk engine remains the final veto.
 
+All percentages below use current conservative liquidation NAV at entry time:
+cash plus every existing equity and long-option holding marked at executable
+bid. The allocation audit stores the calculation and quote timestamps. Missing,
+stale, future, invalid, or identity-mismatched holding marks block both new and
+retrying entries; cost basis is not passed as `nav_usd`.
+
 - equity single-position notional: at most 25% NAV
 - equity aggregate notional: at most 50% NAV
 - equity planned-stop loss: at most 1% NAV
@@ -278,8 +289,8 @@ state or order, and is never merged with long-put PnL.
 
 ## 11. Position Mandates and Exit
 
-Every new filled position has a V2 persisted mandate containing strategy
-version, snapshot, ticker, instrument, horizon, exact
+Every new entry order first registers a V2 persisted mandate containing
+strategy version, snapshot, ticker, instrument, horizon, exact
 `max_holding_trading_days`, entered time, planned exit time, thesis validity,
 invalidation condition, and stop information.
 
@@ -287,6 +298,13 @@ invalidation condition, and stop information.
 - `next_close`: exit before the next trading-session close
 - `two_to_five_days`: hold only through the chosen 2-5 trading-day horizon
 - missing, inconsistent, or expired mandate: exit before the current close
+
+Restart recovery runs before normal open-order processing. A stranded
+allocator entry in `created` is cancelled and its plan invalidated, never
+auto-submitted. Retryable entry states continue only when order id, strategy,
+exposure id, ticker, and instrument type match a valid pending/open mandate.
+The monitor repeats the same identity binding against the actual equity symbol
+or option contract before consuming mandate fields.
 
 Registration and every restart-time monitor validate that `planned_exit_at` is
 inside the XNYS regular session implied by the horizon, the exchange-session

@@ -3391,3 +3391,440 @@ def test_allocator_corrupt_mandate_record_exits_fail_closed_without_crashing(
 
     assert pipeline.broker.store.positions() == {}
     assert result["exits"][0]["reason"] == "missing position mandate; fail closed"
+
+
+def _restart_test_allocator(
+    paper_root: Path,
+    *,
+    now: str = "2026-07-13T13:30:00+00:00",
+    discovery=None,
+    option_data=None,
+):
+    from scripts.discovery.ai_instrument_allocator_pipeline import (
+        AiInstrumentAllocatorPipeline,
+    )
+
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    return AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=discovery or _AllocatorExecutionDiscovery(now),
+        news_adapter=_NoNews(),
+        option_data=option_data or _AllocatorNoOptions(),
+    )
+
+
+def _register_pending_equity_mandate(pipeline, order_id: str) -> None:
+    pipeline.mandates.register_order(
+        order_id=order_id,
+        exposure_id="equity:AAPL",
+        strategy="ai_instrument_allocator_v1",
+        snapshot_id="restart-snapshot",
+        ticker="AAPL",
+        instrument_type="equity",
+        horizon="next_close",
+        max_holding_trading_days=1,
+        created_at="2026-07-13T13:27:00+00:00",
+        planned_exit_at="2026-07-14T19:50:00+00:00",
+        thesis_valid_until="2026-07-14T19:50:00+00:00",
+        invalidation_condition="Recorded research condition.",
+        planned_stop_price=97.0,
+    )
+
+
+@pytest.mark.parametrize("with_mandate", [False, True])
+def test_allocator_restart_cancels_created_entry_in_both_crash_windows(
+    paper_root: Path,
+    with_mandate: bool,
+) -> None:
+    pipeline = _restart_test_allocator(paper_root)
+    pipeline.plans.save_plan(
+        {
+            "plan_id": "crash-window-plan",
+            "strategy": "ai_instrument_allocator_v1",
+            "ticker": "AAPL",
+            "created_at": "2026-07-13T13:27:00+00:00",
+            "valid_until": "2026-07-14T19:50:00+00:00",
+            "status": "active",
+            "stage": "overnight",
+            "signal": _anchored_signal(),
+            "snapshot": {"snapshot_id": "restart-snapshot"},
+        }
+    )
+    pipeline.plans.record_allocation(
+        {
+            "allocation_id": "crash-window-allocation",
+            "plan_id": "crash-window-plan",
+        }
+    )
+    order = pipeline.broker.create_order(
+        decision_id="crash-window-allocation",
+        symbol="AAPL",
+        side="buy",
+        order_type="limit",
+        quantity=1,
+        limit_price=100.01,
+        quote_seen_at="2026-07-13T13:27:00+00:00",
+        strategy="ai_instrument_allocator_v1",
+        planned_stop_price=97.0,
+        signal_horizon="next_close",
+        now="2026-07-13T13:27:00+00:00",
+    )
+    if with_mandate:
+        _register_pending_equity_mandate(pipeline, order.order_id)
+
+    restarted = _restart_test_allocator(paper_root)
+    restarted.monitor_only("2026-07-13T13:30:00+00:00")
+
+    recovered = restarted.broker.store.orders()[order.order_id]
+    assert recovered.status == "cancelled"
+    assert "restart recovery" in str(recovered.reject_reason)
+    mandate = restarted.mandates.for_exposure("equity:AAPL")
+    assert mandate is None if not with_mandate else mandate["status"] == "closed"
+    assert restarted.plans.active_plans("2026-07-13T13:30:00+00:00") == []
+
+
+@pytest.mark.parametrize(
+    ("status", "mandate_case", "expected_status"),
+    [
+        ("submitted_to_paper_broker", "missing", "cancelled"),
+        ("open", "corrupt", "cancelled"),
+        ("partially_filled", "missing", "cancelled"),
+        ("open", "valid", "open"),
+    ],
+)
+def test_allocator_restart_cancels_retryable_entry_without_valid_mandate(
+    paper_root: Path,
+    status: str,
+    mandate_case: str,
+    expected_status: str,
+) -> None:
+    pipeline = _restart_test_allocator(paper_root)
+    order = pipeline.broker.create_order(
+        decision_id=f"retry-{status}",
+        symbol="AAPL",
+        side="buy",
+        order_type="limit",
+        quantity=1,
+        limit_price=99.0,
+        quote_seen_at="2026-07-13T13:27:00+00:00",
+        strategy="ai_instrument_allocator_v1",
+        planned_stop_price=97.0,
+        signal_horizon="next_close",
+        now="2026-07-13T13:27:00+00:00",
+    )
+    order.status = status
+    order.submitted_at = "2026-07-13T13:27:00+00:00"
+    pipeline.broker.store.save_orders({order.order_id: order})
+    if mandate_case in {"corrupt", "valid"}:
+        _register_pending_equity_mandate(pipeline, order.order_id)
+    if mandate_case == "corrupt":
+        mandates = pipeline.mandates.mandates()
+        mandates["equity:AAPL"]["instrument_type"] = "call"
+        mandates["equity:AAPL"]["planned_stop_price"] = None
+        pipeline.mandates.store.write_json("position_mandates.json", mandates)
+
+    restarted = _restart_test_allocator(paper_root)
+    restarted.monitor_only("2026-07-13T13:30:00+00:00")
+
+    recovered = restarted.broker.store.orders()[order.order_id]
+    assert recovered.status == expected_status
+    if expected_status == "cancelled":
+        assert recovered.reject_reason == "allocator entry mandate invalid during restart recovery"
+
+
+def test_allocator_restart_cancels_orphan_created_option_entry(
+    paper_root: Path,
+) -> None:
+    pipeline = _restart_test_allocator(paper_root)
+    contract = _option_contract("orphan-option", "2026-08-21", "put")
+    order = pipeline.option_broker.create_order(
+        decision_id="orphan-option-allocation",
+        contract=contract,
+        intent="buy_to_open",
+        order_type="limit",
+        quantity=1,
+        limit_price=1.0,
+        quote_seen_at="2026-07-13T13:27:00+00:00",
+        strategy="ai_instrument_allocator_v1",
+        signal_horizon="next_close",
+        now="2026-07-13T13:27:00+00:00",
+    )
+
+    restarted = _restart_test_allocator(paper_root)
+    restarted.monitor_only("2026-07-13T13:30:00+00:00")
+
+    assert restarted.option_broker.store.orders()[order.order_id].status == "cancelled"
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"exposure_id": "equity:MSFT", "ticker": "MSFT"},
+        {
+            "exposure_id": "option:wrong-instrument",
+            "instrument_type": "call",
+            "planned_stop_price": None,
+        },
+    ],
+)
+def test_allocator_equity_mandate_identity_mismatch_exits_without_exception(
+    paper_root: Path,
+    changes: dict,
+) -> None:
+    from scripts.core.models import Position
+
+    pipeline = _restart_test_allocator(
+        paper_root,
+        now=REGULAR_NOW,
+        discovery=_AllocatorExecutionDiscovery(REGULAR_NOW),
+    )
+    pipeline.broker.store.save_positions(
+        {"AAPL": Position("AAPL", 1, 100, REGULAR_NOW, REGULAR_NOW)}
+    )
+    mandate = _open_allocator_mandate(
+        "equity:AAPL",
+        ticker="AAPL",
+        instrument_type="equity",
+        horizon="next_close",
+        max_holding_trading_days=1,
+        opened_at=REGULAR_NOW,
+        planned_exit_at=NEXT_CLOSE_EXIT,
+        planned_stop_price=97.0,
+    )
+    mandate.update(changes)
+    pipeline.mandates.store.write_json(
+        "position_mandates.json",
+        {"equity:AAPL": mandate},
+    )
+
+    result = pipeline.monitor_only(REGULAR_NOW)
+
+    assert pipeline.broker.store.positions() == {}
+    assert result["exits"][0]["reason"] == "invalid position mandate; fail closed"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("exposure_id", "option:different-option"),
+        ("ticker", "MSFT"),
+        ("instrument_type", "put"),
+    ],
+)
+def test_allocator_option_mandate_identity_mismatch_exits_fail_closed(
+    paper_root: Path,
+    field: str,
+    value: str,
+) -> None:
+    from scripts.options.models import OptionPosition
+
+    contract = _option_contract("identity-call", "2026-08-21", "call")
+    pipeline = _restart_test_allocator(
+        paper_root,
+        now=REGULAR_NOW,
+        option_data=_AllocatorMonitoringOptions(REGULAR_NOW),
+    )
+    pipeline.option_broker.store.save_positions(
+        {
+            contract.option_id: OptionPosition(
+                contract,
+                1,
+                1.0,
+                REGULAR_NOW,
+                REGULAR_NOW,
+            )
+        }
+    )
+    mandate = _open_allocator_mandate(
+        f"option:{contract.option_id}",
+        ticker="AAPL",
+        instrument_type="call",
+        horizon="next_close",
+        max_holding_trading_days=1,
+        opened_at=REGULAR_NOW,
+        planned_exit_at=NEXT_CLOSE_EXIT,
+    )
+    mandate[field] = value
+    pipeline.mandates.store.write_json(
+        "position_mandates.json",
+        {f"option:{contract.option_id}": mandate},
+    )
+
+    result = pipeline.monitor_only(REGULAR_NOW)
+
+    assert pipeline.option_broker.store.positions() == {}
+    assert result["option_exits"][0]["reason"] == "invalid position mandate; fail closed"
+
+
+def test_allocator_account_state_uses_fresh_liquidation_marks(
+    paper_root: Path,
+) -> None:
+    from scripts.core.models import Account, Position, Quote
+    from scripts.options.models import OptionPosition
+
+    class MarkedDiscovery(_AllocatorExecutionDiscovery):
+        def fetch_current_quote(self, symbol: str, **_kwargs):
+            return Quote(
+                symbol,
+                50.0,
+                50.02,
+                50.01,
+                REGULAR_NOW,
+                source="marked-nav-test",
+                avg_daily_volume_usd=500_000_000,
+            )
+
+    contract = _option_contract("marked-call", "2026-08-21", "call")
+    pipeline = _restart_test_allocator(
+        paper_root,
+        now=REGULAR_NOW,
+        discovery=MarkedDiscovery(REGULAR_NOW),
+        option_data=_AllocatorMonitoringOptions(REGULAR_NOW),
+    )
+    pipeline.broker.store.save_account(Account(8_000, 10_000), REGULAR_NOW)
+    pipeline.broker.store.save_positions(
+        {"MSFT": Position("MSFT", 10, 100, REGULAR_NOW, REGULAR_NOW)}
+    )
+    pipeline.option_broker.store.save_positions(
+        {
+            contract.option_id: OptionPosition(
+                contract,
+                1,
+                2.0,
+                REGULAR_NOW,
+                REGULAR_NOW,
+            )
+        }
+    )
+
+    state = pipeline._account_state(REGULAR_NOW)
+
+    assert state["nav_usd"] == 8_600
+    assert state["nav_valuation_method"] == "conservative_liquidation_bid_v1"
+    assert state["equity_mark_times"] == {"MSFT": REGULAR_NOW}
+    assert state["option_mark_times"] == {contract.option_id: REGULAR_NOW}
+
+
+def test_allocator_entry_fails_closed_when_existing_position_mark_is_stale(
+    paper_root: Path,
+) -> None:
+    from scripts.core.models import Position, Quote
+
+    class StaleHoldingDiscovery(_AllocatorExecutionDiscovery):
+        def fetch_current_quote(self, symbol: str, **_kwargs):
+            asof = "2026-07-13T13:00:00+00:00" if symbol == "MSFT" else REGULAR_NOW
+            return Quote(
+                symbol,
+                100.0,
+                100.01,
+                100.005,
+                asof,
+                source="stale-mark-test",
+                avg_daily_volume_usd=500_000_000,
+            )
+
+    pipeline = _restart_test_allocator(
+        paper_root,
+        now=REGULAR_NOW,
+        discovery=StaleHoldingDiscovery(REGULAR_NOW),
+    )
+    pipeline.broker.store.save_positions(
+        {"MSFT": Position("MSFT", 1, 100, REGULAR_NOW, REGULAR_NOW)}
+    )
+    plan = {
+        "plan_id": "stale-mark-plan",
+        "strategy": "ai_instrument_allocator_v1",
+        "ticker": "AAPL",
+        "stage": "intraday",
+        "signal": _anchored_signal(),
+        "snapshot": {"snapshot_id": "stale-mark-snapshot"},
+    }
+
+    result = pipeline._execute_plan(plan, REGULAR_NOW, stage="intraday")
+
+    assert result["status"] == "no_trade"
+    assert "marked NAV unavailable" in result["reason"]
+    assert pipeline.broker.store.orders() == {}
+    assert pipeline.option_broker.store.orders() == {}
+
+
+def test_allocator_equity_risk_gate_applies_supplied_marked_nav(
+    paper_root: Path,
+) -> None:
+    from scripts.core.models import Account, Order, Position
+    from scripts.risk.risk_gate import check_order
+
+    config = load_runtime_config(paper_root)
+    order = Order(
+        order_id="marked-nav-order",
+        decision_id="marked-nav-order",
+        symbol="AAPL",
+        side="buy",
+        order_type="limit",
+        quantity=20,
+        limit_price=100.01,
+        quote_seen_at=REGULAR_NOW,
+        created_at=REGULAR_NOW,
+        strategy="ai_instrument_allocator_v1",
+        planned_stop_price=99.0,
+        signal_horizon="next_close",
+    )
+
+    decision = check_order(
+        order,
+        _underlying_quote(),
+        Account(5_000, 10_000),
+        {"MSFT": Position("MSFT", 50, 100, REGULAR_NOW, REGULAR_NOW)},
+        {},
+        {"trades": 0},
+        config,
+        REGULAR_NOW,
+        option_positions={},
+        option_orders={},
+        entry_nav_usd=6_000,
+    )
+
+    assert decision.reason == "max order size exceeded"
+
+
+def test_allocator_option_risk_gate_applies_supplied_marked_nav(
+    paper_root: Path,
+) -> None:
+    from scripts.core.models import Account
+    from scripts.options.models import OptionOrder
+    from scripts.options.risk_gate import check_option_order
+
+    contract = _option_contract("marked-nav-put", "2026-08-21", "put")
+    order = OptionOrder(
+        order_id="marked-nav-option",
+        decision_id="marked-nav-option",
+        contract=contract,
+        intent="buy_to_open",
+        quantity=1,
+        order_type="limit",
+        limit_price=2.0,
+        quote_seen_at=REGULAR_NOW,
+        created_at=REGULAR_NOW,
+        strategy="ai_instrument_allocator_v1",
+        signal_horizon="next_close",
+    )
+
+    decision = check_option_order(
+        order,
+        _option_quote(contract.option_id, bid=1.99, ask=2.0),
+        Account(10_000, 10_000),
+        {},
+        {},
+        {},
+        {},
+        {"trades": 0},
+        load_runtime_config(paper_root),
+        REGULAR_NOW,
+        entry_nav_usd=5_000,
+    )
+
+    assert decision.reason == "max option premium risk exceeded"

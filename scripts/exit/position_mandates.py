@@ -26,25 +26,23 @@ class MandateExitDecision:
 def evaluate_mandate_exit(
     mandate: dict[str, Any] | None,
     now: str,
+    *,
+    expected_exposure_id: str | None = None,
+    expected_ticker: str | None = None,
+    expected_instrument_type: str | None = None,
 ) -> MandateExitDecision:
     if not isinstance(mandate, dict):
         return MandateExitDecision(True, "missing position mandate; fail closed")
-    required = {
-        "mandate_version",
-        "exposure_id",
-        "ticker",
-        "instrument_type",
-        "horizon",
-        "created_at",
-        "planned_exit_at",
-        "thesis_valid_until",
-        "planned_stop_price",
-    }
-    if required - set(mandate) or mandate.get("status") != "open":
+    if not validate_position_mandate(
+        mandate,
+        allowed_statuses={"open"},
+        expected_exposure_id=expected_exposure_id,
+        expected_ticker=expected_ticker,
+        expected_instrument_type=expected_instrument_type,
+    ):
         return MandateExitDecision(True, "invalid position mandate; fail closed")
     validated_times = _validated_mandate_times(mandate)
-    if validated_times is None:
-        return MandateExitDecision(True, "invalid position mandate; fail closed")
+    assert validated_times is not None
     if mandate.get("invalidation_triggered", False):
         return MandateExitDecision(True, "thesis invalidation")
     current = parse_ts(now)
@@ -54,6 +52,58 @@ def evaluate_mandate_exit(
     if current >= thesis_valid_until:
         return MandateExitDecision(True, "position mandate thesis validity expired")
     return MandateExitDecision(False, "position mandate remains valid")
+
+
+def validate_position_mandate(
+    mandate: dict[str, Any] | None,
+    *,
+    allowed_statuses: set[str],
+    expected_exposure_id: str | None = None,
+    expected_ticker: str | None = None,
+    expected_instrument_type: str | None = None,
+    expected_order_id: str | None = None,
+    expected_strategy: str | None = None,
+) -> bool:
+    if not isinstance(mandate, dict):
+        return False
+    required = {
+        "mandate_version",
+        "exposure_id",
+        "order_id",
+        "ticker",
+        "instrument_type",
+        "horizon",
+        "status",
+        "created_at",
+        "planned_exit_at",
+        "thesis_valid_until",
+        "planned_stop_price",
+    }
+    if required - set(mandate) or mandate.get("status") not in allowed_statuses:
+        return False
+    exposure_id = str(mandate["exposure_id"])
+    ticker = str(mandate["ticker"]).upper()
+    instrument_type = str(mandate["instrument_type"])
+    if not ticker:
+        return False
+    if instrument_type == "equity":
+        if exposure_id != f"equity:{ticker}":
+            return False
+    elif instrument_type in {"call", "put"}:
+        if not exposure_id.startswith("option:") or not exposure_id.removeprefix("option:"):
+            return False
+    else:
+        return False
+    expected = (
+        (expected_exposure_id, exposure_id),
+        (expected_ticker.upper() if expected_ticker else None, ticker),
+        (expected_instrument_type, instrument_type),
+        (expected_order_id, str(mandate["order_id"])),
+        (expected_strategy, str(mandate.get("strategy", ""))),
+    )
+    if any(wanted is not None and wanted != actual for wanted, actual in expected):
+        return False
+    return _validated_mandate_times(mandate) is not None
 
 
 def planned_exit_time(

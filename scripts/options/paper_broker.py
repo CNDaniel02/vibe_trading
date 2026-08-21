@@ -78,7 +78,14 @@ class OptionPaperBroker:
         self.audit.append("paper_option_order_created", {"order": order.to_dict()})
         return order
 
-    def submit_order(self, order: OptionOrder, quote: OptionQuote | None, now: str | None = None) -> OptionOrder:
+    def submit_order(
+        self,
+        order: OptionOrder,
+        quote: OptionQuote | None,
+        now: str | None = None,
+        *,
+        entry_nav_usd: float | None = None,
+    ) -> OptionOrder:
         now = now or utc_now()
         orders = self.store.orders()
         account = self.store.base.account()
@@ -105,6 +112,7 @@ class OptionPaperBroker:
             counters,
             self.config,
             now,
+            entry_nav_usd=entry_nav_usd,
         )
         if not risk.approved:
             order.status = "rejected"
@@ -160,7 +168,13 @@ class OptionPaperBroker:
         self.audit.append("paper_option_order_filled", {"order": order.to_dict(), "fill": fill.to_dict(), "quote": quote.to_dict()})
         return order
 
-    def process_open_orders(self, quotes: dict[str, OptionQuote], now: str | None = None) -> list[OptionOrder]:
+    def process_open_orders(
+        self,
+        quotes: dict[str, OptionQuote],
+        now: str | None = None,
+        *,
+        entry_nav_usd: float | None = None,
+    ) -> list[OptionOrder]:
         now = now or utc_now()
         expiry_seconds = int(self.config.get("options_costs", {}).get("open_order_expiry_seconds", 120))
         processed: list[OptionOrder] = []
@@ -179,17 +193,30 @@ class OptionPaperBroker:
                 self.audit.append("paper_option_order_expired", {"order": current.to_dict()})
                 processed.append(current)
             else:
-                processed.append(self.submit_order(order, quotes.get(order.contract.option_id), now))
+                processed.append(
+                    self.submit_order(
+                        order,
+                        quotes.get(order.contract.option_id),
+                        now,
+                        entry_nav_usd=entry_nav_usd,
+                    )
+                )
         return processed
 
-    def cancel_order(self, order_id: str, reason: str = "cancelled") -> OptionOrder:
+    def cancel_order(
+        self,
+        order_id: str,
+        reason: str = "cancelled",
+        *,
+        now: str | None = None,
+    ) -> OptionOrder:
         orders = self.store.orders()
         order = orders[order_id]
         if order.status in {"filled", "cancelled", "rejected", "expired"}:
             return order
         order.status = "cancelled"
         order.reject_reason = reason
-        order.updated_at = utc_now()
+        order.updated_at = now or utc_now()
         orders[order_id] = order
         self.store.save_orders(orders)
         self.audit.append("paper_option_order_cancelled", {"reason": reason, "order": order.to_dict()})

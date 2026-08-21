@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+import math
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -20,12 +21,15 @@ from scripts.exit.position_mandates import (
     PositionMandateStore,
     evaluate_mandate_exit,
     planned_exit_time,
+    validate_position_mandate,
 )
 from scripts.evaluation.probability_calibration import uncalibrated_metadata
 from scripts.journal.write_trade_journal import write_order_journal
 from scripts.llm.base_provider import LLMProvider, ProviderError
 from scripts.llm.usage_tracker import UsageTracker
 from scripts.options.exit_policy import evaluate_option_exit
+from scripts.options.risk_gate import validate_option_quote
+from scripts.risk.risk_gate import validate_quote
 from scripts.risk.shared_portfolio_risk import shared_deployment
 from scripts.strategies.allocator_state import AllocatorStateStore
 
@@ -123,6 +127,7 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
     ) -> dict[str, Any]:
         decision_time = now or utc_now()
         clock = self.clock.status(decision_time)
+        recovery_updates = self._recover_allocator_entry_orders(decision_time)
         self.mandates.reconcile(
             equity_orders=self.broker.store.orders(),
             option_orders=self.option_broker.store.orders(),
@@ -132,6 +137,7 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
             return {
                 "event": "ai_instrument_allocator_monitor_idle",
                 "reason": f"market session is {clock.market_session}",
+                "recovery_order_updates": recovery_updates,
                 "live_order_tools_called": False,
             }
 
@@ -140,11 +146,23 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
         quotes: dict[str, Quote] = {}
         option_quotes: dict[str, Any] = {}
         errors: dict[str, str] = {}
-        for symbol, position in positions.items():
+        equity_symbols = set(positions)
+        equity_symbols.update(
+            order.symbol
+            for order in self.broker.store.orders().values()
+            if order.status
+            in {"submitted_to_paper_broker", "open", "partially_filled"}
+        )
+        for symbol in equity_symbols:
+            position = positions.get(symbol)
             try:
                 quotes[symbol] = self.discovery.fetch_current_quote(
                     symbol,
-                    average_daily_volume_usd=position.average_price * 1_000_000,
+                    average_daily_volume_usd=(
+                        position.average_price * 1_000_000
+                        if position is not None
+                        else None
+                    ),
                 )
             except Exception as exc:
                 errors[symbol] = f"{type(exc).__name__}: {exc}"
@@ -160,13 +178,41 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
             except Exception as exc:
                 errors["options"] = f"{type(exc).__name__}: {exc}"
 
+        entry_nav_usd: float | None = None
+        try:
+            entry_nav_usd = float(
+                self._account_state(
+                    decision_time,
+                    equity_quotes=quotes,
+                    option_quotes=option_quotes,
+                )["nav_usd"]
+            )
+        except (TypeError, ValueError) as exc:
+            errors["marked_nav"] = f"{type(exc).__name__}: {exc}"
+            recovery_updates.extend(
+                self._recover_allocator_entry_orders(
+                    decision_time,
+                    cancel_retryable_reason=(
+                        "allocator marked NAV unavailable during retry"
+                    ),
+                )
+            )
+
         open_updates = [
             order.to_dict()
-            for order in self.broker.process_open_orders(quotes, decision_time)
+            for order in self.broker.process_open_orders(
+                quotes,
+                decision_time,
+                entry_nav_usd=entry_nav_usd,
+            )
         ]
         option_open_updates = [
             order.to_dict()
-            for order in self.option_broker.process_open_orders(option_quotes, decision_time)
+            for order in self.option_broker.process_open_orders(
+                option_quotes,
+                decision_time,
+                entry_nav_usd=entry_nav_usd,
+            )
         ]
         self.mandates.reconcile(
             equity_orders=self.broker.store.orders(),
@@ -177,8 +223,15 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
         exits: list[dict[str, Any]] = []
         for symbol, position in list(self.broker.store.positions().items()):
             quote = quotes.get(symbol)
-            mandate = self.mandates.for_exposure(f"equity:{symbol}")
-            mandate_exit = evaluate_mandate_exit(mandate, decision_time)
+            exposure_id = f"equity:{symbol}"
+            mandate = self.mandates.for_exposure(exposure_id)
+            mandate_exit = evaluate_mandate_exit(
+                mandate,
+                decision_time,
+                expected_exposure_id=exposure_id,
+                expected_ticker=symbol,
+                expected_instrument_type="equity",
+            )
             price_exit = evaluate_position_exit(
                 position,
                 quote,
@@ -237,8 +290,15 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
         option_exits: list[dict[str, Any]] = []
         for option_id, position in list(self.option_broker.store.positions().items()):
             quote = option_quotes.get(option_id)
-            mandate = self.mandates.for_exposure(f"option:{option_id}")
-            mandate_exit = evaluate_mandate_exit(mandate, decision_time)
+            exposure_id = f"option:{option_id}"
+            mandate = self.mandates.for_exposure(exposure_id)
+            mandate_exit = evaluate_mandate_exit(
+                mandate,
+                decision_time,
+                expected_exposure_id=exposure_id,
+                expected_ticker=position.contract.underlying,
+                expected_instrument_type=position.contract.option_type,
+            )
             price_exit = evaluate_option_exit(
                 position,
                 quote,
@@ -296,12 +356,44 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
             self.broker.store.orders(),
             self.option_broker.store.orders(),
         )
+        try:
+            marked_account = self._account_state(
+                decision_time,
+                equity_quotes=quotes,
+                option_quotes=option_quotes,
+            )
+        except (TypeError, ValueError) as exc:
+            errors["marked_nav"] = f"{type(exc).__name__}: {exc}"
+            marked_account = None
         portfolio = {
             "event": "ai_instrument_allocator_portfolio_snapshot",
             "asof": decision_time,
             "cash": round(account.cash, 6),
             "initial_cash": account.initial_cash,
             **deployment,
+            "marked_nav_usd": (
+                marked_account["nav_usd"] if marked_account is not None else None
+            ),
+            "nav_valuation_method": (
+                marked_account["nav_valuation_method"]
+                if marked_account is not None
+                else None
+            ),
+            "nav_calculated_at": (
+                marked_account["nav_calculated_at"]
+                if marked_account is not None
+                else None
+            ),
+            "equity_mark_times": (
+                marked_account["equity_mark_times"]
+                if marked_account is not None
+                else {}
+            ),
+            "option_mark_times": (
+                marked_account["option_mark_times"]
+                if marked_account is not None
+                else {}
+            ),
             "positions": {
                 key: value.to_dict()
                 for key, value in self.broker.store.positions().items()
@@ -322,6 +414,7 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
             "option_open_order_updates": option_open_updates,
             "exits": exits,
             "option_exits": option_exits,
+            "recovery_order_updates": recovery_updates,
             "quote_errors": errors,
             "portfolio": portfolio,
             "live_order_tools_called": False,
@@ -825,14 +918,17 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
         if stage == "intraday" and not signal.get("entry_now", False):
             return {"status": "no_trade", "reason": "model did not authorize entry", "order": None}
         try:
-            quote = self.discovery.fetch_current_quote(ticker)
+            quote = self.discovery.fetch_current_quote(
+                ticker,
+                average_daily_volume_usd=None,
+            )
             summary = derive_signal_summary(signal)
             option_type = "call" if summary["direction"] == "bullish" else "put"
             dte = self.profile.get("option_dte_by_horizon", {}).get(
                 signal["horizon"],
                 {},
             )
-            account_state = self._account_state()
+            account_state = self._account_state(now)
             max_premium = float(account_state["nav_usd"]) * float(
                 self.config["options_risk"].get("max_order_risk_pct_of_equity", 0.03)
             )
@@ -940,7 +1036,12 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
             )
             exposure_id = f"equity:{ticker}"
             self._register_mandate(order.order_id, exposure_id, selected["instrument_type"], signal, plan, planned_exit_at, selected.get("planned_stop_price"), execution_now)
-            submitted = self.broker.submit_order(order, quote, execution_now)
+            submitted = self.broker.submit_order(
+                order,
+                quote,
+                execution_now,
+                entry_nav_usd=float(account_state["nav_usd"]),
+            )
         else:
             candidate = next(
                 (
@@ -969,7 +1070,12 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
             )
             exposure_id = f"option:{contract.option_id}"
             self._register_mandate(order.order_id, exposure_id, selected["instrument_type"], signal, plan, planned_exit_at, None, execution_now)
-            submitted = self.option_broker.submit_order(order, option_quote, execution_now)
+            submitted = self.option_broker.submit_order(
+                order,
+                option_quote,
+                execution_now,
+                entry_nav_usd=float(account_state["nav_usd"]),
+            )
         self.mandates.reconcile(
             equity_orders=self.broker.store.orders(),
             option_orders=self.option_broker.store.orders(),
@@ -1016,18 +1122,170 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
             planned_stop_price=planned_stop_price,
         )
 
-    def _account_state(self) -> dict[str, float]:
+    def _recover_allocator_entry_orders(
+        self,
+        now: str,
+        *,
+        cancel_retryable_reason: str | None = None,
+    ) -> list[dict[str, Any]]:
+        entries: list[tuple[Any, Any, str, str, str]] = []
+        for order in self.broker.store.orders().values():
+            if order.strategy == self.STRATEGY and order.side == "buy":
+                entries.append(
+                    (
+                        self.broker,
+                        order,
+                        f"equity:{order.symbol}",
+                        order.symbol,
+                        "equity",
+                    )
+                )
+        for order in self.option_broker.store.orders().values():
+            if order.strategy == self.STRATEGY and order.intent == "buy_to_open":
+                entries.append(
+                    (
+                        self.option_broker,
+                        order,
+                        f"option:{order.contract.option_id}",
+                        order.contract.underlying,
+                        order.contract.option_type,
+                    )
+                )
+
+        updates: list[dict[str, Any]] = []
+        retryable = {"submitted_to_paper_broker", "open", "partially_filled"}
+        for broker, order, exposure_id, ticker, instrument_type in entries:
+            reason = None
+            if order.status == "created":
+                reason = "allocator created entry cancelled during restart recovery"
+            elif order.status in retryable:
+                mandate = self.mandates.for_exposure(exposure_id)
+                if cancel_retryable_reason:
+                    reason = cancel_retryable_reason
+                elif not validate_position_mandate(
+                    mandate,
+                    allowed_statuses={"pending_fill", "open"},
+                    expected_exposure_id=exposure_id,
+                    expected_ticker=ticker,
+                    expected_instrument_type=instrument_type,
+                    expected_order_id=order.order_id,
+                    expected_strategy=self.STRATEGY,
+                ):
+                    reason = (
+                        "allocator entry mandate invalid during restart recovery"
+                    )
+            if reason is None:
+                continue
+
+            allocation = self.plans.allocations().get(str(order.decision_id), {})
+            plan_id = allocation.get("plan_id")
+            if plan_id:
+                self.plans.set_plan_status(
+                    str(plan_id),
+                    "invalidated",
+                    reason=reason,
+                    now=now,
+                )
+            cancelled = broker.cancel_order(order.order_id, reason=reason, now=now)
+            for mandate_key, mandate in self.mandates.mandates().items():
+                if (
+                    mandate_key == exposure_id
+                    or str(mandate.get("order_id")) == order.order_id
+                ):
+                    self.mandates.close(mandate_key, reason=reason, now=now)
+            updates.append(
+                {
+                    "event": "allocator_entry_recovered_fail_closed",
+                    "reason": reason,
+                    "exposure_id": exposure_id,
+                    "order": cancelled.to_dict(),
+                }
+            )
+        return updates
+
+    def _account_state(
+        self,
+        now: str,
+        *,
+        equity_quotes: dict[str, Quote] | None = None,
+        option_quotes: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         account = self.broker.store.account()
+        equity_positions = self.broker.store.positions()
+        option_positions = self.option_broker.store.positions()
+        marks = dict(equity_quotes or {})
+        if equity_quotes is None:
+            for symbol, position in equity_positions.items():
+                marks[symbol] = self.discovery.fetch_current_quote(
+                    symbol,
+                    average_daily_volume_usd=position.average_price * 1_000_000,
+                )
+        option_marks = dict(option_quotes or {})
+        if option_quotes is None and option_positions:
+            option_marks = self.option_data.fetch_quotes(sorted(option_positions))
+
+        nav = float(account.cash)
+        equity_mark_times: dict[str, str] = {}
+        option_mark_times: dict[str, str] = {}
+        for symbol, position in equity_positions.items():
+            quote = marks.get(symbol)
+            validation = validate_quote(
+                quote,
+                now,
+                int(self.config["paper"].get("quote_stale_after_seconds", 60)),
+                self.config["universe"],
+                enforce_entry_liquidity=False,
+            )
+            if not validation.approved or quote is None:
+                raise ValueError(
+                    f"marked NAV unavailable for equity {symbol}: {validation.reason}"
+                )
+            if quote.symbol.upper() != symbol.upper():
+                raise ValueError(
+                    f"marked NAV unavailable for equity {symbol}: quote identity mismatch"
+                )
+            nav += float(position.quantity) * float(quote.bid)
+            equity_mark_times[symbol] = quote.asof
+        for option_id, position in option_positions.items():
+            quote = option_marks.get(option_id)
+            validation = validate_option_quote(
+                quote,
+                now,
+                self.config,
+                enforce_entry_liquidity=False,
+            )
+            if not validation.approved or quote is None:
+                raise ValueError(
+                    f"marked NAV unavailable for option {option_id}: {validation.reason}"
+                )
+            if quote.option_id != option_id:
+                raise ValueError(
+                    f"marked NAV unavailable for option {option_id}: quote identity mismatch"
+                )
+            nav += (
+                float(position.quantity)
+                * float(quote.bid)
+                * float(position.contract.multiplier)
+            )
+            option_mark_times[option_id] = quote.updated_at
+
+        if not math.isfinite(nav) or nav <= 0:
+            raise ValueError("marked NAV is non-positive or non-finite")
+
         deployment = shared_deployment(
             account,
-            self.broker.store.positions(),
-            self.option_broker.store.positions(),
+            equity_positions,
+            option_positions,
             self.broker.store.orders(),
             self.option_broker.store.orders(),
         )
         return {
             "cash_usd": float(account.cash),
-            "nav_usd": float(deployment["account_equity_at_cost"]),
+            "nav_usd": nav,
+            "nav_valuation_method": "conservative_liquidation_bid_v1",
+            "nav_calculated_at": now,
+            "equity_mark_times": equity_mark_times,
+            "option_mark_times": option_mark_times,
             "equity_deployed_usd": float(deployment["equity_deployed"]),
             "options_deployed_usd": float(deployment["options_deployed"]),
         }

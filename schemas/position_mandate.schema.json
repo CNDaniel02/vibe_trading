@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "position_mandate.schema.json",
+  "description": "Persisted allocator mandate. Runtime validation additionally binds exposure_id, ticker, instrument_type, strategy, and order_id to the actual order or position context.",
   "type": "object",
   "additionalProperties": false,
   "required": [

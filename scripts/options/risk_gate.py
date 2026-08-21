@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+import math
 
 from scripts.core.models import Account, Order, Position, parse_ts
 from scripts.options.fill_model import simulate_option_fill
@@ -50,6 +51,7 @@ def check_option_order(
     counters: dict,
     config: dict,
     now: str,
+    entry_nav_usd: float | None = None,
 ) -> RiskDecision:
     if not config.get("risk", {}).get("allow_options", False):
         return RiskDecision(False, "options disabled by equity account mandate")
@@ -119,12 +121,23 @@ def check_option_order(
         return RiskDecision(False, simulated.reason or "option fill model rejected order")
     reference_price = simulated.fill.price if simulated.fill else max(order.limit_price or 0, quote.ask)
     premium_risk = reference_price * order.quantity * contract.multiplier
-    equity_at_cost = account.cash
-    equity_at_cost += sum(position.average_price * position.quantity for position in equity_positions.values())
-    equity_at_cost += sum(position.cost_basis() for position in option_positions.values())
-    if premium_risk >= equity_at_cost:
+    if entry_nav_usd is not None and (
+        not math.isfinite(float(entry_nav_usd)) or float(entry_nav_usd) <= 0
+    ):
+        return RiskDecision(False, "invalid marked NAV")
+    account_nav = (
+        float(entry_nav_usd)
+        if entry_nav_usd is not None
+        else account.cash
+        + sum(
+            position.average_price * position.quantity
+            for position in equity_positions.values()
+        )
+        + sum(position.cost_basis() for position in option_positions.values())
+    )
+    if premium_risk >= account_nav:
         return RiskDecision(False, "all-in option order blocked")
-    if premium_risk > equity_at_cost * float(risk.get("max_order_risk_pct_of_equity", 1)) + 1e-9:
+    if premium_risk > account_nav * float(risk.get("max_order_risk_pct_of_equity", 1)) + 1e-9:
         return RiskDecision(False, "max option premium risk exceeded")
 
     shared = check_shared_entry(
@@ -138,6 +151,7 @@ def check_option_order(
         counters=counters,
         shared_config=config.get("shared_risk", {}),
         new_underlying=contract.underlying,
+        account_nav_usd=account_nav,
     )
     if not shared.approved:
         return RiskDecision(False, shared.reason)

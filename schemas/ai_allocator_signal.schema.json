@@ -21,6 +21,7 @@
       "type": "array"
     },
     "entry_condition": {
+      "description": "Audit-only V1 research text; deterministic Python quote, remaining-move, liquidity, and risk gates exclusively authorize entry.",
       "minLength": 1,
       "type": "string"
     },

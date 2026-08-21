@@ -86,6 +86,13 @@ expired, malformed, or inconsistent values become a structured fail-closed
 `no_trade`. The allocator repeats this check when consuming persisted state, so
 an invalid historical plan cannot reach order creation through a parse error.
 
+`entry_condition` is free-text research and audit context in V1. It is not a
+machine-executable trigger and cannot authorize an order. At 09:32 or intraday,
+only deterministic Python checks over the current quote, remaining forecast
+move, liquidity, spread, authorization lifetime, and account risk can permit an
+entry. A model condition that still needs a future price or confirmation must
+be `no_trade`.
+
 ## Instrument allocation
 
 Bullish signals compare long equity and eligible long calls. Bearish signals
@@ -154,6 +161,14 @@ fill rules.
 - no same-session re-entry after stop loss or thesis invalidation;
 - missing/stale/future quotes, missing IV/Greeks, or invalid state fail closed.
 
+All allocator entry percentages use a current conservative liquidation NAV:
+cash plus each existing stock and long-option position marked at its executable
+bid. The allocation record saves the calculation time and every position quote
+timestamp. If any required holding quote is missing, stale, future-dated,
+invalid, or identity-mismatched, no new or retrying entry may proceed. Cost
+basis remains an explicit deployment diagnostic; it is never passed as
+`nav_usd`.
+
 The deterministic broker risk gate has final veto. The model cannot modify any
 limit or create an order object.
 
@@ -179,6 +194,13 @@ take-profit, option DTE/expiration/sellout, deterministic mandate invalidation,
 and close-of-session force-flatten rules remain active. Legacy strategy exits
 are unchanged.
 
+On every restart, recovery runs before normal open-order processing. An
+allocator entry left in `created` is cancelled and its plan invalidated; it is
+never auto-submitted. A retryable `submitted_to_paper_broker`, `open`, or
+`partially_filled` entry may continue only when a valid `pending_fill` or `open`
+mandate matches its order id, strategy, exposure id, ticker, and instrument
+type. Otherwise the order is cancelled and any matching mandate is closed.
+
 New mandates use `mandate_version: 2` and persist the exact
 `max_holding_trading_days`. Registration and every restart-time exit evaluation
 verify that `planned_exit_at` is inside the XNYS regular session implied by the
@@ -200,6 +222,13 @@ manual action, or replay event that calls the mandate invalidation transition.
 Missing, inconsistent, expired, malformed, or explicitly invalidated mandates
 trigger a fail-closed exit. All plan, allocation, mandate, order, fill, and
 close transitions also append JSONL audit events.
+
+Monitor-time mandate validation is bound to the actual position identity, not
+only to the mandate's internal fields. `equity:AAPL` must describe equity AAPL
+with a positive finite persisted stop. `option:<id>` must match that exact
+contract id, underlying ticker, and call/put type. A mismatch produces the same
+structured fail-closed exit as other corrupt state and cannot reach field
+conversion code.
 
 ## Evaluation and logs
 
@@ -233,3 +262,6 @@ are the primary promotion evidence.
   documented free-text invalidation as audit-only.
 - 2026-08-20: added mandate V2 exact session-distance validation and made the
   persisted allocator equity stop authoritative across restarts/config changes.
+- 2026-08-20: added fail-closed orphan-order recovery, exposure-bound mandate
+  validation, bid-marked entry NAV, and the audit-only `entry_condition`
+  boundary.

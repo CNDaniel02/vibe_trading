@@ -562,6 +562,15 @@ def allocate_instrument(
         "probability_ev_available": False,
         "probability_ev_usd": None,
         "raw_probability_used_for_ev": False,
+        "account_nav_snapshot": {
+            "nav_usd": float(account_state["nav_usd"]),
+            "valuation_method": str(
+                account_state.get("nav_valuation_method", "provided_account_nav")
+            ),
+            "calculated_at": str(account_state.get("nav_calculated_at", now)),
+            "equity_mark_times": dict(account_state.get("equity_mark_times", {})),
+            "option_mark_times": dict(account_state.get("option_mark_times", {})),
+        },
         **forecast_context,
     }
     if selected is not None:
