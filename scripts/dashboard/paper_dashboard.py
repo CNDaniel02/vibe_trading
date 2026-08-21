@@ -1987,16 +1987,21 @@ function orderStatusKind(status){
   if(["rejected","expired","cancelled"].includes(status))return status==="cancelled"?"":"bad";
   return isUnfinishedOrder(status)?"warn":"";
 }
+function mandateExitPlan(mandate){
+  const plan=mandate||{},planned=plan.planned_exit_at?`最晚计划退出 ${localDateTime(plan.planned_exit_at)}`:"退出模块持续监控";
+  return plan.invalidation_condition?`${planned}；研究失效条件仅记录，当前不自动判定：${plan.invalidation_condition}`:planned;
+}
 function collectPositions(state){
   const rows=[];
   const allocator=state.ai_instrument_allocator||{},ai=state.ai_gated||{};
   const addEquity=(items,account,strategy,mandates=[])=>array(items).forEach(position=>{
     const mandate=array(mandates).find(item=>item.ticker===position.symbol&&item.status==="open")||{};
-    rows.push({account,strategy,instrument:"股票",symbol:position.symbol||"—",direction:"看涨 Long",quantity:position.quantity,average:position.average_price,cost:number(position.quantity)*number(position.average_price),pnl:position.unrealized_pnl,opened:position.opened_at,status:"持有中",exit:humanReason((position.exit_evaluation||{}).reason||mandate.invalidation_condition||mandate.planned_exit_at||"退出模块持续监控")});
+    const exitPlan=Object.keys(mandate).length?mandateExitPlan(mandate):humanReason((position.exit_evaluation||{}).reason||"退出模块持续监控");
+    rows.push({account,strategy,instrument:"股票",symbol:position.symbol||"—",direction:"看涨 Long",quantity:position.quantity,average:position.average_price,cost:number(position.quantity)*number(position.average_price),pnl:position.unrealized_pnl,opened:position.opened_at,status:"持有中",exit:exitPlan});
   });
   const addOptions=(items,account,strategy,mandates=[])=>array(items).forEach(position=>{
     const contract=position.contract||{},mandate=array(mandates).find(item=>item.ticker===contract.underlying&&item.status==="open")||{};
-    rows.push({account,strategy,instrument:contract.option_type==="put"?"看跌 Put":"看涨 Call",symbol:optionDisplay(contract),direction:contract.option_type==="put"?"看跌":"看涨",quantity:position.quantity,average:position.average_price,cost:number(position.quantity)*number(position.average_price)*number(contract.multiplier||100),pnl:position.unrealized_pnl,opened:position.opened_at,status:"持有中",exit:humanReason(mandate.invalidation_condition||mandate.planned_exit_at||"退出模块持续监控")});
+    rows.push({account,strategy,instrument:contract.option_type==="put"?"看跌 Put":"看涨 Call",symbol:optionDisplay(contract),direction:contract.option_type==="put"?"看跌":"看涨",quantity:position.quantity,average:position.average_price,cost:number(position.quantity)*number(position.average_price)*number(contract.multiplier||100),pnl:position.unrealized_pnl,opened:position.opened_at,status:"持有中",exit:Object.keys(mandate).length?mandateExitPlan(mandate):"退出模块持续监控"});
   });
   addEquity(state.positions,"旧 $2,000 账本","股票/旧策略");
   addOptions(state.option_positions,"旧 $2,000 账本","方向期权");

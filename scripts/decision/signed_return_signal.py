@@ -58,7 +58,12 @@ def validate_signed_return_signal(signal: dict[str, Any]) -> None:
         raise ValueError("signed bucket probabilities must sum to 1")
 
 
-def validate_actionable_signal(signal: dict[str, Any], decision_time: str) -> None:
+def validate_actionable_signal(
+    signal: dict[str, Any],
+    decision_time: str,
+    *,
+    planned_exit_at: str | None = None,
+) -> None:
     validate_signed_return_signal(signal)
     action = signal.get("action")
     if action not in {"propose_trade", "no_trade"}:
@@ -76,10 +81,15 @@ def validate_actionable_signal(signal: dict[str, Any], decision_time: str) -> No
     try:
         valid_until_time = parse_ts(valid_until)
         current = parse_ts(decision_time)
+        planned_exit_time = (
+            parse_ts(planned_exit_at) if planned_exit_at is not None else None
+        )
     except (TypeError, ValueError) as exc:
         raise ValueError("actionable signal timestamps must be valid") from exc
     if valid_until_time <= current:
         raise ValueError("actionable signal thesis_valid_until must be in the future")
+    if planned_exit_time is not None and valid_until_time < planned_exit_time:
+        raise ValueError("thesis validity does not cover declared signal horizon")
 
     holding_days = signal.get("max_holding_trading_days")
     if isinstance(holding_days, bool) or not isinstance(holding_days, int):

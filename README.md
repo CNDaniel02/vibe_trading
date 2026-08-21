@@ -317,6 +317,15 @@ analysis for the same ticker supersedes the older plan, and
 no-trade or failed revalidation invalidates it. Intraday proposals still require
 `entry_now=true`.
 
+Allocator position mandates use exchange sessions, not elapsed calendar days,
+for their hard holding horizon. `thesis_valid_until` must cover the complete
+`planned_exit_at` horizon before any paper order can be created. The allocator
+suppresses only the legacy generic calendar time stop; price stops,
+take-profits, option DTE/expiration/sellout, deterministic invalidation, and
+force-flatten exits remain active. Free-text `invalidation_condition` is stored
+for research and audit only in V1. An exit requires a deterministic, manual, or
+replay transition to set `invalidation_triggered`.
+
 The news-drift lane does not wait for a technical buy candidate. DeepSeek sees
 only headline and source fields; ticker validation and all price, liquidity,
 spread, latency, initial-reaction, and budget checks happen afterward in Python.

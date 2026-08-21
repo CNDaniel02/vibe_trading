@@ -24,6 +24,7 @@ def evaluate_position_exit(
     *,
     minutes_to_close: float | None = None,
     exit_before_close_minutes: int = 10,
+    apply_legacy_time_stop: bool = True,
 ) -> ExitDecision:
     if quote is None or quote.bid <= 0:
         return ExitDecision(False, "missing usable exit quote")
@@ -35,9 +36,10 @@ def evaluate_position_exit(
     profit_price = position.average_price * (1 + float(risk_config.get("take_profit_pct", 0.06)))
     if quote.bid >= profit_price:
         return ExitDecision(True, "deterministic take profit", quote.bid)
-    max_days = int(risk_config.get("max_holding_calendar_days", 5))
-    if parse_ts(now) - parse_ts(position.opened_at) >= timedelta(days=max_days):
-        return ExitDecision(True, "deterministic time stop", quote.bid)
+    if apply_legacy_time_stop:
+        max_days = int(risk_config.get("max_holding_calendar_days", 5))
+        if parse_ts(now) - parse_ts(position.opened_at) >= timedelta(days=max_days):
+            return ExitDecision(True, "deterministic time stop", quote.bid)
     return ExitDecision(False, "position remains within exit limits")
 
 

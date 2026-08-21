@@ -41,9 +41,14 @@ def evaluate_mandate_exit(
     if mandate.get("invalidation_triggered", False):
         return MandateExitDecision(True, "thesis invalidation")
     current = parse_ts(now)
-    if current >= parse_ts(str(mandate["planned_exit_at"])):
+    try:
+        planned_exit = parse_ts(str(mandate["planned_exit_at"]))
+        thesis_valid_until = parse_ts(str(mandate["thesis_valid_until"]))
+    except (TypeError, ValueError):
+        return MandateExitDecision(True, "invalid position mandate; fail closed")
+    if current >= planned_exit:
         return MandateExitDecision(True, "position mandate planned exit reached")
-    if current >= parse_ts(str(mandate["thesis_valid_until"])):
+    if current >= thesis_valid_until:
         return MandateExitDecision(True, "position mandate thesis validity expired")
     return MandateExitDecision(False, "position mandate remains valid")
 
@@ -86,7 +91,13 @@ class PositionMandateStore:
 
     def mandates(self) -> dict[str, dict[str, Any]]:
         raw = self.store.read_json("position_mandates.json", {})
-        return {str(key): dict(value) for key, value in raw.items()}
+        if not isinstance(raw, dict):
+            return {}
+        return {
+            str(key): dict(value)
+            for key, value in raw.items()
+            if isinstance(value, dict)
+        }
 
     def register_order(
         self,

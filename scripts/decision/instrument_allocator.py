@@ -368,7 +368,11 @@ def allocate_instrument(
     profile = config.get("strategies", {}).get("ai_instrument_allocator_v1", {})
     allocation_id = f"aia_{uuid4().hex}"
     try:
-        validate_actionable_signal(signal, now)
+        validate_actionable_signal(
+            signal,
+            now,
+            planned_exit_at=planned_exit_at,
+        )
         summary = derive_signal_summary(signal)
     except (KeyError, TypeError, ValueError) as exc:
         return _no_trade_allocation(

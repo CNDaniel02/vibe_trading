@@ -1,5 +1,13 @@
 # Development Log
 
+## 2026-08-20 (America/Los_Angeles) - PR comment 5363719068 mandate horizon 修复
+
+- `ai_instrument_allocator_v1` 的最长持仓时间改为以交易所 session 计算并持久化的 `planned_exit_at`。allocator monitor 不再叠加旧策略的 `max_holding_calendar_days` 自然日 time stop；止损、止盈、期权 DTE/到期/sellout、确定性失效和收盘强平继续执行，旧策略默认行为保持不变。
+- actionable signal 只有在 `thesis_valid_until >= planned_exit_at` 时才可进入工具分配和 paper order 路径。回归覆盖 `intraday_close`、`next_close` 和 5 个交易日 horizon 的早于/等于/晚于边界，并包含美国独立日休市和周末场景；提前到期的 thesis 会在创建股票或期权订单前返回结构化 `no_trade`。
+- mandate state 的根值为 null、单条记录为 null/scalar/list 或时间字段损坏时不再拖垮 monitor。非 dict 记录被忽略，缺失 mandate 或损坏时间统一触发 fail-closed 退出。
+- 明确 `invalidation_condition` 在 V1 只是研究和审计自由文本，不由周期性 LLM 自动判定。只有确定性规则、人工动作或 replay 转换设置 `invalidation_triggered` 才会触发 thesis invalidation；Dashboard 的退出计划同步显示这一边界。
+- 针对评论的 focused 回归为 `19 passed`，Dashboard 为 `40 passed`，全套 pytest 为 `304 passed`，只有 4 条上游 `exchange_calendars` deprecation warning。Playwright 在 1440x1000 和 390x844 下验证“持仓与订单”视图，无横向溢出且 console 为 0 error / 0 warning；临时 8790 进程已关闭，用户的 8787 Dashboard 未停止。
+
 ## 2026-08-20 (America/Los_Angeles) - 全量提交前终审
 
 - 审核本分支全部 allocator、期权定价、schema、测试、文档和 dashboard 改动。独立 Luna Max 审查发现并修复了严格 paper 三态、损坏状态恢复、非有限概率与异常执行时间戳等边界问题。

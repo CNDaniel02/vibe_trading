@@ -170,10 +170,22 @@ result is never merged with long-put PnL.
 
 Every allocator entry registers a persisted position mandate before broker
 submission. A fill reconciles it to `open`. `intraday_close`, `next_close`, and
-`two_to_five_days` map to distinct planned exits. Missing, inconsistent,
-expired, or invalidated mandates trigger a fail-closed exit. All plan,
-allocation, mandate, order, fill, and close transitions also append JSONL audit
-events.
+`two_to_five_days` map to distinct exchange-session-aware planned exits. An
+actionable signal is rejected before order creation unless
+`thesis_valid_until >= planned_exit_at`. For allocator-owned positions,
+`planned_exit_at` is the hard maximum holding horizon; the legacy generic
+calendar-day time stop is suppressed only for this strategy. Price stop,
+take-profit, option DTE/expiration/sellout, deterministic mandate invalidation,
+and close-of-session force-flatten rules remain active. Legacy strategy exits
+are unchanged.
+
+`invalidation_condition` is free-text research and audit context in V1. It is
+not polled by an LLM and cannot by itself close a position. The separate
+`invalidation_triggered` flag is reserved for a deterministic rule, explicit
+manual action, or replay event that calls the mandate invalidation transition.
+Missing, inconsistent, expired, malformed, or explicitly invalidated mandates
+trigger a fail-closed exit. All plan, allocation, mandate, order, fill, and
+close transitions also append JSONL audit events.
 
 ## Evaluation and logs
 
@@ -202,3 +214,6 @@ are the primary promotion evidence.
 - 2026-08-20: added actionable-signal fail-closed semantics, account-risk
   normalized cross-instrument selection, exchange-calendar elapsed option
   repricing, and shared scenario/fill tick rounding.
+- 2026-08-20: made exchange-session mandates authoritative for allocator time
+  exits, required thesis validity to cover the full declared horizon, and
+  documented free-text invalidation as audit-only.

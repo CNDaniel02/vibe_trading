@@ -2661,3 +2661,464 @@ def test_round_trip_cost_decomposition_matches_executable_net_pnl() -> None:
     assert costs["commission_usd"] == pytest.approx(0.4)
     assert costs["executable_net_pnl_usd"] == pytest.approx(47.16)
     assert costs["identity_residual_usd"] == pytest.approx(0.0, abs=1e-9)
+
+
+def _open_allocator_mandate(
+    exposure_id: str,
+    *,
+    ticker: str = "AAPL",
+    instrument_type: str = "equity",
+    opened_at: str = "2026-07-10T13:32:00+00:00",
+    planned_exit_at: str = "2026-07-17T19:50:00+00:00",
+) -> dict:
+    return {
+        "mandate_version": 1,
+        "exposure_id": exposure_id,
+        "order_id": f"seed-{exposure_id}",
+        "strategy": "ai_instrument_allocator_v1",
+        "snapshot_id": f"seed-{ticker}",
+        "ticker": ticker,
+        "instrument_type": instrument_type,
+        "horizon": "two_to_five_days",
+        "status": "open",
+        "created_at": opened_at,
+        "entered_at": opened_at,
+        "planned_exit_at": planned_exit_at,
+        "thesis_valid_until": planned_exit_at,
+        "invalidation_condition": "Recorded research condition.",
+        "invalidation_triggered": False,
+        "planned_stop_price": 97.0 if instrument_type == "equity" else None,
+        "closed_at": None,
+        "close_reason": None,
+    }
+
+
+class _AllocatorMonitoringOptions(_AllocatorNoOptions):
+    def __init__(self, quote_asof: str) -> None:
+        self.quote_asof = quote_asof
+
+    def fetch_quotes(self, option_ids):
+        return {
+            option_id: replace(
+                _option_quote(option_id, bid=1.0, ask=1.01),
+                updated_at=self.quote_asof,
+            )
+            for option_id in option_ids
+        }
+
+
+def test_allocator_equity_monitor_uses_mandate_trading_horizon_not_calendar_stop(
+    paper_root: Path,
+) -> None:
+    from scripts.core.models import Position
+    from scripts.discovery.ai_instrument_allocator_pipeline import (
+        AiInstrumentAllocatorPipeline,
+    )
+
+    opened_at = "2026-07-10T13:32:00+00:00"
+    wednesday = "2026-07-15T15:00:00+00:00"
+    planned_exit_at = "2026-07-17T19:50:00+00:00"
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    discovery = _AllocatorExecutionDiscovery(wednesday)
+    pipeline = AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=discovery,
+        news_adapter=_NoNews(),
+        option_data=_AllocatorNoOptions(),
+    )
+    pipeline.broker.store.save_positions(
+        {"AAPL": Position("AAPL", 1.0, 100.0, opened_at, opened_at)}
+    )
+    pipeline.mandates.store.write_json(
+        "position_mandates.json",
+        {
+            "equity:AAPL": _open_allocator_mandate(
+                "equity:AAPL",
+                planned_exit_at=planned_exit_at,
+            )
+        },
+    )
+
+    held = pipeline.monitor_only(wednesday)
+
+    assert held["exits"] == []
+    assert set(pipeline.broker.store.positions()) == {"AAPL"}
+
+    discovery.quote_asof = planned_exit_at
+    exited = pipeline.monitor_only(planned_exit_at)
+
+    assert pipeline.broker.store.positions() == {}
+    assert exited["exits"][0]["reason"] == "position mandate planned exit reached"
+
+
+def test_allocator_option_monitor_uses_mandate_trading_horizon_not_calendar_stop(
+    paper_root: Path,
+) -> None:
+    from scripts.discovery.ai_instrument_allocator_pipeline import (
+        AiInstrumentAllocatorPipeline,
+    )
+    from scripts.options.models import OptionPosition
+
+    opened_at = "2026-07-10T13:32:00+00:00"
+    wednesday = "2026-07-15T15:00:00+00:00"
+    planned_exit_at = "2026-07-17T19:50:00+00:00"
+    contract = _option_contract("aapl-five-session-call", "2026-08-21")
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    option_data = _AllocatorMonitoringOptions(wednesday)
+    pipeline = AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=_AllocatorExecutionDiscovery(wednesday),
+        news_adapter=_NoNews(),
+        option_data=option_data,
+    )
+    pipeline.option_broker.store.save_positions(
+        {
+            contract.option_id: OptionPosition(
+                contract,
+                1,
+                1.0,
+                opened_at,
+                opened_at,
+            )
+        }
+    )
+    pipeline.mandates.store.write_json(
+        "position_mandates.json",
+        {
+            f"option:{contract.option_id}": _open_allocator_mandate(
+                f"option:{contract.option_id}",
+                instrument_type="call",
+                planned_exit_at=planned_exit_at,
+            )
+        },
+    )
+
+    held = pipeline.monitor_only(wednesday)
+
+    assert held["option_exits"] == []
+    assert set(pipeline.option_broker.store.positions()) == {contract.option_id}
+
+    option_data.quote_asof = planned_exit_at
+    exited = pipeline.monitor_only(planned_exit_at)
+
+    assert pipeline.option_broker.store.positions() == {}
+    assert (
+        exited["option_exits"][0]["reason"]
+        == "position mandate planned exit reached"
+    )
+
+
+def test_legacy_exit_evaluators_keep_calendar_time_stop_enabled_by_default() -> None:
+    from scripts.core.models import Position, Quote
+    from scripts.exit.evaluate_exit import evaluate_position_exit
+    from scripts.options.exit_policy import evaluate_option_exit
+    from scripts.options.models import OptionPosition
+
+    opened_at = "2026-07-10T13:32:00+00:00"
+    wednesday = "2026-07-15T15:00:00+00:00"
+    equity = Position("AAPL", 1.0, 100.0, opened_at, opened_at)
+    equity_quote = Quote("AAPL", 100.0, 100.01, 100.005, wednesday, "fixture")
+    option = OptionPosition(
+        _option_contract("legacy-calendar-call", "2026-08-21"),
+        1,
+        1.0,
+        opened_at,
+        opened_at,
+    )
+    option_quote = replace(
+        _option_quote(option.contract.option_id, bid=1.0, ask=1.01),
+        updated_at=wednesday,
+    )
+
+    equity_exit = evaluate_position_exit(
+        equity,
+        equity_quote,
+        wednesday,
+        {"max_holding_calendar_days": 5},
+    )
+    option_exit = evaluate_option_exit(
+        option,
+        option_quote,
+        wednesday,
+        {"max_holding_calendar_days": 5, "force_exit_dte": 2},
+    )
+
+    assert equity_exit.reason == "deterministic time stop"
+    assert option_exit.reason == "maximum option holding period reached"
+
+    equity_stop = evaluate_position_exit(
+        equity,
+        replace(equity_quote, bid=96.0, ask=96.01, last=96.005),
+        wednesday,
+        {"stop_loss_pct": 0.03, "max_holding_calendar_days": 5},
+        apply_legacy_time_stop=False,
+    )
+    option_stop = evaluate_option_exit(
+        option,
+        replace(option_quote, bid=0.5, ask=0.51),
+        wednesday,
+        {
+            "stop_loss_pct_of_premium": 0.35,
+            "max_holding_calendar_days": 5,
+            "force_exit_dte": 2,
+        },
+        apply_legacy_time_stop=False,
+    )
+
+    assert equity_stop.reason == "deterministic stop loss"
+    assert option_stop.reason == "option premium stop loss reached"
+
+
+@pytest.mark.parametrize(
+    ("horizon", "holding_days", "decision_time", "planned_exit_at"),
+    [
+        (
+            "intraday_close",
+            0,
+            "2026-07-13T15:00:00+00:00",
+            "2026-07-13T19:50:00+00:00",
+        ),
+        (
+            "next_close",
+            1,
+            "2026-07-02T15:00:00+00:00",
+            "2026-07-06T19:50:00+00:00",
+        ),
+        (
+            "two_to_five_days",
+            5,
+            "2026-07-10T15:00:00+00:00",
+            "2026-07-17T19:50:00+00:00",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    ("validity_offset_seconds", "allowed"),
+    [(-1, False), (0, True), (1, True)],
+)
+def test_allocator_thesis_validity_must_cover_declared_horizon(
+    paper_root: Path,
+    horizon: str,
+    holding_days: int,
+    decision_time: str,
+    planned_exit_at: str,
+    validity_offset_seconds: int,
+    allowed: bool,
+) -> None:
+    from datetime import timedelta
+
+    from scripts.core.models import Quote, parse_ts
+    from scripts.decision.instrument_allocator import allocate_instrument
+
+    signal = _anchored_signal(
+        horizon=horizon,
+        max_holding_trading_days=holding_days,
+        forecast_reference_time=decision_time,
+        thesis_valid_until=(
+            parse_ts(planned_exit_at) + timedelta(seconds=validity_offset_seconds)
+        ).isoformat(),
+    )
+    quote = Quote(
+        "AAPL",
+        100.0,
+        100.01,
+        100.005,
+        decision_time,
+        source="horizon-test",
+        avg_daily_volume_usd=500_000_000,
+    )
+
+    allocation = allocate_instrument(
+        signal,
+        quote,
+        [],
+        _account_state(),
+        load_runtime_config(paper_root),
+        decision_time,
+        planned_exit_at=planned_exit_at,
+    )
+
+    if allowed:
+        assert allocation["status"] == "selected"
+    else:
+        assert allocation["status"] == "no_trade"
+        assert allocation["reason"] == (
+            "invalid actionable signal: thesis validity does not cover "
+            "declared signal horizon"
+        )
+
+
+@pytest.mark.parametrize(
+    ("horizon", "holding_days", "decision_time", "thesis_valid_until"),
+    [
+        (
+            "intraday_close",
+            0,
+            "2026-07-13T15:00:00+00:00",
+            "2026-07-13T18:00:00+00:00",
+        ),
+        (
+            "next_close",
+            1,
+            "2026-07-02T15:00:00+00:00",
+            "2026-07-02T18:00:00+00:00",
+        ),
+        (
+            "two_to_five_days",
+            5,
+            "2026-07-10T15:00:00+00:00",
+            "2026-07-13T18:00:00+00:00",
+        ),
+    ],
+)
+def test_allocator_execution_fails_closed_before_order_when_thesis_expires_early(
+    paper_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    horizon: str,
+    holding_days: int,
+    decision_time: str,
+    thesis_valid_until: str,
+) -> None:
+    from scripts.discovery.ai_instrument_allocator_pipeline import (
+        AiInstrumentAllocatorPipeline,
+    )
+
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    pipeline = AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=_AllocatorExecutionDiscovery(decision_time),
+        news_adapter=_NoNews(),
+        option_data=_AllocatorNoOptions(),
+    )
+    monkeypatch.setattr(
+        pipeline.broker,
+        "create_order",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("invalid horizon must fail before paper order creation")
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline.option_broker,
+        "create_order",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("invalid horizon must fail before paper option order creation")
+        ),
+    )
+    plan = {
+        "plan_id": "early-thesis-expiry",
+        "strategy": "ai_instrument_allocator_v1",
+        "ticker": "AAPL",
+        "stage": "intraday",
+        "signal": _anchored_signal(
+            horizon=horizon,
+            max_holding_trading_days=holding_days,
+            forecast_reference_time=decision_time,
+            thesis_valid_until=thesis_valid_until,
+        ),
+        "snapshot": {"snapshot_id": "early-thesis-expiry"},
+    }
+
+    result = pipeline._execute_plan(plan, decision_time, stage="intraday")
+
+    assert result["status"] == "no_trade"
+    assert result["reason"] == (
+        "invalid actionable signal: thesis validity does not cover declared "
+        "signal horizon"
+    )
+    assert pipeline.broker.store.orders() == {}
+    assert pipeline.option_broker.store.orders() == {}
+
+
+def test_position_mandate_store_ignores_corrupt_root_and_individual_records(
+    paper_root: Path,
+) -> None:
+    from scripts.exit.position_mandates import PositionMandateStore
+
+    store = PositionMandateStore(paper_root)
+    store.store.write_json("position_mandates.json", None)
+    assert store.mandates() == {}
+
+    valid = _open_allocator_mandate("equity:MSFT", ticker="MSFT")
+    store.store.write_json(
+        "position_mandates.json",
+        {
+            "equity:AAPL": None,
+            "equity:NVDA": 7,
+            "equity:TSLA": [],
+            "equity:MSFT": valid,
+        },
+    )
+
+    assert store.mandates() == {"equity:MSFT": valid}
+
+
+@pytest.mark.parametrize("field", ["planned_exit_at", "thesis_valid_until"])
+def test_allocator_malformed_mandate_timestamp_fails_closed(
+    field: str,
+) -> None:
+    from scripts.exit.position_mandates import evaluate_mandate_exit
+
+    mandate = _open_allocator_mandate("equity:AAPL")
+    mandate[field] = "not-a-timestamp"
+
+    decision = evaluate_mandate_exit(
+        mandate,
+        "2026-07-13T15:00:00+00:00",
+    )
+
+    assert decision.should_exit is True
+    assert decision.reason == "invalid position mandate; fail closed"
+
+
+def test_allocator_corrupt_mandate_record_exits_fail_closed_without_crashing(
+    paper_root: Path,
+) -> None:
+    from scripts.core.models import Position
+    from scripts.discovery.ai_instrument_allocator_pipeline import (
+        AiInstrumentAllocatorPipeline,
+    )
+
+    decision_time = "2026-07-13T15:00:00+00:00"
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    pipeline = AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=_AllocatorExecutionDiscovery(decision_time),
+        news_adapter=_NoNews(),
+        option_data=_AllocatorNoOptions(),
+    )
+    pipeline.broker.store.save_positions(
+        {
+            "AAPL": Position(
+                "AAPL",
+                1.0,
+                100.0,
+                decision_time,
+                decision_time,
+            )
+        }
+    )
+    pipeline.mandates.store.write_json(
+        "position_mandates.json",
+        {"equity:AAPL": None},
+    )
+
+    result = pipeline.monitor_only(decision_time)
+
+    assert pipeline.broker.store.positions() == {}
+    assert result["exits"][0]["reason"] == "missing position mandate; fail closed"

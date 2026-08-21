@@ -188,6 +188,7 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                 exit_before_close_minutes=int(
                     self.config["paper"].get("exit_before_close_minutes", 10)
                 ),
+                apply_legacy_time_stop=False,
             )
             reason = (
                 "allocator force flatten"
@@ -238,6 +239,7 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                 quote,
                 decision_time,
                 self.config["options_risk"],
+                apply_legacy_time_stop=False,
             )
             reason = (
                 "allocator force flatten"

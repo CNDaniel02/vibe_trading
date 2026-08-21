@@ -364,7 +364,7 @@ flowchart TD
 7. 股票 25% 是 notional cap，同时 planned stop loss 不得超过 NAV 1%。期权单笔 premium 不得超过 3%、aggregate 不得超过 8%。股票与期权合计最多 3 个仓位、每日 3 次 entry，同 underlying 只能有一个 executable exposure。
 8. `$2,000` counterfactual 只检查 allocator 已选中的完全相同 instrument 的可负担数量、风险比例和拒绝原因，不能重新选择 ticker、strike 或 expiration。
 9. `short_equity_counterfactual` 只是假设直接做空 underlying 的 shadow benchmark；它没有账户、没有订单，PnL 不与 long put 合并。
-10. 每个订单先注册 restart-safe mandate。`intraday_close` 当日退出，`next_close` 下一交易日退出，`two_to_five_days` 只持有指定 2-5 个交易日；缺失、矛盾、到期或 thesis invalidation 的 mandate fail closed 退出。
+10. 每个订单先注册 restart-safe mandate。`intraday_close` 当日退出，`next_close` 下一交易日退出，`two_to_five_days` 只持有指定 2-5 个交易日；actionable signal 的 `thesis_valid_until` 必须覆盖 `planned_exit_at`。allocator 以交易所 session 计算的 `planned_exit_at` 作为最长持仓期限，不再叠加旧策略的自然日 time stop，但止损、止盈、期权 DTE/到期/sellout、确定性失效和收盘强平继续生效。缺失、矛盾、损坏、到期或已触发失效的 mandate 会 fail closed 退出。
 
 ```mermaid
 flowchart TD
@@ -386,6 +386,8 @@ flowchart TD
 ```
 
 两速时钟：20:00 ET 生成慢速 conditional plans；08:00 和 09:25 只更新/失效计划；09:32 ET 不调用 LLM，只用 active plan 和 fresh quote 重建执行经济性；正常交易时段以有界间隔运行 fast research。09:25 无论是否出现新证据，都必须成功写入当日 `preopen_revalidated_at` 执行许可；任务缺席或状态写入失败时，09:32 必须拒绝旧计划。夜间和盘前模型的 `entry_now=false` 只禁止研究阶段下单，不会取消已保存计划；只有带合法非正常时段来源且通过当日盘前复核的计划能在 09:32-09:37 ET 重验，窗口外调用和 intraday plan 均拒绝。相同 ticker 的更新分析会 supersede 旧计划，no-trade/fail-closed 会 invalidate 旧计划。成功 rank 后全部候选事件都进入 cooldown，不只 top-3 deep analysis。每次真正执行授权最多有效 300 秒。
+
+mandate 中的 `invalidation_condition` 是研究与审计自由文本，V1 不会用周期性 LLM 自动判断它。只有确定性规则、明确人工动作或 replay 事件设置 `invalidation_triggered` 后，monitor 才以 thesis invalidation 退出；Dashboard 也会明确区分“仅记录条件”和真正已触发状态。
 
 概率校准按 horizon 完全分开。expanding walk-forward 的每个训练 fold 只能使用在该 test decision time 前已经成熟的标签；主要比较 out-of-sample Brier score 与 log loss，ECE 和 reliability curve 仅作诊断。每条记录保存 calibration version、training cutoff、sample size 和 horizon。
 
