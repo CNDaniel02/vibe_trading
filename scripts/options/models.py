@@ -98,6 +98,8 @@ class OptionOrder:
     reject_reason: str | None = None
     idempotency_key: str | None = None
     thesis: str = ""
+    strategy: str | None = None
+    signal_horizon: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)

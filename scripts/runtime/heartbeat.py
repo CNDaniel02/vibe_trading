@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
+from scripts.core.file_lock import InterProcessFileLock
 from scripts.core.models import parse_ts, utc_now
 
 
@@ -19,7 +21,18 @@ def write_heartbeat(root: str | Path, status: str = "ok", payload: dict[str, Any
         "status": status,
         "payload": payload or {},
     }
-    heartbeat_path(root).write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path = heartbeat_path(root)
+    with InterProcessFileLock(path.with_suffix(path.suffix + ".lock")):
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        for attempt in range(20):
+            try:
+                tmp.replace(path)
+                break
+            except PermissionError:
+                if attempt == 19:
+                    raise
+                time.sleep(0.01)
     return record
 
 

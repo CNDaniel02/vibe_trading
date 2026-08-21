@@ -10,8 +10,9 @@ from scripts.adapters.robinhood_discovery_adapter import RobinhoodDiscoveryAdapt
 from scripts.adapters.robinhood_option_market_data_adapter import RobinhoodOptionMarketDataAdapter
 from scripts.agents.catalyst_investment_team import CatalystInvestmentTeam
 from scripts.core.audit import append_jsonl
-from scripts.core.models import Order, Quote, utc_now
+from scripts.core.models import Order, Quote, parse_ts, utc_now
 from scripts.discovery.evidence_store import EvidenceSnapshotStore
+from scripts.discovery.catalyst_signal_store import CatalystSignalStore
 from scripts.llm.base_provider import LLMProvider, ProviderError
 from scripts.llm.usage_tracker import UsageTracker
 from scripts.options.models import OptionOrder
@@ -62,6 +63,7 @@ class CatalystDiscoveryPipeline:
         self.team = CatalystInvestmentTeam(runtime_config, provider, tracker)
         self.tracker = tracker
         self.evidence = EvidenceSnapshotStore(self.root)
+        self.signals = CatalystSignalStore(self.root)
         self.broker = PaperBroker(self.root, runtime_config)
         self.option_broker = OptionPaperBroker(self.root, runtime_config)
         self.clock = UsEquityMarketClock()
@@ -71,10 +73,26 @@ class CatalystDiscoveryPipeline:
         clock = self.clock.status(decision_time)
         if not self.discovery_config.get("enabled", False):
             return {"event": "catalyst_discovery_skipped", "reason": "strategy disabled"}
-        if not clock.is_regular:
+        research_only = self._premarket_research_allowed(clock, decision_time)
+        if not clock.is_regular and not research_only:
             return {
                 "event": "catalyst_discovery_skipped",
                 "reason": f"market session is {clock.market_session}",
+                "clock": clock.to_dict(),
+            }
+        research_cutoff = int(
+            self.discovery_config.get("minimum_minutes_to_close_for_research", 30)
+        )
+        if (
+            clock.minutes_to_close is not None
+            and clock.minutes_to_close <= research_cutoff
+        ):
+            return {
+                "event": "catalyst_discovery_skipped",
+                "reason": (
+                    "insufficient time before market close for bounded research "
+                    f"({clock.minutes_to_close:.1f}m <= {research_cutoff}m)"
+                ),
                 "clock": clock.to_dict(),
             }
 
@@ -125,7 +143,12 @@ class CatalystDiscoveryPipeline:
                 candidates=ranked_input,
                 market_events=model_market_events,
             )
-            self.evidence.mark_model_events_sent("market_discovery", model_market_events, ranking_time)
+            if not research_only:
+                self.evidence.mark_model_events_sent(
+                    "market_discovery",
+                    model_market_events,
+                    ranking_time,
+                )
         except (AdapterError, ProviderError, RuntimeError, ValueError) as exc:
             event = {
                 "event": "catalyst_discovery_failed_closed",
@@ -186,6 +209,7 @@ class CatalystDiscoveryPipeline:
                 market_context=market_context[ticker],
                 events=model_events,
                 sources=sources,
+                market_session=clock.market_session,
             )
             analysis = self.team.analyze(snapshot, ranked_item)
             analysis["evidence_snapshot"] = evidence_snapshot
@@ -194,11 +218,36 @@ class CatalystDiscoveryPipeline:
                     analysis,
                     snapshot,
                     risk_now=snapshot["decision_time"] if now is not None else None,
+                    research_only=research_only,
                 )
             )
             append_jsonl(self.root, "catalyst_decisions.jsonl", analysis)
+            bull = analysis.get("bull_news")
+            if isinstance(bull, dict) and not research_only:
+                source_tiers = [
+                    int(event.get("source_tier", 4))
+                    for event in model_events
+                    if event.get("source_tier") is not None
+                ]
+                self.signals.put(
+                    ticker,
+                    {
+                        "strategy": self.STRATEGY,
+                        "direction": bull.get("direction"),
+                        "confidence": bull.get("confidence", 0),
+                        "materiality": bull.get("materiality", 0),
+                        "source_tier": min(source_tiers, default=4),
+                        "catalyst_summary": bull.get("catalyst_summary"),
+                    },
+                    observed_at=snapshot["decision_time"],
+                )
             decisions.append(analysis)
-            self.evidence.mark_researched(ticker, model_events, snapshot["decision_time"])
+            if not research_only:
+                self.evidence.mark_researched(
+                    ticker,
+                    model_events,
+                    snapshot["decision_time"],
+                )
 
         result = {
             "event": "catalyst_discovery_complete",
@@ -217,11 +266,37 @@ class CatalystDiscoveryPipeline:
             "market_snapshot": raw_snapshot,
             "model_calls": len(self.tracker.records) - calls_before,
             "usage": self.tracker.summary(),
+            "research_only": research_only,
             "paper_orders_created": 0,
             "live_order_tools_called": False,
         }
         append_jsonl(self.root, "catalyst_discovery.jsonl", result)
         return result
+
+    def _premarket_research_allowed(
+        self,
+        clock: Any,
+        decision_time: str,
+    ) -> bool:
+        if (
+            clock.market_session != "pre_market"
+            or not self.discovery_config.get(
+                "allow_premarket_research",
+                False,
+            )
+            or not clock.open_time
+        ):
+            return False
+        minutes_to_open = (
+            parse_ts(clock.open_time) - parse_ts(decision_time)
+        ).total_seconds() / 60
+        window = float(
+            self.discovery_config.get(
+                "premarket_research_window_minutes",
+                90,
+            )
+        )
+        return 0 < minutes_to_open <= window
 
     def _merge_candidates(
         self,
@@ -322,6 +397,7 @@ class CatalystDiscoveryPipeline:
         market_context: dict[str, Any],
         events: list[dict[str, Any]],
         sources: list[dict[str, Any]],
+        market_session: str = "regular",
     ) -> dict[str, Any]:
         quote = dict(market_context["quote"])
         return {
@@ -329,7 +405,7 @@ class CatalystDiscoveryPipeline:
             "decision_time": decision_time,
             "data_cutoff_time": decision_time,
             "ticker": ticker,
-            "market_session": "regular",
+            "market_session": market_session,
             "market_data": {
                 "quote": quote,
                 "fundamentals": market_context.get("fundamentals", {}),
@@ -355,6 +431,7 @@ class CatalystDiscoveryPipeline:
         snapshot: dict[str, Any],
         *,
         risk_now: str | None = None,
+        research_only: bool = False,
     ) -> dict[str, Any]:
         decision = analysis["decision"]
         if decision["action"] == "no_trade":
@@ -363,6 +440,21 @@ class CatalystDiscoveryPipeline:
                 "risk_reason": decision.get("no_trade_reason") or "no entry proposed",
                 "proposal": None,
                 "final_action": "no_trade",
+            }
+        if research_only:
+            return {
+                "risk_approved": False,
+                "risk_reason": (
+                    "premarket research only; regular-session quote and "
+                    "deterministic risk revalidation are required"
+                ),
+                "proposal": {
+                    "instrument": decision.get("instrument"),
+                    "ticker": snapshot["ticker"],
+                    "planned_action": decision.get("action"),
+                },
+                "final_action": "no_trade",
+                "research_only": True,
             }
         ticker = snapshot["ticker"]
         observed_quote = Quote(**snapshot["market_data"]["quote"])

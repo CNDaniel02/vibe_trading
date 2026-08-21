@@ -33,22 +33,22 @@ def simulate_fill(order: Order, quote: Quote, costs: dict, filled_at: str | None
         if order.order_type == "limit":
             if order.limit_price is None:
                 return FillDecision(status="rejected", reason="limit buy missing limit_price")
-            if quote.ask > order.limit_price:
-                return FillDecision(status="open", reason="ask above buy limit")
-            base_price = max(order.limit_price, quote.ask)
+            adverse_price = round(quote.ask + slip, 4)
+            if adverse_price > order.limit_price:
+                return FillDecision(status="open", reason="adverse buy fill would exceed limit")
+            price = adverse_price
         else:
-            base_price = quote.ask
-        price = round(base_price + slip, 4)
+            price = round(quote.ask + slip, 4)
     elif order.side == "sell":
         if order.order_type == "limit":
             if order.limit_price is None:
                 return FillDecision(status="rejected", reason="limit sell missing limit_price")
-            if quote.bid < order.limit_price:
-                return FillDecision(status="open", reason="bid below sell limit")
-            base_price = min(order.limit_price, quote.bid)
+            adverse_price = round(max(0.0001, quote.bid - slip), 4)
+            if adverse_price < order.limit_price:
+                return FillDecision(status="open", reason="adverse sell fill would fall below limit")
+            price = adverse_price
         else:
-            base_price = quote.bid
-        price = round(max(0.0001, base_price - slip), 4)
+            price = round(max(0.0001, quote.bid - slip), 4)
     else:
         return FillDecision(status="rejected", reason="unsupported side")
 

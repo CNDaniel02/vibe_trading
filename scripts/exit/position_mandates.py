@@ -1,0 +1,401 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+import math
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+
+from scripts.core.audit import append_jsonl
+from scripts.core.models import parse_ts, utc_now
+from scripts.core.state import JsonStateStore
+from scripts.runtime.market_clock import UsEquityMarketClock
+
+
+_TERMINAL_ORDER_STATUSES = {"cancelled", "expired", "rejected"}
+
+
+@dataclass(frozen=True)
+class MandateExitDecision:
+    should_exit: bool
+    reason: str
+
+
+def evaluate_mandate_exit(
+    mandate: dict[str, Any] | None,
+    now: str,
+    *,
+    expected_exposure_id: str | None = None,
+    expected_ticker: str | None = None,
+    expected_instrument_type: str | None = None,
+) -> MandateExitDecision:
+    if not isinstance(mandate, dict):
+        return MandateExitDecision(True, "missing position mandate; fail closed")
+    if not validate_position_mandate(
+        mandate,
+        allowed_statuses={"open"},
+        expected_exposure_id=expected_exposure_id,
+        expected_ticker=expected_ticker,
+        expected_instrument_type=expected_instrument_type,
+    ):
+        return MandateExitDecision(True, "invalid position mandate; fail closed")
+    validated_times = _validated_mandate_times(mandate)
+    assert validated_times is not None
+    if mandate.get("invalidation_triggered", False):
+        return MandateExitDecision(True, "thesis invalidation")
+    current = parse_ts(now)
+    planned_exit, thesis_valid_until = validated_times
+    if current >= planned_exit:
+        return MandateExitDecision(True, "position mandate planned exit reached")
+    if current >= thesis_valid_until:
+        return MandateExitDecision(True, "position mandate thesis validity expired")
+    return MandateExitDecision(False, "position mandate remains valid")
+
+
+def validate_position_mandate(
+    mandate: dict[str, Any] | None,
+    *,
+    allowed_statuses: set[str],
+    expected_exposure_id: str | None = None,
+    expected_ticker: str | None = None,
+    expected_instrument_type: str | None = None,
+    expected_order_id: str | None = None,
+    expected_strategy: str | None = None,
+) -> bool:
+    if not isinstance(mandate, dict):
+        return False
+    required = {
+        "mandate_version",
+        "exposure_id",
+        "order_id",
+        "ticker",
+        "instrument_type",
+        "horizon",
+        "status",
+        "created_at",
+        "planned_exit_at",
+        "thesis_valid_until",
+        "planned_stop_price",
+    }
+    if required - set(mandate) or mandate.get("status") not in allowed_statuses:
+        return False
+    exposure_id = str(mandate["exposure_id"])
+    ticker = str(mandate["ticker"]).upper()
+    instrument_type = str(mandate["instrument_type"])
+    if not ticker:
+        return False
+    if instrument_type == "equity":
+        if exposure_id != f"equity:{ticker}":
+            return False
+    elif instrument_type in {"call", "put"}:
+        if not exposure_id.startswith("option:") or not exposure_id.removeprefix("option:"):
+            return False
+    else:
+        return False
+    expected = (
+        (expected_exposure_id, exposure_id),
+        (expected_ticker.upper() if expected_ticker else None, ticker),
+        (expected_instrument_type, instrument_type),
+        (expected_order_id, str(mandate["order_id"])),
+        (expected_strategy, str(mandate.get("strategy", ""))),
+    )
+    if any(wanted is not None and wanted != actual for wanted, actual in expected):
+        return False
+    return _validated_mandate_times(mandate) is not None
+
+
+def planned_exit_time(
+    entered_at: str,
+    horizon: str,
+    *,
+    max_holding_trading_days: int,
+    minutes_before_close: int,
+) -> str:
+    clock = UsEquityMarketClock()
+    entered = parse_ts(entered_at)
+    session = clock.calendar.date_to_session(pd.Timestamp(entered.date()), direction="next")
+    if horizon == "intraday_close":
+        if max_holding_trading_days != 0:
+            raise ValueError("intraday_close requires zero holding days")
+        target = session
+    elif horizon == "next_close":
+        if max_holding_trading_days != 1:
+            raise ValueError("next_close requires one holding day")
+        target = clock.calendar.next_session(session)
+    elif horizon == "two_to_five_days":
+        if not 2 <= max_holding_trading_days <= 5:
+            raise ValueError("two_to_five_days requires two to five holding days")
+        target = session
+        for _ in range(max_holding_trading_days):
+            target = clock.calendar.next_session(target)
+    else:
+        raise ValueError("unsupported mandate horizon")
+    close = clock.calendar.session_close(target).to_pydatetime()
+    return (close - timedelta(minutes=minutes_before_close)).isoformat()
+
+
+class PositionMandateStore:
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        namespace: str = "ai_instrument_allocator_v1",
+    ) -> None:
+        self.root = Path(root)
+        self.namespace = namespace
+        self.store = JsonStateStore(self.root, namespace=namespace)
+        self.log_name = f"strategy_sleeves/{namespace}/position_mandates.jsonl"
+
+    def mandates(self) -> dict[str, dict[str, Any]]:
+        raw = self.store.read_json("position_mandates.json", {})
+        if not isinstance(raw, dict):
+            return {}
+        return {
+            str(key): dict(value)
+            for key, value in raw.items()
+            if isinstance(value, dict)
+        }
+
+    def register_order(
+        self,
+        *,
+        order_id: str,
+        exposure_id: str,
+        strategy: str,
+        snapshot_id: str,
+        ticker: str,
+        instrument_type: str,
+        horizon: str,
+        max_holding_trading_days: int,
+        created_at: str,
+        planned_exit_at: str,
+        thesis_valid_until: str,
+        invalidation_condition: str,
+        planned_stop_price: float | None,
+    ) -> dict[str, Any]:
+        if strategy != self.namespace:
+            raise ValueError("position mandate namespace mismatch")
+        if horizon not in {"intraday_close", "next_close", "two_to_five_days"}:
+            raise ValueError("unsupported mandate horizon")
+        mandate = {
+            "mandate_version": 2,
+            "exposure_id": exposure_id,
+            "order_id": order_id,
+            "strategy": strategy,
+            "snapshot_id": snapshot_id,
+            "ticker": ticker.upper(),
+            "instrument_type": instrument_type,
+            "horizon": horizon,
+            "max_holding_trading_days": max_holding_trading_days,
+            "status": "pending_fill",
+            "created_at": created_at,
+            "entered_at": None,
+            "planned_exit_at": planned_exit_at,
+            "thesis_valid_until": thesis_valid_until,
+            "invalidation_condition": invalidation_condition,
+            "invalidation_triggered": False,
+            "planned_stop_price": planned_stop_price,
+            "closed_at": None,
+            "close_reason": None,
+        }
+        if _validated_mandate_times(mandate) is None:
+            raise ValueError("position mandate semantics are invalid")
+        values = self.mandates()
+        existing = values.get(exposure_id)
+        if existing is not None and existing.get("status") in {
+            "pending_fill",
+            "open",
+        }:
+            identity_fields = (
+                "mandate_version",
+                "exposure_id",
+                "order_id",
+                "strategy",
+                "snapshot_id",
+                "ticker",
+                "instrument_type",
+                "horizon",
+                "max_holding_trading_days",
+                "created_at",
+                "planned_exit_at",
+                "thesis_valid_until",
+                "invalidation_condition",
+                "planned_stop_price",
+            )
+            if all(existing.get(field) == mandate.get(field) for field in identity_fields):
+                return existing
+            raise ValueError(
+                f"active position mandate already exists for {exposure_id}"
+            )
+        values[exposure_id] = mandate
+        self.store.write_json("position_mandates.json", values)
+        self._append("position_mandate_registered", mandate)
+        return mandate
+
+    def reconcile(
+        self,
+        *,
+        equity_orders: dict[str, Any],
+        option_orders: dict[str, Any],
+        now: str,
+    ) -> list[dict[str, Any]]:
+        values = self.mandates()
+        changed: list[dict[str, Any]] = []
+        all_orders = {**equity_orders, **option_orders}
+        for exposure_id, mandate in values.items():
+            if mandate.get("status") != "pending_fill":
+                continue
+            order = all_orders.get(str(mandate.get("order_id")))
+            if order is None:
+                continue
+            status = _value(order, "status")
+            if status == "filled":
+                mandate["status"] = "open"
+                mandate["entered_at"] = str(
+                    _value(order, "updated_at")
+                    or _value(order, "submitted_at")
+                    or now
+                )
+            elif status in _TERMINAL_ORDER_STATUSES:
+                mandate["status"] = "closed"
+                mandate["closed_at"] = now
+                mandate["close_reason"] = f"entry order {status}"
+            else:
+                continue
+            values[exposure_id] = mandate
+            changed.append(dict(mandate))
+            self._append("position_mandate_reconciled", mandate)
+        if changed:
+            self.store.write_json("position_mandates.json", values)
+        return changed
+
+    def for_exposure(self, exposure_id: str) -> dict[str, Any] | None:
+        return self.mandates().get(exposure_id)
+
+    def mark_invalidation(
+        self,
+        exposure_id: str,
+        *,
+        reason: str,
+        now: str | None = None,
+    ) -> dict[str, Any] | None:
+        values = self.mandates()
+        mandate = values.get(exposure_id)
+        if mandate is None:
+            return None
+        mandate["invalidation_triggered"] = True
+        mandate["invalidation_reason"] = reason
+        mandate["updated_at"] = now or utc_now()
+        values[exposure_id] = mandate
+        self.store.write_json("position_mandates.json", values)
+        self._append("position_mandate_invalidated", mandate)
+        return mandate
+
+    def close(
+        self,
+        exposure_id: str,
+        *,
+        reason: str,
+        now: str,
+    ) -> dict[str, Any] | None:
+        values = self.mandates()
+        mandate = values.get(exposure_id)
+        if mandate is None:
+            return None
+        mandate["status"] = "closed"
+        mandate["closed_at"] = now
+        mandate["close_reason"] = reason
+        values[exposure_id] = mandate
+        self.store.write_json("position_mandates.json", values)
+        self._append("position_mandate_closed", mandate)
+        return mandate
+
+    def _append(self, event: str, mandate: dict[str, Any]) -> None:
+        append_jsonl(
+            self.root,
+            self.log_name,
+            {"event": event, "namespace": self.namespace, "mandate": mandate},
+        )
+
+
+def _value(item: Any, name: str, default: Any = None) -> Any:
+    if isinstance(item, dict):
+        return item.get(name, default)
+    return getattr(item, name, default)
+
+
+def _validated_mandate_times(
+    mandate: dict[str, Any],
+) -> tuple[datetime, datetime] | None:
+    try:
+        version = mandate["mandate_version"]
+        if type(version) is not int or version not in {1, 2}:
+            return None
+        created_at = parse_ts(str(mandate["created_at"]))
+        planned_exit = parse_ts(str(mandate["planned_exit_at"]))
+        thesis_valid_until = parse_ts(str(mandate["thesis_valid_until"]))
+        if planned_exit <= created_at or thesis_valid_until < planned_exit:
+            return None
+
+        horizon = str(mandate["horizon"])
+        holding_days = mandate.get("max_holding_trading_days")
+        if version == 2 and type(holding_days) is not int:
+            return None
+        if holding_days is not None and type(holding_days) is not int:
+            return None
+
+        instrument_type = str(mandate["instrument_type"])
+        planned_stop = mandate.get("planned_stop_price")
+        if instrument_type == "equity":
+            if (
+                isinstance(planned_stop, bool)
+                or not isinstance(planned_stop, (int, float))
+                or not math.isfinite(float(planned_stop))
+                or float(planned_stop) <= 0
+            ):
+                return None
+        elif instrument_type in {"call", "put"}:
+            if planned_stop is not None:
+                return None
+        else:
+            return None
+
+        calendar = UsEquityMarketClock().calendar
+        created_session = calendar.date_to_session(
+            pd.Timestamp(created_at.date()),
+            direction="next",
+        )
+        planned_day = pd.Timestamp(planned_exit.date())
+        if not calendar.is_session(planned_day):
+            return None
+        planned_session = calendar.date_to_session(planned_day, direction="none")
+        planned_timestamp = pd.Timestamp(planned_exit)
+        if not (
+            calendar.session_open(planned_session)
+            <= planned_timestamp
+            <= calendar.session_close(planned_session)
+        ):
+            return None
+        if planned_session < created_session:
+            return None
+        session_distance = len(
+            calendar.sessions_in_range(created_session, planned_session)
+        ) - 1
+
+        if horizon == "intraday_close":
+            valid_horizon = session_distance == 0
+        elif horizon == "next_close":
+            valid_horizon = session_distance == 1
+        elif horizon == "two_to_five_days":
+            valid_horizon = 2 <= session_distance <= 5
+        else:
+            return None
+        if not valid_horizon:
+            return None
+        if holding_days is not None and holding_days != session_distance:
+            return None
+    except (KeyError, TypeError, ValueError):
+        return None
+    return planned_exit, thesis_valid_until

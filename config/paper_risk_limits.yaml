@@ -1,5 +1,8 @@
 max_position_pct_of_equity: 0.25
 max_order_pct_of_equity: 0.25
+max_planned_loss_pct_of_equity: 0.01
+require_planned_stop_for_strategies:
+  - ai_instrument_allocator_v1
 max_daily_trades: 4
 max_open_positions: 5
 allow_average_down: false

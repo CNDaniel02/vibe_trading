@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "allocation_id",
+    "status",
+    "reason",
+    "signal_summary",
+    "considered",
+    "selected_instrument",
+    "counterfactual_2000",
+    "short_equity_counterfactual",
+    "selection_policy_version",
+    "probability_ev_available",
+    "probability_ev_usd",
+    "raw_probability_used_for_ev"
+  ],
+  "properties": {
+    "allocation_id": {"type": "string"},
+    "status": {"enum": ["selected", "no_trade"]},
+    "reason": {"type": ["string", "null"]},
+    "signal_summary": {"type": "object"},
+    "considered": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/instrument_candidate"}
+    },
+    "selected_instrument": {
+      "oneOf": [
+        {"$ref": "#/$defs/instrument_candidate"},
+        {"type": "null"}
+      ]
+    },
+    "counterfactual_2000": {"type": ["object", "null"]},
+    "short_equity_counterfactual": {"type": ["object", "null"]},
+    "selection_policy_version": {"const": "deterministic_risk_adjusted_v1"},
+    "probability_ev_available": {"const": false},
+    "probability_ev_usd": {"type": "null"},
+    "raw_probability_used_for_ev": {"const": false},
+    "account_nav_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "nav_usd",
+        "valuation_method",
+        "calculated_at",
+        "equity_mark_times",
+        "option_mark_times"
+      ],
+      "properties": {
+        "nav_usd": {"type": "number", "exclusiveMinimum": 0},
+        "valuation_method": {
+          "enum": ["conservative_liquidation_bid_v1", "provided_account_nav"]
+        },
+        "calculated_at": {"type": "string", "format": "date-time"},
+        "equity_mark_times": {
+          "type": "object",
+          "additionalProperties": {"type": "string", "format": "date-time"}
+        },
+        "option_mark_times": {
+          "type": "object",
+          "additionalProperties": {"type": "string", "format": "date-time"}
+        }
+      }
+    },
+    "forecast_reference_price": {"type": "number", "exclusiveMinimum": 0},
+    "forecast_reference_time": {"type": "string", "format": "date-time"},
+    "forecast_conservative_move_pct": {"type": "number"},
+    "forecast_target_price": {"type": "number", "minimum": 0},
+    "realized_move_since_reference_pct": {"type": "number"},
+    "remaining_move_pct": {"type": "number"},
+    "market_implied_move_pct": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "forecast_to_implied_move_ratio": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "market_implied_move_method": {
+      "enum": ["nearest_candidate_iv_sqrt_calendar_time", null]
+    },
+    "market_implied_move_option_id": {"type": ["string", "null"]},
+    "market_implied_volatility": {
+      "type": ["number", "null"],
+      "exclusiveMinimum": 0
+    },
+    "forecast_exceeds_market_implied_move": {
+      "type": ["boolean", "null"]
+    },
+    "planned_exit_at": {"type": "string", "format": "date-time"},
+    "scenario_elapsed_calendar_days": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    }
+  },
+  "$defs": {
+    "instrument_candidate": {
+      "type": "object",
+      "required": [
+        "scenario_pnl_usd",
+        "scenario_return_on_account_nav",
+        "deterministic_risk_usd",
+        "deterministic_risk_pct_of_nav",
+        "selection_score",
+        "selection_score_method"
+      ],
+      "properties": {
+        "scenario_pnl_usd": {"type": "number"},
+        "scenario_return_on_account_nav": {"type": "number"},
+        "deterministic_risk_usd": {"type": "number", "minimum": 0},
+        "deterministic_risk_pct_of_nav": {"type": "number", "minimum": 0},
+        "selection_score": {"type": ["number", "null"]},
+        "selection_score_method": {
+          "const": "conservative_scenario_pnl_over_deterministic_risk_v1"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "selected"}}},
+      "then": {
+        "required": [
+          "forecast_reference_price",
+          "forecast_reference_time",
+          "forecast_conservative_move_pct",
+          "forecast_target_price",
+          "realized_move_since_reference_pct",
+          "remaining_move_pct",
+          "market_implied_move_pct",
+          "forecast_to_implied_move_ratio",
+          "market_implied_move_method",
+          "market_implied_move_option_id",
+          "market_implied_volatility",
+          "forecast_exceeds_market_implied_move",
+          "planned_exit_at",
+          "scenario_elapsed_calendar_days",
+          "account_nav_snapshot"
+        ]
+      }
+    }
+  ]
+}

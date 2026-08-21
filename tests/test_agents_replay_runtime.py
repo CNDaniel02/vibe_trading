@@ -3,8 +3,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 from scripts.agents.investment_team import run_investment_team
-from scripts.core.config import load_runtime_config
+from scripts.core.config import assert_paper_mode, load_runtime_config
 from scripts.core.models import Quote
 from scripts.replay.historical_data_adapter import CsvHistoricalMarketDataAdapter
 from scripts.replay.replay_run_manager import ReplayRunManager
@@ -70,12 +72,29 @@ def test_replay_uses_paper_broker_and_state(paper_root):
 
 
 def test_heartbeat_watchdog_fresh_and_stale(paper_root):
+    lock = ProcessLock(paper_root / "state" / "forward_service.lock")
+    assert lock.acquire()
+    try:
+        write_heartbeat(paper_root, now="2026-07-04T14:00:00+00:00")
+        fresh = check_runtime(paper_root, max_heartbeat_age_seconds=120, now="2026-07-04T14:01:00+00:00")
+        stale = check_runtime(paper_root, max_heartbeat_age_seconds=30, now="2026-07-04T14:01:00+00:00")
+        assert fresh.healthy and not fresh.fail_closed
+        assert not stale.healthy and stale.fail_closed
+        assert stale.reason == "stale heartbeat"
+    finally:
+        lock.release()
+
+
+def test_watchdog_rejects_fresh_heartbeat_without_running_service(paper_root):
     write_heartbeat(paper_root, now="2026-07-04T14:00:00+00:00")
-    fresh = check_runtime(paper_root, max_heartbeat_age_seconds=120, now="2026-07-04T14:01:00+00:00")
-    stale = check_runtime(paper_root, max_heartbeat_age_seconds=30, now="2026-07-04T14:01:00+00:00")
-    assert fresh.healthy and not fresh.fail_closed
-    assert not stale.healthy and stale.fail_closed
-    assert stale.reason == "stale heartbeat"
+    decision = check_runtime(
+        paper_root,
+        max_heartbeat_age_seconds=120,
+        now="2026-07-04T14:01:00+00:00",
+    )
+    assert not decision.healthy
+    assert decision.fail_closed
+    assert decision.reason == "forward service lock missing"
 
 
 def test_process_lock_blocks_second_acquire(paper_root):
@@ -101,14 +120,47 @@ def test_process_lock_recovers_confirmed_stale_owner(paper_root):
 
 
 def test_healthcheck_and_scheduler_wrapper(paper_root):
+    allocator_state = (
+        paper_root
+        / "state"
+        / "strategy_sleeves"
+        / "ai_instrument_allocator_v1"
+    )
+    assert not allocator_state.exists()
     health = run_healthcheck(paper_root)
-    assert health["ok"]
+    assert not allocator_state.exists()
+    assert health["ok"] == health["full_forward_evaluation_ready"]
+    assert "ready_for_ai_instrument_allocator_paper" in health
     assert health["quote_provider"] in {"alpaca", "robinhood_mcp"}
     assert health["forward_ready"] == bool(
-        health["integrations"]["vibe"]["ready"] and health["quote_data"]["ready"]
+        health["integrations"]["vibe"]["ready"]
+        and (
+            health["quote_data"]["ready"]
+            or (
+                health["fallback_quote_data"]
+                and health["fallback_quote_data"]["ready"]
+            )
+        )
     )
+    assert health["runtime_healthy"] is True
+    assert health["paper_mode"] is True
+    assert health["live_readonly"] is False
+    assert health["live_trading"] is False
+    assert health["operational_status"] == (
+        "ok" if health["full_forward_evaluation_ready"] else "degraded"
+    )
+    if health["operational_status"] == "degraded":
+        assert health["degraded_reasons"]
     scheduler = PaperScheduler(paper_root)
     config = load_runtime_config(paper_root)
     scheduler.add_interval_job("noop", 60, lambda: config["paper"]["mode"]["paper"])
     assert scheduler.scheduler.get_job("noop") is not None
     scheduler.shutdown()
+
+
+def test_paper_mode_rejects_live_readonly(paper_root):
+    config = load_runtime_config(paper_root)
+    config["paper"]["mode"]["live_readonly"] = True
+
+    with pytest.raises(RuntimeError, match="live_readonly must be false"):
+        assert_paper_mode(config)

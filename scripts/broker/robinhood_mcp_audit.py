@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -198,19 +199,34 @@ class CapabilityAudit:
 class RobinhoodMcpCapabilityClient:
     """Create an OAuth session and audit only the server's declared tools."""
 
-    def __init__(self, config: dict[str, Any], root: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any],
+        root: str | Path | None = None,
+        *,
+        interactive_oauth: bool = True,
+    ) -> None:
         self.endpoint = str(config.get("endpoint", ROBINHOOD_TRADING_MCP_URL))
         base = Path(root).resolve() if root is not None else PROJECT_ROOT
         configured_path = Path(str(config.get("credential_store_path", "state/robinhood_mcp_oauth.dpapi")))
         self.store = CredentialStore(configured_path if configured_path.is_absolute() else base / configured_path)
         self.redirect_uri = str(config.get("redirect_uri", "http://127.0.0.1:8765/callback"))
         self.client_name = str(config.get("client_name", "auto-trading-skill read-only capability audit"))
+        self.interactive_oauth = interactive_oauth
+        self.request_timeout_seconds = float(config.get("request_timeout_seconds", 20))
 
     async def _show_authorization_url(self, authorization_url: str) -> None:
+        if not self.interactive_oauth:
+            raise RuntimeError(
+                "Robinhood OAuth authorization is required; run "
+                "python -m scripts.broker.robinhood_mcp_audit --reset-credentials interactively"
+            )
         print("Open this Robinhood OAuth URL in a desktop browser, approve access, then paste the final callback URL:")
         print(authorization_url)
 
     async def _read_callback(self) -> tuple[str, str | None]:
+        if not self.interactive_oauth:
+            raise RuntimeError("interactive Robinhood OAuth is disabled in the paper runtime")
         callback_url = input("Robinhood OAuth callback URL: ").strip()
         parsed = urlparse(callback_url)
         expected = urlparse(self.redirect_uri)
@@ -239,21 +255,51 @@ class RobinhoodMcpCapabilityClient:
             callback_handler=self._read_callback,
         )
 
+    def _session_deadline_seconds(self) -> float | None:
+        # Browser authorization is a human-paced, one-off CLI operation. Its
+        # network requests remain bounded by httpx, but the time spent waiting
+        # for the user must not consume the paper runtime's hard deadline.
+        return None if self.interactive_oauth else self.request_timeout_seconds
+
     @asynccontextmanager
     async def session(self) -> AsyncIterator[ClientSession]:
-        oauth = self._oauth()
-        async with httpx.AsyncClient(auth=oauth, follow_redirects=True, timeout=60) as http_client:
-            # Robinhood accepts the MCP Streamable HTTP session but returns
-            # HTTP 400 to the SDK's optional DELETE termination request. Let
-            # the server expire the read-only session naturally instead.
-            async with streamable_http_client(
-                self.endpoint,
-                http_client=http_client,
-                terminate_on_close=False,
-            ) as (read_stream, write_stream, _):
-                async with ClientSession(read_stream, write_stream) as session:
-                    await session.initialize()
-                    yield session
+        oauth_logger = logging.getLogger("mcp.client.auth.oauth2")
+        previous_disabled = oauth_logger.disabled
+        if not self.interactive_oauth:
+            oauth_logger.disabled = True
+        try:
+            async with asyncio.timeout(self._session_deadline_seconds()):
+                oauth = self._oauth()
+                async with httpx.AsyncClient(
+                    auth=oauth,
+                    follow_redirects=True,
+                    timeout=self.request_timeout_seconds,
+                ) as http_client:
+                    # Robinhood accepts the MCP Streamable HTTP session but
+                    # returns HTTP 400 to the SDK's optional DELETE termination
+                    # request. Let the server expire the read-only session.
+                    async with streamable_http_client(
+                        self.endpoint,
+                        http_client=http_client,
+                        terminate_on_close=False,
+                    ) as (read_stream, write_stream, _):
+                        async with ClientSession(read_stream, write_stream) as session:
+                            await session.initialize()
+                            yield session
+        finally:
+            oauth_logger.disabled = previous_disabled
+
+    async def probe(self) -> dict[str, Any]:
+        """Validate the persisted OAuth session without invoking a broker tool."""
+        async with self.session() as session:
+            result = await session.list_tools()
+        names = {tool.name for tool in result.tools}
+        return {
+            "authenticated": True,
+            "tool_count": len(names),
+            "tool_names": sorted(names),
+            "readonly_quote_tool_available": "get_equity_quotes" in names,
+        }
 
     async def audit(self) -> CapabilityAudit:
         async with self.session() as session:

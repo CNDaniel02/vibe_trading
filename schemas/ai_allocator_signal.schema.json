@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "action": {
+      "enum": [
+        "propose_trade",
+        "no_trade"
+      ]
+    },
+    "contrary_evidence": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "data_gaps": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "entry_condition": {
+      "description": "Audit-only V1 research text; deterministic Python quote, remaining-move, liquidity, and risk gates exclusively authorize entry.",
+      "minLength": 1,
+      "type": "string"
+    },
+    "entry_now": {
+      "type": "boolean"
+    },
+    "horizon": {
+      "enum": [
+        "intraday_close",
+        "next_close",
+        "two_to_five_days"
+      ]
+    },
+    "invalidation_condition": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "max_holding_trading_days": {
+      "maximum": 5,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "no_trade_reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "probability_status": {
+      "const": "uncalibrated"
+    },
+    "signed_return_probability_buckets": {
+      "additionalProperties": false,
+      "properties": {
+        "return_gt_plus_5_pct": {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        "return_lt_minus_5_pct": {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        "return_minus_0_5_to_plus_0_5_pct": {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        "return_minus_2_to_minus_0_5_pct": {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        "return_minus_5_to_minus_2_pct": {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        "return_plus_0_5_to_plus_2_pct": {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        "return_plus_2_to_plus_5_pct": {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        }
+      },
+      "required": [
+        "return_lt_minus_5_pct",
+        "return_minus_5_to_minus_2_pct",
+        "return_minus_2_to_minus_0_5_pct",
+        "return_minus_0_5_to_plus_0_5_pct",
+        "return_plus_0_5_to_plus_2_pct",
+        "return_plus_2_to_plus_5_pct",
+        "return_gt_plus_5_pct"
+      ],
+      "type": "object"
+    },
+    "source_urls": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "supporting_evidence": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "thesis": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "thesis_valid_until": {
+      "format": "date-time",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "ticker": {
+      "pattern": "^[A-Z][A-Z0-9.-]{0,9}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "action",
+    "ticker",
+    "horizon",
+    "signed_return_probability_buckets",
+    "probability_status",
+    "thesis",
+    "supporting_evidence",
+    "source_urls",
+    "contrary_evidence",
+    "data_gaps",
+    "entry_condition",
+    "entry_now",
+    "invalidation_condition",
+    "thesis_valid_until",
+    "max_holding_trading_days",
+    "no_trade_reason"
+  ],
+  "type": "object"
+}

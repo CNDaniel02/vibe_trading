@@ -10,18 +10,53 @@ allow_inverse_etf: false
 min_price_usd: 5
 min_avg_daily_volume_usd: 20000000
 max_spread_bps: 50
+max_exit_spread_bps: 100
 
 default_watchlist:
   - SPY
   - QQQ
+  - IWM
+  - DIA
+  - SMH
   - AAPL
   - MSFT
   - NVDA
   - AMZN
   - META
   - GOOGL
+  - TSLA
+  - AMD
+  - AVGO
+  - NFLX
+  - JPM
   - XLK
   - XLF
+  - XLE
+  - XLV
+
+# Options use a separate affordable-underlying pool because one contract
+# represents 100 shares and the paper account is intentionally only $2,000.
+options_watchlist:
+  - F
+  - BAC
+  - SOFI
+  - XLF
+  - SLV
+  - TLT
+  - XLE
+
+etf_symbols:
+  - SPY
+  - QQQ
+  - IWM
+  - DIA
+  - SMH
+  - XLK
+  - XLF
+  - XLE
+  - XLV
+  - SLV
+  - TLT
 
 excluded_symbols:
   - TQQQ

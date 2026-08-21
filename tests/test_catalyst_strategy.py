@@ -171,9 +171,9 @@ class FakePutOptionData:
         )
         quote = OptionQuote(
             option_id=contract.option_id,
-            bid=0.95,
-            ask=1.0,
-            mark=0.975,
+            bid=0.50,
+            ask=0.51,
+            mark=0.505,
             updated_at=NOW,
             source="fixture",
             delta=-0.45,

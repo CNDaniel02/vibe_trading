@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "calibration_record.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "record_id",
+    "snapshot_id",
+    "model",
+    "prompt_version",
+    "decision_time",
+    "data_cutoff_time",
+    "label_matured_at",
+    "horizon",
+    "signed_return_probability_buckets",
+    "actual_bucket",
+    "calibration_status",
+    "calibration_version",
+    "calibration_training_cutoff_time",
+    "calibration_sample_size",
+    "calibration_horizon"
+  ],
+  "properties": {
+    "record_id": {"type": "string", "minLength": 1},
+    "snapshot_id": {"type": "string", "minLength": 1},
+    "model": {"type": "string", "minLength": 1},
+    "prompt_version": {"type": "string", "minLength": 1},
+    "decision_time": {"type": "string", "format": "date-time"},
+    "data_cutoff_time": {"type": "string", "format": "date-time"},
+    "label_matured_at": {"type": "string", "format": "date-time"},
+    "horizon": {"enum": ["intraday_close", "next_close", "two_to_five_days"]},
+    "signed_return_probability_buckets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "return_lt_minus_5_pct",
+        "return_minus_5_to_minus_2_pct",
+        "return_minus_2_to_minus_0_5_pct",
+        "return_minus_0_5_to_plus_0_5_pct",
+        "return_plus_0_5_to_plus_2_pct",
+        "return_plus_2_to_plus_5_pct",
+        "return_gt_plus_5_pct"
+      ],
+      "properties": {
+        "return_lt_minus_5_pct": {"type": "number", "minimum": 0, "maximum": 1},
+        "return_minus_5_to_minus_2_pct": {"type": "number", "minimum": 0, "maximum": 1},
+        "return_minus_2_to_minus_0_5_pct": {"type": "number", "minimum": 0, "maximum": 1},
+        "return_minus_0_5_to_plus_0_5_pct": {"type": "number", "minimum": 0, "maximum": 1},
+        "return_plus_0_5_to_plus_2_pct": {"type": "number", "minimum": 0, "maximum": 1},
+        "return_plus_2_to_plus_5_pct": {"type": "number", "minimum": 0, "maximum": 1},
+        "return_gt_plus_5_pct": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "actual_bucket": {
+      "enum": [
+        "return_lt_minus_5_pct",
+        "return_minus_5_to_minus_2_pct",
+        "return_minus_2_to_minus_0_5_pct",
+        "return_minus_0_5_to_plus_0_5_pct",
+        "return_plus_0_5_to_plus_2_pct",
+        "return_plus_2_to_plus_5_pct",
+        "return_gt_plus_5_pct"
+      ]
+    },
+    "calibration_status": {"enum": ["uncalibrated", "calibrated"]},
+    "calibration_version": {"type": "string"},
+    "calibration_training_cutoff_time": {"type": ["string", "null"], "format": "date-time"},
+    "calibration_sample_size": {"type": "integer", "minimum": 0},
+    "calibration_horizon": {"enum": ["intraday_close", "next_close", "two_to_five_days"]}
+  }
+}

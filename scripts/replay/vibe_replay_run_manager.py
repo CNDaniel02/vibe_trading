@@ -123,7 +123,14 @@ class VibeReplayRunManager:
                     side="buy",
                     order_type="limit",
                     quantity=quantity,
-                    limit_price=quote.ask,
+                    limit_price=round(
+                        quote.ask
+                        + max(
+                            quote.ask * float(self.config["costs"].get("slippage_bps", 0)) / 10000,
+                            float(self.config["costs"].get("minimum_slippage_usd", 0)),
+                        ),
+                        4,
+                    ),
                     quote_seen_at=quote.asof,
                     thesis="relative_strength_v1 replay candidate",
                     idempotency_key=f"relative_strength_v1:{snapshot['snapshot_id']}",
@@ -169,7 +176,18 @@ class VibeReplayRunManager:
                 parse_ts(timestamp).isoformat(),
                 source=f"{bar.source}:synthetic_top_of_book",
                 avg_daily_volume_usd=adv,
-                asset_class="us_etf" if symbol in {"SPY", "QQQ", "XLK", "XLF"} else "us_equity",
+                asset_class=(
+                    "us_etf"
+                    if symbol
+                    in {
+                        str(value).upper()
+                        for value in self.config["universe"].get(
+                            "etf_symbols",
+                            [],
+                        )
+                    }
+                    else "us_equity"
+                ),
                 session_volume=session_volumes.get(symbol),
                 previous_close=previous[-1].close if previous else None,
             )

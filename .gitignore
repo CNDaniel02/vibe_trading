@@ -23,6 +23,7 @@ dist/
 # Runtime state, generated reports, and local graph output
 logs/
 state/
+output/
 graphify-out/
 references/TradingAgents/
 *.log

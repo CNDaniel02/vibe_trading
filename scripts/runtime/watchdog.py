@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from scripts.runtime.heartbeat import heartbeat_age_seconds, read_heartbeat
+from scripts.runtime.process_lock import ProcessLock
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,15 @@ class WatchdogDecision:
 
 
 def check_runtime(root: str | Path, max_heartbeat_age_seconds: int = 120, now: str | None = None) -> WatchdogDecision:
+    lock = ProcessLock.inspect(Path(root) / "state" / "forward_service.lock")
+    if not lock["present"]:
+        return WatchdogDecision(False, True, "forward service lock missing")
+    if lock["status"] == "malformed":
+        return WatchdogDecision(False, True, "forward service lock malformed")
+    if lock["alive"] is False:
+        return WatchdogDecision(False, True, "forward service process is not running")
+    if lock["alive"] is not True:
+        return WatchdogDecision(False, True, "forward service process liveness is unknown")
     record = read_heartbeat(root)
     if record is None:
         return WatchdogDecision(False, True, "missing heartbeat")

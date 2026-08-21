@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import timedelta
 from typing import Any
 
+from scripts.core.models import parse_ts
 from scripts.llm.base_provider import LLMProvider, ProviderRequest, ProviderResponse, ProviderUsage
 from scripts.llm.schemas import validate_schema
 from scripts.llm.usage_tracker import UsageTracker
@@ -26,14 +28,33 @@ class MockProvider(LLMProvider):
             data = self._decision(request.input_payload)
         elif request.agent_name == "catalyst_candidate_extractor":
             data = self._catalyst_candidates(request.input_payload)
-        elif request.agent_name == "catalyst_ranker":
+        elif request.agent_name in {"catalyst_ranker", "ai_gated_ranker"}:
             data = self._catalyst_ranking(request.input_payload)
-        elif request.agent_name == "catalyst_bull_news_agent":
+        elif request.agent_name in {"catalyst_bull_news_agent", "ai_gated_news_agent"}:
             data = self._catalyst_bull_news(request.input_payload)
-        elif request.agent_name == "catalyst_challenge_agent":
+        elif request.agent_name in {"catalyst_challenge_agent", "ai_gated_challenge_agent"}:
             data = self._catalyst_challenge(request.input_payload)
-        elif request.agent_name == "catalyst_decision_manager":
+        elif request.agent_name in {"catalyst_decision_manager", "ai_gated_decision_manager"}:
             data = self._catalyst_decision(request.input_payload)
+        elif request.agent_name == "ai_allocator_ranker":
+            data = self._allocator_ranking(request.input_payload)
+        elif request.agent_name in {
+            "ai_allocator_news_agent",
+            "ai_allocator_fast_news_agent",
+        }:
+            data = self._allocator_news(request.input_payload)
+        elif request.agent_name in {
+            "ai_allocator_challenge_agent",
+            "ai_allocator_fast_challenge_agent",
+        }:
+            data = self._catalyst_challenge(request.input_payload)
+        elif request.agent_name in {
+            "ai_allocator_decision_manager",
+            "ai_allocator_fast_decision_manager",
+        }:
+            data = self._allocator_signal(request.input_payload)
+        elif request.agent_name == "news_drift_headline_agent":
+            data = self._news_drift_headlines(request.input_payload)
         else:
             raise ValueError(f"unknown mock agent: {request.agent_name}")
         validate_schema(data, request.output_schema)
@@ -244,6 +265,87 @@ class MockProvider(LLMProvider):
         return {"ranked_candidates": ranked, "data_gaps": [] if ranked else ["No eligible candidate was available."]}
 
     @staticmethod
+    def _allocator_ranking(payload: dict[str, Any]) -> dict[str, Any]:
+        candidates = [item for item in payload.get("candidates", []) if item.get("eligible", False)]
+        candidates.sort(key=lambda item: float(item.get("pre_score", 0)), reverse=True)
+        ranked = [
+            {
+                "ticker": str(item["ticker"]),
+                "score": round(max(0.0, min(1.0, float(item.get("pre_score", 0)))), 3),
+                "rationale": "deterministic mock opportunity ranking",
+                "risk_flags": [],
+            }
+            for item in candidates[:8]
+        ]
+        return {"ranked_candidates": ranked, "data_gaps": [] if ranked else ["No eligible candidate was available."]}
+
+    @staticmethod
+    def _allocator_news(payload: dict[str, Any]) -> dict[str, Any]:
+        value = MockProvider._catalyst_bull_news(payload)
+        value.pop("bull_case", None)
+        value.pop("instrument_preference", None)
+        return value
+
+    @staticmethod
+    def _allocator_signal(payload: dict[str, Any]) -> dict[str, Any]:
+        context = payload.get("agent_context", {})
+        news = context.get("bull_news", {})
+        challenge = context.get("challenge", {})
+        direction = str(news.get("direction", "unclear"))
+        veto = bool(challenge.get("veto_recommended", False))
+        if direction == "positive":
+            buckets = {
+                "return_lt_minus_5_pct": 0.02,
+                "return_minus_5_to_minus_2_pct": 0.04,
+                "return_minus_2_to_minus_0_5_pct": 0.09,
+                "return_minus_0_5_to_plus_0_5_pct": 0.15,
+                "return_plus_0_5_to_plus_2_pct": 0.30,
+                "return_plus_2_to_plus_5_pct": 0.25,
+                "return_gt_plus_5_pct": 0.15,
+            }
+        elif direction == "negative":
+            buckets = {
+                "return_lt_minus_5_pct": 0.15,
+                "return_minus_5_to_minus_2_pct": 0.25,
+                "return_minus_2_to_minus_0_5_pct": 0.30,
+                "return_minus_0_5_to_plus_0_5_pct": 0.15,
+                "return_plus_0_5_to_plus_2_pct": 0.09,
+                "return_plus_2_to_plus_5_pct": 0.04,
+                "return_gt_plus_5_pct": 0.02,
+            }
+        else:
+            buckets = {
+                "return_lt_minus_5_pct": 0.03,
+                "return_minus_5_to_minus_2_pct": 0.07,
+                "return_minus_2_to_minus_0_5_pct": 0.15,
+                "return_minus_0_5_to_plus_0_5_pct": 0.50,
+                "return_plus_0_5_to_plus_2_pct": 0.15,
+                "return_plus_2_to_plus_5_pct": 0.07,
+                "return_gt_plus_5_pct": 0.03,
+            }
+        actionable = bool(news.get("supporting_facts")) and not veto
+        decision_time = parse_ts(str(payload["decision_time"]))
+        horizon = "next_close"
+        return {
+            "action": "propose_trade" if actionable else "no_trade",
+            "ticker": str(payload["ticker"]),
+            "horizon": horizon,
+            "signed_return_probability_buckets": buckets,
+            "probability_status": "uncalibrated",
+            "thesis": str(news.get("catalyst_summary") or "No actionable catalyst."),
+            "supporting_evidence": list(news.get("supporting_facts", [])),
+            "source_urls": list(news.get("source_urls", [])),
+            "contrary_evidence": list(challenge.get("objections", [])),
+            "data_gaps": list(news.get("data_gaps", [])),
+            "entry_condition": "Fresh executable economics clear deterministic hurdles.",
+            "entry_now": actionable and payload.get("market_session") == "regular",
+            "invalidation_condition": "Grounded evidence is contradicted or expires.",
+            "thesis_valid_until": (decision_time + timedelta(days=2)).isoformat(),
+            "max_holding_trading_days": 1,
+            "no_trade_reason": None if actionable else "Challenge veto or insufficient grounded evidence.",
+        }
+
+    @staticmethod
     def _catalyst_bull_news(payload: dict[str, Any]) -> dict[str, Any]:
         ticker = str(payload["ticker"])
         events = list(payload.get("available_news", []))
@@ -272,9 +374,18 @@ class MockProvider(LLMProvider):
 
     @staticmethod
     def _catalyst_challenge(payload: dict[str, Any]) -> dict[str, Any]:
-        bull = payload.get("agent_context", {}).get("bull_news", {})
+        context = payload.get("agent_context", {})
+        bull = context.get("bull_news", {})
         objections: list[str] = []
         missing = list(bull.get("data_gaps", []))
+        if context.get("revalidation_only"):
+            prior_direction = context.get("prior_direction")
+            new_direction = bull.get("direction")
+            if (prior_direction, new_direction) in {
+                ("bullish", "negative"),
+                ("bearish", "positive"),
+            }:
+                objections.append("New evidence contradicts the active plan direction.")
         if bull.get("direction") in {"mixed", "unclear"}:
             objections.append("Catalyst direction is not clear.")
         if bull.get("already_priced_in"):
@@ -313,6 +424,14 @@ class MockProvider(LLMProvider):
             0.0,
             min(1.0, float(bull.get("confidence", 0)) + float(challenge.get("confidence_adjustment", 0))),
         )
+        trade_now = action in {"buy", "buy_to_open"}
+        quote = payload.get("market_data", {}).get("quote", {})
+        ask = float(quote.get("ask") or 0)
+        valid_until = (
+            (parse_ts(str(payload["decision_time"])) + timedelta(minutes=5)).isoformat()
+            if trade_now
+            else None
+        )
         return {
             "action": action,
             "instrument": instrument,
@@ -321,6 +440,10 @@ class MockProvider(LLMProvider):
             "supporting_evidence": list(bull.get("supporting_facts", [])),
             "contrary_evidence": list(challenge.get("objections", [])),
             "entry_condition": "Fresh quote and deterministic risk approval.",
+            "entry_now": trade_now,
+            "min_entry_price": None,
+            "max_entry_price": round(ask * 1.001, 4) if trade_now and ask > 0 else None,
+            "entry_valid_until": valid_until,
             "invalidation_condition": "Catalyst is contradicted or market confirmation reverses.",
             "exit_condition": "Configured stop, target, time stop, invalidation, or pre-close exit.",
             "confidence": round(confidence, 3),
@@ -328,3 +451,40 @@ class MockProvider(LLMProvider):
             "option_preference": {"target_dte": 30, "target_abs_delta": 0.45} if instrument in {"call", "put"} else None,
             "no_trade_reason": "Challenge veto or insufficient evidence." if action == "no_trade" else None,
         }
+
+    @staticmethod
+    def _news_drift_headlines(payload: dict[str, Any]) -> dict[str, Any]:
+        signals: list[dict[str, Any]] = []
+        recent = list(payload.get("recent_events", []))
+        for index, event in enumerate(payload.get("events", [])):
+            headline = str(event.get("headline", ""))
+            lowered = headline.lower()
+            ticker = event.get("ticker_hint")
+            positive = any(word in lowered for word in ("raises", "beats", "approval", "wins", "acquires"))
+            negative = any(word in lowered for word in ("cuts", "misses", "recall", "probe", "lawsuit", "rejects"))
+            direction = "positive" if positive and not negative else ("negative" if negative and not positive else "unclear")
+            related = next(
+                (
+                    item
+                    for item in recent
+                    if ticker and item.get("ticker") == ticker and str(item.get("headline", "")).lower() == lowered
+                ),
+                None,
+            )
+            signals.append(
+                {
+                    "event_index": index,
+                    "ticker": str(ticker).upper() if ticker else None,
+                    "company_name": event.get("company_name_hint"),
+                    "direction": direction,
+                    "event_type": "guidance" if "guidance" in lowered else ("regulatory" if "probe" in lowered else "other"),
+                    "materiality": 0.8 if direction != "unclear" else 0.3,
+                    "novelty": 0.0 if related else 0.8,
+                    "ambiguity": 0.2 if direction != "unclear" else 0.8,
+                    "relation_type": "duplicate" if related else "new_event",
+                    "related_event_id": str(related["event_id"]) if related else None,
+                    "confidence": 0.8 if ticker and direction != "unclear" else 0.3,
+                    "rationale": "deterministic headline-only mock classification",
+                }
+            )
+        return {"signals": signals, "data_gaps": [] if signals else ["No unseen headline was available."]}

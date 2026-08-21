@@ -18,8 +18,8 @@ OrderSide = Literal["buy", "sell"]
 OrderType = Literal["market", "limit"]
 
 
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+def utc_now(*, timespec: str = "seconds") -> str:
+    return datetime.now(timezone.utc).isoformat(timespec=timespec)
 
 
 def parse_ts(value: str) -> datetime:
@@ -81,6 +81,9 @@ class Order:
     reject_reason: str | None = None
     idempotency_key: str | None = None
     thesis: str = ""
+    strategy: str | None = None
+    planned_stop_price: float | None = None
+    signal_horizon: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from datetime import timedelta
+import math
 
 from scripts.core.models import Account, Order, Position, parse_ts
 from scripts.options.fill_model import simulate_option_fill
 from scripts.options.models import OptionOrder, OptionPosition, OptionQuote
-from scripts.risk.risk_gate import RiskDecision
-from scripts.risk.shared_portfolio_risk import check_shared_entry
+from scripts.risk.risk_gate import RiskDecision, validate_order_session
+from scripts.risk.shared_portfolio_risk import check_shared_entry, daily_entry_limit_reason
 
 
 _OPEN_STATUSES = {"created", "submitted_to_paper_broker", "open", "partially_filled"}
@@ -50,6 +51,7 @@ def check_option_order(
     counters: dict,
     config: dict,
     now: str,
+    entry_nav_usd: float | None = None,
 ) -> RiskDecision:
     if not config.get("risk", {}).get("allow_options", False):
         return RiskDecision(False, "options disabled by equity account mandate")
@@ -65,6 +67,13 @@ def check_option_order(
     contract = order.contract
     if order.intent not in {"buy_to_open", "sell_to_close"}:
         return RiskDecision(False, "unsupported option intent")
+    session_decision = validate_order_session(
+        now,
+        config,
+        is_entry=order.intent == "buy_to_open",
+    )
+    if not session_decision.approved:
+        return session_decision
     if order.quantity <= 0 or int(order.quantity) != order.quantity:
         return RiskDecision(False, "option quantity must be a positive whole number")
     if order.quantity > int(risk.get("max_contracts_per_order", 1)):
@@ -93,8 +102,9 @@ def check_option_order(
         return RiskDecision(False, "adding to an existing option position is blocked")
     if len(option_positions) >= int(risk.get("max_open_positions", 1)):
         return RiskDecision(False, "max open option positions reached")
-    if int(counters.get("option_trades", 0)) >= int(risk.get("max_daily_entry_trades", 0)):
-        return RiskDecision(False, "max daily option trades reached")
+    limit_reason = daily_entry_limit_reason("options", counters, config)
+    if limit_reason:
+        return RiskDecision(False, limit_reason)
     for current in option_orders.values():
         if current.status not in _OPEN_STATUSES:
             continue
@@ -111,12 +121,23 @@ def check_option_order(
         return RiskDecision(False, simulated.reason or "option fill model rejected order")
     reference_price = simulated.fill.price if simulated.fill else max(order.limit_price or 0, quote.ask)
     premium_risk = reference_price * order.quantity * contract.multiplier
-    equity_at_cost = account.cash
-    equity_at_cost += sum(position.average_price * position.quantity for position in equity_positions.values())
-    equity_at_cost += sum(position.cost_basis() for position in option_positions.values())
-    if premium_risk >= equity_at_cost:
+    if entry_nav_usd is not None and (
+        not math.isfinite(float(entry_nav_usd)) or float(entry_nav_usd) <= 0
+    ):
+        return RiskDecision(False, "invalid marked NAV")
+    account_nav = (
+        float(entry_nav_usd)
+        if entry_nav_usd is not None
+        else account.cash
+        + sum(
+            position.average_price * position.quantity
+            for position in equity_positions.values()
+        )
+        + sum(position.cost_basis() for position in option_positions.values())
+    )
+    if premium_risk >= account_nav:
         return RiskDecision(False, "all-in option order blocked")
-    if premium_risk > equity_at_cost * float(risk.get("max_order_risk_pct_of_equity", 1)) + 1e-9:
+    if premium_risk > account_nav * float(risk.get("max_order_risk_pct_of_equity", 1)) + 1e-9:
         return RiskDecision(False, "max option premium risk exceeded")
 
     shared = check_shared_entry(
@@ -129,6 +150,8 @@ def check_option_order(
         option_orders=option_orders,
         counters=counters,
         shared_config=config.get("shared_risk", {}),
+        new_underlying=contract.underlying,
+        account_nav_usd=account_nav,
     )
     if not shared.approved:
         return RiskDecision(False, shared.reason)

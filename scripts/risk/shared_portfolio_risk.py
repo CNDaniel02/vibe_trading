@@ -10,9 +10,33 @@ from scripts.core.models import Account, Order, Position
 class SharedRiskDecision:
     approved: bool
     reason: str
-    account_equity_at_cost: float
+    account_nav_usd: float
     total_deployed_after: float
     line_deployed_after: float
+
+
+def daily_entry_limit_reason(
+    line: str,
+    counters: dict[str, Any],
+    config: dict[str, Any],
+) -> str | None:
+    risk = config.get("risk", {})
+    options_risk = config.get("options_risk", {})
+    shared_risk = config.get("shared_risk", {})
+    if line == "options":
+        if "max_daily_entry_trades" in options_risk and int(
+            counters.get("option_trades", 0)
+        ) >= int(options_risk["max_daily_entry_trades"]):
+            return "max daily option trades reached"
+    elif "max_daily_trades" in risk and int(counters.get("equity_trades", 0)) >= int(
+        risk["max_daily_trades"]
+    ):
+        return "max daily trades reached"
+    if "max_total_daily_entry_trades" in shared_risk and int(
+        counters.get("trades", 0)
+    ) >= int(shared_risk["max_total_daily_entry_trades"]):
+        return "shared max daily trades reached"
+    return None
 
 
 _OPEN_STATUSES = {"created", "submitted_to_paper_broker", "open", "partially_filled"}
@@ -59,6 +83,70 @@ def _pending_option_cost(orders: dict[str, Any]) -> float:
     return total
 
 
+def _active_equity_underlyings(
+    positions: dict[str, Position],
+    orders: dict[str, Order],
+) -> set[str]:
+    underlyings = {
+        str(symbol).upper()
+        for symbol, position in positions.items()
+        if float(_value(position, "quantity", 0)) > 0
+    }
+    for order in orders.values():
+        if _value(order, "status") in _OPEN_STATUSES and _value(order, "side") == "buy":
+            underlyings.add(str(_value(order, "symbol", "")).upper())
+    return {symbol for symbol in underlyings if symbol}
+
+
+def _active_option_underlyings(
+    positions: dict[str, Any],
+    orders: dict[str, Any],
+) -> set[str]:
+    underlyings: set[str] = set()
+    for position in positions.values():
+        if float(_value(position, "quantity", 0)) <= 0:
+            continue
+        contract = _value(position, "contract", {})
+        underlying = str(_value(contract, "underlying", "")).upper()
+        if underlying:
+            underlyings.add(underlying)
+    for order in orders.values():
+        if _value(order, "status") not in _OPEN_STATUSES or _value(order, "intent") != "buy_to_open":
+            continue
+        contract = _value(order, "contract", {})
+        underlying = str(_value(contract, "underlying", "")).upper()
+        if underlying:
+            underlyings.add(underlying)
+    return underlyings
+
+
+def _open_exposure_count(
+    equity_positions: dict[str, Position],
+    option_positions: dict[str, Any],
+    equity_orders: dict[str, Order],
+    option_orders: dict[str, Any],
+) -> int:
+    exposures: set[tuple[str, str]] = set()
+    for symbol, position in equity_positions.items():
+        if float(_value(position, "quantity", 0)) > 0:
+            exposures.add(("equity", str(symbol).upper()))
+    for order_id, order in equity_orders.items():
+        if _value(order, "status") in _OPEN_STATUSES and _value(order, "side") == "buy":
+            identity = str(_value(order, "symbol", order_id)).upper()
+            exposures.add(("equity", identity))
+    for option_id, position in option_positions.items():
+        if float(_value(position, "quantity", 0)) > 0:
+            contract = _value(position, "contract", {})
+            identity = str(_value(contract, "option_id", option_id))
+            exposures.add(("options", identity))
+    for order_id, order in option_orders.items():
+        if _value(order, "status") in _OPEN_STATUSES and _value(order, "intent") == "buy_to_open":
+            contract = _value(order, "contract", {})
+            identity = str(_value(contract, "option_id", order_id))
+            exposures.add(("options", identity))
+    return len(exposures)
+
+
 def shared_deployment(
     account: Account,
     equity_positions: dict[str, Position],
@@ -82,6 +170,47 @@ def shared_deployment(
     }
 
 
+def shared_entry_capacity(
+    *,
+    line: str,
+    account: Account,
+    equity_positions: dict[str, Position],
+    option_positions: dict[str, Any],
+    equity_orders: dict[str, Order],
+    option_orders: dict[str, Any],
+    shared_config: dict[str, Any],
+) -> float:
+    """Return the remaining cash-backed entry capacity for one strategy line."""
+    deployment = shared_deployment(
+        account,
+        equity_positions,
+        option_positions,
+        equity_orders,
+        option_orders,
+        reserve_open_orders=bool(shared_config.get("reserve_open_orders", True)),
+    )
+    if not shared_config.get("enabled", True):
+        return max(0.0, float(account.cash))
+    account_equity = deployment["account_equity_at_cost"]
+    if account_equity <= 0:
+        return 0.0
+    line_name = "options_deployed" if line == "options" else "equity_deployed"
+    line_cap_name = (
+        "max_options_deployed_pct_of_equity"
+        if line == "options"
+        else "max_equity_deployed_pct_of_equity"
+    )
+    total_remaining = (
+        account_equity * float(shared_config.get("max_total_deployed_pct_of_equity", 1))
+        - deployment["total_deployed"]
+    )
+    line_remaining = (
+        account_equity * float(shared_config.get(line_cap_name, 1))
+        - deployment[line_name]
+    )
+    return max(0.0, min(float(account.cash), total_remaining, line_remaining))
+
+
 def check_shared_entry(
     *,
     line: str,
@@ -93,6 +222,8 @@ def check_shared_entry(
     option_orders: dict[str, Any],
     counters: dict[str, Any],
     shared_config: dict[str, Any],
+    new_underlying: str | None = None,
+    account_nav_usd: float | None = None,
 ) -> SharedRiskDecision:
     deployment = shared_deployment(
         account,
@@ -102,13 +233,34 @@ def check_shared_entry(
         option_orders,
         reserve_open_orders=bool(shared_config.get("reserve_open_orders", True)),
     )
-    account_equity = deployment["account_equity_at_cost"]
+    account_equity = (
+        float(account_nav_usd)
+        if account_nav_usd is not None
+        else deployment["account_equity_at_cost"]
+    )
     line_deployed = deployment["options_deployed" if line == "options" else "equity_deployed"]
     total_after = deployment["total_deployed"] + new_risk_usd
     line_after = line_deployed + new_risk_usd
     decision = SharedRiskDecision(True, "shared account risk approved", account_equity, total_after, line_after)
     if not shared_config.get("enabled", True):
         return decision
+    if new_underlying and shared_config.get("one_exposure_per_underlying", False):
+        underlying = new_underlying.upper()
+        equity_underlyings = _active_equity_underlyings(equity_positions, equity_orders)
+        option_underlyings = _active_option_underlyings(option_positions, option_orders)
+        if line == "options" and underlying in equity_underlyings:
+            return SharedRiskDecision(False, "underlying already has executable equity exposure", account_equity, total_after, line_after)
+        if line == "equity" and underlying in option_underlyings:
+            return SharedRiskDecision(False, "underlying already has executable option exposure", account_equity, total_after, line_after)
+        if line == "options" and underlying in option_underlyings:
+            return SharedRiskDecision(False, "underlying already has executable option exposure", account_equity, total_after, line_after)
+    if _open_exposure_count(
+        equity_positions,
+        option_positions,
+        equity_orders,
+        option_orders,
+    ) >= int(shared_config.get("max_total_open_positions", 999)):
+        return SharedRiskDecision(False, "shared max total open positions reached", account_equity, total_after, line_after)
     if new_risk_usd <= 0:
         return SharedRiskDecision(False, "entry risk must be positive", account_equity, total_after, line_after)
     if new_risk_usd > account.cash + 1e-9:

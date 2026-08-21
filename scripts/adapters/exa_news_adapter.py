@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse, urlsplit, urlunsplit
@@ -40,6 +41,26 @@ class ExaNewsAdapter:
             ticker=ticker,
         )
 
+    def search_primary_evidence(
+        self,
+        ticker: str,
+        decision_time: str,
+        company_name: str | None = None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        query_name = company_name.strip() if company_name else ticker.upper()
+        return self.search_query(
+            (
+                f"{query_name} {ticker.upper()} official investor relations press release "
+                "SEC filing regulator FDA DOJ FTC material event"
+            ),
+            decision_time,
+            ticker=ticker,
+            category=None,
+            primary_only=True,
+            num_results=int(self.config.get("primary_verification_num_results", 4)),
+            search_type=str(self.config.get("primary_search_type", "auto")),
+        )
+
     def search_market_events(self, decision_time: str, queries: list[str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         max_searches = int(self.config.get("max_market_searches", len(queries)))
         events: list[dict[str, Any]] = []
@@ -56,6 +77,10 @@ class ExaNewsAdapter:
         decision_time: str,
         *,
         ticker: str | None = None,
+        category: str | None = "news",
+        primary_only: bool = False,
+        num_results: int | None = None,
+        search_type: str | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         readiness = self.readiness()
         if not readiness["enabled"]:
@@ -66,14 +91,22 @@ class ExaNewsAdapter:
         start = cutoff - timedelta(hours=float(self.config.get("lookback_hours", 48)))
         body: dict[str, Any] = {
             "query": query,
-            "type": str(self.config.get("search_type", "fast")),
-            "category": "news",
-            "numResults": int(self.config.get("num_results", 6)),
+            "type": search_type or str(self.config.get("search_type", "fast")),
+            "numResults": int(num_results or self.config.get("num_results", 6)),
             "startPublishedDate": start.isoformat(),
             "endPublishedDate": cutoff.isoformat(),
-            "contents": {"highlights": {"maxCharacters": 1200}},
-            "systemPrompt": "Prefer primary company, regulator, filing, and reputable wire sources. Avoid duplicate syndicated stories.",
+            "contents": {
+                "highlights": {"maxCharacters": 1200},
+                "maxAgeHours": int(self.config.get("max_content_age_hours", 24)),
+            },
+            "systemPrompt": (
+                "Return only primary company, filing, or regulator evidence. Avoid summaries and syndicated copies."
+                if primary_only
+                else "Prefer primary company, regulator, filing, and reputable wire sources. Avoid duplicate syndicated stories."
+            ),
         }
+        if category:
+            body["category"] = category
         if self.config.get("include_domains"):
             body["includeDomains"] = list(self.config["include_domains"])
         if self.config.get("exclude_domains"):
@@ -104,7 +137,7 @@ class ExaNewsAdapter:
             )
             url = self._canonical_url(str(item.get("url", "")))
             domain = self._domain(url)
-            source_tier = self._source_tier(domain)
+            source_tier = self._source_tier(domain, url)
             age_hours = max(0.0, (cutoff - published).total_seconds() / 3600)
             novelty = max(0.0, min(1.0, 1 - age_hours / max(1.0, float(self.config.get("lookback_hours", 48)))))
             headline = str(item.get("title") or "").strip()
@@ -115,6 +148,7 @@ class ExaNewsAdapter:
                     "headline": headline,
                     "ticker": ticker.upper() if ticker else None,
                     "published_at": published.isoformat(),
+                    "published_at_precision": self._timestamp_precision(str(published_at)),
                     "event_at": event_at,
                     "first_seen_at": retrieved_at,
                     "retrieved_at": retrieved_at,
@@ -148,6 +182,11 @@ class ExaNewsAdapter:
         except (TypeError, ValueError):
             return None
         return parsed.isoformat() if parsed <= cutoff else None
+
+    @staticmethod
+    def _timestamp_precision(value: str) -> str:
+        date_at_midnight = r"\d{4}-\d{2}-\d{2}(?:[T ]00:00(?::00(?:\.0+)?)?(?:Z|[+-]00:00)?)?"
+        return "date" if re.fullmatch(date_at_midnight, value.strip()) else "datetime"
 
     @staticmethod
     def _canonical_url(url: str) -> str:
@@ -186,8 +225,11 @@ class ExaNewsAdapter:
         return host.lower().removeprefix("www.")
 
     @classmethod
-    def _source_tier(cls, domain: str) -> int:
+    def _source_tier(cls, domain: str, url: str = "") -> int:
         if any(domain == item or domain.endswith("." + item) for item in cls.TIER_ONE_DOMAINS):
+            return 1
+        path = urlparse(url).path.lower()
+        if domain and any(fragment in path for fragment in ("/investor", "/press-release", "/news-release", "/sec-filings")):
             return 1
         if any(domain == item or domain.endswith("." + item) for item in cls.TIER_TWO_DOMAINS):
             return 2

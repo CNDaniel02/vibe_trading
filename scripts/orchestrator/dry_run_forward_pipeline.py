@@ -21,15 +21,22 @@ DRY_RUN_TIME = "2026-07-13T15:00:00Z"
 class _SyntheticVibe:
     def fetch_lookback(self, symbols: list[str], decision_time: str) -> dict[str, list[MarketBar]]:
         del decision_time
-        start = datetime(2026, 5, 25, tzinfo=timezone.utc)
+        start = datetime(2026, 5, 11, tzinfo=timezone.utc)
         output: dict[str, list[MarketBar]] = {}
         for symbol in symbols:
             slope = 0.35 if symbol == "AAPL" else 0.05
             bars = []
-            for index in range(45):
+            current = start
+            index = 0
+            while len(bars) < 45:
+                if current.weekday() >= 5:
+                    current += timedelta(days=1)
+                    continue
                 close = 95 + slope * index
-                timestamp = (start + timedelta(days=index)).isoformat()
+                timestamp = current.isoformat()
                 bars.append(MarketBar(symbol, timestamp, close - 0.2, close + 0.3, close - 0.4, close, 1_000_000, "fixture:vibe"))
+                index += 1
+                current += timedelta(days=1)
             output[symbol] = bars
         return output
 

@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "position_mandate.schema.json",
+  "description": "Persisted allocator mandate. Runtime validation additionally binds exposure_id, ticker, instrument_type, strategy, and order_id to the actual order or position context.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "mandate_version",
+    "exposure_id",
+    "order_id",
+    "strategy",
+    "snapshot_id",
+    "ticker",
+    "instrument_type",
+    "horizon",
+    "status",
+    "created_at",
+    "entered_at",
+    "planned_exit_at",
+    "thesis_valid_until",
+    "invalidation_condition",
+    "invalidation_triggered",
+    "planned_stop_price",
+    "closed_at",
+    "close_reason"
+  ],
+  "properties": {
+    "mandate_version": {"enum": [1, 2]},
+    "exposure_id": {"type": "string", "minLength": 1},
+    "order_id": {"type": "string", "minLength": 1},
+    "strategy": {"const": "ai_instrument_allocator_v1"},
+    "snapshot_id": {"type": "string", "minLength": 1},
+    "ticker": {"type": "string", "minLength": 1},
+    "instrument_type": {"enum": ["equity", "call", "put"]},
+    "horizon": {"enum": ["intraday_close", "next_close", "two_to_five_days"]},
+    "max_holding_trading_days": {"type": "integer", "minimum": 0, "maximum": 5},
+    "status": {"enum": ["pending_fill", "open", "closed"]},
+    "created_at": {"type": "string", "format": "date-time"},
+    "entered_at": {"type": ["string", "null"], "format": "date-time"},
+    "planned_exit_at": {"type": "string", "format": "date-time"},
+    "thesis_valid_until": {"type": "string", "format": "date-time"},
+    "invalidation_condition": {"type": "string", "minLength": 1},
+    "invalidation_triggered": {"type": "boolean"},
+    "invalidation_reason": {"type": "string"},
+    "planned_stop_price": {"type": ["number", "null"]},
+    "updated_at": {"type": "string", "format": "date-time"},
+    "closed_at": {"type": ["string", "null"], "format": "date-time"},
+    "close_reason": {"type": ["string", "null"]}
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"mandate_version": {"const": 2}},
+        "required": ["mandate_version"]
+      },
+      "then": {"required": ["max_holding_trading_days"]}
+    },
+    {
+      "if": {
+        "properties": {
+          "mandate_version": {"const": 2},
+          "horizon": {"const": "intraday_close"}
+        },
+        "required": ["mandate_version", "horizon"]
+      },
+      "then": {
+        "properties": {"max_holding_trading_days": {"const": 0}}
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "mandate_version": {"const": 2},
+          "horizon": {"const": "next_close"}
+        },
+        "required": ["mandate_version", "horizon"]
+      },
+      "then": {
+        "properties": {"max_holding_trading_days": {"const": 1}}
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "mandate_version": {"const": 2},
+          "horizon": {"const": "two_to_five_days"}
+        },
+        "required": ["mandate_version", "horizon"]
+      },
+      "then": {
+        "properties": {
+          "max_holding_trading_days": {"minimum": 2, "maximum": 5}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"instrument_type": {"const": "equity"}},
+        "required": ["instrument_type"]
+      },
+      "then": {
+        "properties": {
+          "planned_stop_price": {"type": "number", "exclusiveMinimum": 0}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"instrument_type": {"enum": ["call", "put"]}},
+        "required": ["instrument_type"]
+      },
+      "then": {
+        "properties": {"planned_stop_price": {"type": "null"}}
+      }
+    }
+  ]
+}

@@ -5,6 +5,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from scripts.core.file_lock import durable_append
 from scripts.core.models import utc_now
 
 
@@ -22,8 +23,7 @@ class AuditLog:
             "event_type": event_type,
             "payload": payload,
         }
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, sort_keys=True) + "\n")
+        durable_append(self.path, json.dumps(record, sort_keys=True) + "\n")
         return record
 
 
@@ -31,5 +31,4 @@ def append_jsonl(root: str | Path, filename: str, payload: dict[str, Any]) -> No
     log_dir = Path(root) / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     record = {"ts": utc_now(), **payload}
-    with (log_dir / filename).open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, sort_keys=True) + "\n")
+    durable_append(log_dir / filename, json.dumps(record, sort_keys=True) + "\n")

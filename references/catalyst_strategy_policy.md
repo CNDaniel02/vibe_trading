@@ -23,7 +23,8 @@ optional source until the user creates a saved scan outside this service.
 
 Candidate extraction and ranking use non-thinking structured calls. At most
 three ranked candidates per cycle receive ticker-specific Exa search and the
-thinking-enabled Bull/News, Challenge, and Decision stages. All limits are
+non-thinking Bull/News and Challenge stages followed by a thinking-enabled
+Decision Manager. All limits are
 configuration driven.
 
 ## Evidence rules

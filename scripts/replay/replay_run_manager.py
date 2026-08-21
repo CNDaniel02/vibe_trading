@@ -49,6 +49,12 @@ class ReplayRunManager:
             candidate["decision_time"] = now
             candidate["quote_seen_at"] = event.quote.asof
             candidate["thesis"] = decision.thesis
+            if candidate["order_type"] == "limit":
+                slip = max(
+                    event.quote.ask * float(self.config["costs"].get("slippage_bps", 0)) / 10000,
+                    float(self.config["costs"].get("minimum_slippage_usd", 0)),
+                )
+                candidate["limit_price"] = round(event.quote.ask + slip, 4)
             order = self.broker.create_order(
                 decision_id=candidate["decision_id"],
                 symbol=candidate["symbol"],

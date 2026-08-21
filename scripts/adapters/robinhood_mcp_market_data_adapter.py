@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
-from scripts.adapters.errors import AdapterConfigurationError, AdapterDataError
+from scripts.adapters.errors import AdapterConfigurationError, AdapterDataError, summarize_external_error
 from scripts.broker.robinhood_mcp_audit import RobinhoodMcpCapabilityClient
 from scripts.core.models import Quote
 
@@ -19,9 +19,9 @@ class RobinhoodMcpMarketDataAdapter:
 
     def __init__(self, config: dict[str, Any], root: str | Path | None = None) -> None:
         self.config = config
-        self.client = RobinhoodMcpCapabilityClient(config, root=root)
+        self.client = RobinhoodMcpCapabilityClient(config, root=root, interactive_oauth=False)
 
-    def readiness(self) -> dict[str, Any]:
+    def _local_readiness(self) -> dict[str, Any]:
         if not self.config.get("enabled", False):
             return {"ready": False, "enabled": False, "missing_env": [], "reason": "Robinhood MCP quote adapter is disabled"}
         try:
@@ -36,6 +36,28 @@ class RobinhoodMcpMarketDataAdapter:
             "reason": "ready" if token_present and registration_present else "run the Python Robinhood MCP OAuth capability audit first",
         }
 
+    def readiness(self, *, live_probe: bool = True) -> dict[str, Any]:
+        local = self._local_readiness()
+        if not local["ready"] or not live_probe:
+            return local
+        try:
+            probe = asyncio.run(self.client.probe())
+        except Exception as exc:
+            return {
+                **local,
+                "ready": False,
+                "reason": summarize_external_error(exc),
+                "live_probe": False,
+            }
+        tool_available = bool(probe.get("readonly_quote_tool_available"))
+        return {
+            **local,
+            "ready": tool_available,
+            "reason": "ready" if tool_available else "Robinhood read-only quote tool is unavailable",
+            "live_probe": True,
+            "tool_count": probe.get("tool_count"),
+        }
+
     def fetch_quotes(
         self,
         symbols: list[str],
@@ -43,31 +65,77 @@ class RobinhoodMcpMarketDataAdapter:
         liquidity_usd: dict[str, float | None] | None = None,
         asset_classes: dict[str, str] | None = None,
     ) -> dict[str, Quote]:
-        readiness = self.readiness()
+        readiness = self._local_readiness()
         if not readiness["enabled"]:
             raise AdapterConfigurationError("Robinhood MCP forward quote adapter is disabled")
         if not readiness["ready"]:
             raise AdapterConfigurationError(str(readiness["reason"]))
-        payload = asyncio.run(self.client.get_equity_quotes(symbols))
-        return self._parse_quotes(payload, liquidity_usd or {}, asset_classes or {})
+        quotes: dict[str, Quote] = {}
+        for batch in self._batches(symbols, 20):
+            payload = self._run(
+                self.client.get_equity_quotes(batch),
+                "get_equity_quotes",
+            )
+            quotes.update(
+                self._parse_quotes(
+                    payload,
+                    liquidity_usd or {},
+                    asset_classes or {},
+                )
+            )
+        return quotes
 
     def fetch_session_volumes(self, symbols: list[str], start_time: str, end_time: str) -> dict[str, float]:
-        readiness = self.readiness()
+        readiness = self._local_readiness()
         if not readiness["ready"]:
             raise AdapterConfigurationError(str(readiness["reason"]))
-        payload = asyncio.run(self.client.get_equity_historicals(symbols, start_time, end_time))
         volumes: dict[str, float] = {}
-        for result in payload.get("data", {}).get("results", []) or []:
-            if not isinstance(result, dict):
-                continue
-            symbol = str(result.get("symbol", "")).upper()
-            bars = result.get("bars", []) or []
-            if not symbol or not isinstance(bars, list):
-                continue
-            volumes[symbol] = float(
-                sum(int(bar.get("volume", 0)) for bar in bars if isinstance(bar, dict) and not bar.get("interpolated", False))
+        for batch in self._batches(symbols, 10):
+            payload = self._run(
+                self.client.get_equity_historicals(
+                    batch,
+                    start_time,
+                    end_time,
+                ),
+                "get_equity_historicals",
             )
+            for result in payload.get("data", {}).get("results", []) or []:
+                if not isinstance(result, dict):
+                    continue
+                symbol = str(result.get("symbol", "")).upper()
+                bars = result.get("bars", []) or []
+                if not symbol or not isinstance(bars, list):
+                    continue
+                volumes[symbol] = float(
+                    sum(
+                        int(bar.get("volume", 0))
+                        for bar in bars
+                        if isinstance(bar, dict)
+                        and not bar.get("interpolated", False)
+                    )
+                )
         return volumes
+
+    @staticmethod
+    def _batches(values: list[str], size: int) -> list[list[str]]:
+        normalized = list(
+            dict.fromkeys(value.upper() for value in values if value)
+        )
+        return [
+            normalized[index : index + size]
+            for index in range(0, len(normalized), size)
+        ]
+
+    @staticmethod
+    def _run(coro: Any, operation: str) -> dict[str, Any]:
+        try:
+            return asyncio.run(coro)
+        except TimeoutError as exc:
+            raise AdapterDataError(f"Robinhood MCP {operation} timed out") from exc
+        except Exception as exc:
+            raise AdapterDataError(
+                f"Robinhood MCP {operation} failed: {summarize_external_error(exc)}"
+            ) from exc
 
     @staticmethod
     def _parse_quotes(

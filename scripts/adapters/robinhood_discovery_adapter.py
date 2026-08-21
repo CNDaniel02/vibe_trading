@@ -6,7 +6,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from scripts.adapters.errors import AdapterConfigurationError, AdapterDataError
+from scripts.adapters.errors import AdapterDataError, summarize_external_error
 from scripts.adapters.robinhood_mcp_market_data_adapter import RobinhoodMcpMarketDataAdapter
 from scripts.broker.robinhood_mcp_audit import RobinhoodMcpCapabilityClient
 from scripts.core.models import Quote, parse_ts
@@ -30,13 +30,55 @@ _LEVERAGED_OR_INVERSE_TERMS = (
 class RobinhoodDiscoveryAdapter:
     """Strictly read-only market discovery over explicit Robinhood MCP tools."""
 
+    REQUIRED_TOOLS = frozenset(
+        {
+            "get_earnings_calendar",
+            "get_equity_fundamentals",
+            "get_equity_historicals",
+            "get_equity_quotes",
+            "get_scans",
+            "run_scan",
+            "search",
+        }
+    )
+
     def __init__(self, config: dict[str, Any], discovery_config: dict[str, Any], root: str | Path) -> None:
         self.config = config
         self.discovery_config = discovery_config
-        self.client = RobinhoodMcpCapabilityClient(config, root=root)
+        self.client = RobinhoodMcpCapabilityClient(config, root=root, interactive_oauth=False)
 
     def readiness(self) -> dict[str, Any]:
-        return RobinhoodMcpMarketDataAdapter(self.config, root=self.client.store.path.parents[1]).readiness()
+        if not self.config.get("enabled", False):
+            return {"ready": False, "reason": "Robinhood MCP discovery is disabled"}
+        try:
+            tokens = asyncio.run(self.client.store.get_tokens())
+            client_info = asyncio.run(self.client.store.get_client_info())
+        except Exception as exc:
+            return {
+                "ready": False,
+                "reason": f"credential store unavailable: {type(exc).__name__}",
+            }
+        if tokens is None or client_info is None:
+            return {
+                "ready": False,
+                "reason": "Robinhood MCP OAuth is not initialized",
+            }
+        try:
+            probe = asyncio.run(self.client.probe())
+        except Exception as exc:
+            return {
+                "ready": False,
+                "reason": summarize_external_error(exc),
+                "live_probe": False,
+            }
+        available = set(probe.get("tool_names", []))
+        missing = sorted(self.REQUIRED_TOOLS - available)
+        return {
+            "ready": not missing,
+            "reason": "ready" if not missing else "required Robinhood discovery tools are unavailable",
+            "live_probe": True,
+            "missing_tools": missing,
+        }
 
     def collect_seed_candidates(self, decision_time: str, core_watchlist: list[str]) -> list[dict[str, Any]]:
         seeds: dict[str, dict[str, Any]] = {}
@@ -45,7 +87,10 @@ class RobinhoodDiscoveryAdapter:
 
         cutoff = parse_ts(decision_time)
         start_date = (cutoff - timedelta(days=2)).date().isoformat()
-        earnings = asyncio.run(self.client.get_high_market_cap_earnings_calendar(start_date, days=5))
+        earnings = self._run(
+            self.client.get_high_market_cap_earnings_calendar(start_date, days=5),
+            "get_earnings_calendar",
+        )
         earnings_rows = earnings.get("data", {}).get("results", []) or []
         scored_earnings: list[tuple[float, dict[str, Any]]] = []
         for row in earnings_rows:
@@ -66,12 +111,12 @@ class RobinhoodDiscoveryAdapter:
         for _, row in scored_earnings[: int(self.discovery_config.get("max_earnings_candidates", 12))]:
             self._merge_seed(seeds, str(row["symbol"]), "earnings_calendar", row)
 
-        scans = asyncio.run(self.client.get_scans())
+        scans = self._run(self.client.get_scans(), "get_scans")
         scan_rows = scans.get("data", {}).get("scans", []) or []
         for scan in scan_rows[: int(self.discovery_config.get("max_saved_scans", 3))]:
             if not isinstance(scan, dict) or not scan.get("id"):
                 continue
-            result = asyncio.run(self.client.run_scan(str(scan["id"])))
+            result = self._run(self.client.run_scan(str(scan["id"])), "run_scan")
             for symbol in self._symbols_from_scan(result):
                 self._merge_seed(
                     seeds,
@@ -93,23 +138,29 @@ class RobinhoodDiscoveryAdapter:
         historicals: dict[str, list[dict[str, Any]]] = {}
         start_time = (parse_ts(decision_time) - timedelta(days=40)).isoformat()
         for batch in self._batches(normalized, 10):
-            payload = asyncio.run(self.client.get_equity_fundamentals(batch))
+            payload = self._run(
+                self.client.get_equity_fundamentals(batch),
+                "get_equity_fundamentals",
+            )
             for row in payload.get("data", {}).get("results", []) or []:
                 if isinstance(row, dict) and row.get("symbol"):
                     fundamentals[str(row["symbol"]).upper()] = row
-            history = asyncio.run(
+            history = self._run(
                 self.client.get_equity_historicals(
                     batch,
                     start_time,
                     decision_time,
                     interval="day",
-                )
+                ),
+                "get_equity_historicals",
             )
             for row in history.get("data", {}).get("results", []) or []:
                 if isinstance(row, dict) and row.get("symbol"):
                     historicals[str(row["symbol"]).upper()] = list(row.get("bars", []) or [])
         for batch in self._batches(normalized, 20):
-            quote_payloads.append(asyncio.run(self.client.get_equity_quotes(batch)))
+            quote_payloads.append(
+                self._run(self.client.get_equity_quotes(batch), "get_equity_quotes")
+            )
 
         liquidity: dict[str, float | None] = {}
         for symbol, row in fundamentals.items():
@@ -178,7 +229,10 @@ class RobinhoodDiscoveryAdapter:
         return contexts
 
     def validate_instrument(self, symbol: str) -> dict[str, Any]:
-        payload = asyncio.run(self.client.search_instruments(symbol, limit=5))
+        payload = self._run(
+            self.client.search_instruments(symbol, limit=5),
+            "search",
+        )
         results = payload.get("data", {}).get("results", []) or []
         exact = next(
             (
@@ -208,7 +262,10 @@ class RobinhoodDiscoveryAdapter:
         average_daily_volume_usd: float | None,
         asset_class: str = "us_equity",
     ) -> Quote:
-        payload = asyncio.run(self.client.get_equity_quotes([symbol]))
+        payload = self._run(
+            self.client.get_equity_quotes([symbol]),
+            "get_equity_quotes",
+        )
         quotes = RobinhoodMcpMarketDataAdapter._parse_quotes(
             payload,
             {symbol: average_daily_volume_usd},
@@ -218,6 +275,40 @@ class RobinhoodDiscoveryAdapter:
         if quote is None:
             raise AdapterDataError(f"Robinhood returned no current quote for {symbol}")
         return quote
+
+    def fetch_intraday_bars(
+        self,
+        symbols: list[str],
+        start_time: str,
+        end_time: str,
+    ) -> dict[str, list[dict[str, Any]]]:
+        normalized = sorted({symbol.upper() for symbol in symbols if self._valid_symbol(symbol.upper())})
+        result: dict[str, list[dict[str, Any]]] = {}
+        for batch in self._batches(normalized, 10):
+            payload = self._run(
+                self.client.get_equity_historicals(
+                    batch,
+                    start_time,
+                    end_time,
+                    interval="5minute",
+                ),
+                "get_equity_historicals",
+            )
+            for row in payload.get("data", {}).get("results", []) or []:
+                if isinstance(row, dict) and row.get("symbol"):
+                    result[str(row["symbol"]).upper()] = list(row.get("bars", []) or [])
+        return result
+
+    @staticmethod
+    def _run(coro: Any, operation: str) -> dict[str, Any]:
+        try:
+            return asyncio.run(coro)
+        except TimeoutError as exc:
+            raise AdapterDataError(f"Robinhood MCP {operation} timed out") from exc
+        except Exception as exc:
+            raise AdapterDataError(
+                f"Robinhood MCP {operation} failed: {summarize_external_error(exc)}"
+            ) from exc
 
     @staticmethod
     def _merge_seed(target: dict[str, dict[str, Any]], symbol: str, source: str, detail: dict[str, Any]) -> None:

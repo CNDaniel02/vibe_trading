@@ -9,8 +9,13 @@ from scripts.options.models import OptionOrder, OptionPosition
 class OptionStateStore:
     """Options state with the cash account intentionally shared with equities."""
 
-    def __init__(self, root: str | Path, initial_cash: float = 2000.0) -> None:
-        self.base = JsonStateStore(root, initial_cash)
+    def __init__(
+        self,
+        root: str | Path,
+        initial_cash: float = 2000.0,
+        namespace: str | None = None,
+    ) -> None:
+        self.base = JsonStateStore(root, initial_cash, namespace=namespace)
         self.base.ensure()
 
     def positions(self) -> dict[str, OptionPosition]:

@@ -276,6 +276,10 @@ CATALYST_DECISION_OUTPUT_SCHEMA: dict[str, Any] = {
         "supporting_evidence",
         "contrary_evidence",
         "entry_condition",
+        "entry_now",
+        "min_entry_price",
+        "max_entry_price",
+        "entry_valid_until",
         "invalidation_condition",
         "exit_condition",
         "confidence",
@@ -291,6 +295,10 @@ CATALYST_DECISION_OUTPUT_SCHEMA: dict[str, Any] = {
         "supporting_evidence": STRING_ARRAY,
         "contrary_evidence": STRING_ARRAY,
         "entry_condition": {"type": "string"},
+        "entry_now": {"type": "boolean"},
+        "min_entry_price": {"type": ["number", "null"], "exclusiveMinimum": 0},
+        "max_entry_price": {"type": ["number", "null"], "exclusiveMinimum": 0},
+        "entry_valid_until": {"type": ["string", "null"], "format": "date-time"},
         "invalidation_condition": {"type": "string"},
         "exit_condition": {"type": "string"},
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
@@ -308,6 +316,202 @@ CATALYST_DECISION_OUTPUT_SCHEMA: dict[str, Any] = {
     },
 }
 
+_SIGNED_BUCKET_PROPERTIES = {
+    name: {"type": "number", "minimum": 0, "maximum": 1}
+    for name in (
+        "return_lt_minus_5_pct",
+        "return_minus_5_to_minus_2_pct",
+        "return_minus_2_to_minus_0_5_pct",
+        "return_minus_0_5_to_plus_0_5_pct",
+        "return_plus_0_5_to_plus_2_pct",
+        "return_plus_2_to_plus_5_pct",
+        "return_gt_plus_5_pct",
+    )
+}
+
+AI_ALLOCATOR_RANKING_OUTPUT_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["ranked_candidates", "data_gaps"],
+    "properties": {
+        "ranked_candidates": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["ticker", "score", "rationale", "risk_flags"],
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "pattern": "^[A-Z][A-Z0-9.-]{0,9}$",
+                    },
+                    "score": {"type": "number", "minimum": 0, "maximum": 1},
+                    "rationale": {"type": "string"},
+                    "risk_flags": STRING_ARRAY,
+                },
+            },
+        },
+        "data_gaps": STRING_ARRAY,
+    },
+}
+
+AI_ALLOCATOR_RESEARCH_OUTPUT_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "ticker",
+        "catalyst_summary",
+        "direction",
+        "materiality",
+        "event_time",
+        "event_time_basis",
+        "supporting_facts",
+        "source_urls",
+        "assumptions",
+        "data_gaps",
+        "already_priced_in",
+        "confidence",
+    ],
+    "properties": {
+        "ticker": {"type": "string"},
+        "catalyst_summary": {"type": "string"},
+        "direction": {"enum": ["positive", "negative", "mixed", "unclear"]},
+        "materiality": {"type": "number", "minimum": 0, "maximum": 1},
+        "event_time": {"type": ["string", "null"], "format": "date-time"},
+        "event_time_basis": {
+            "enum": ["source_explicit", "model_inference", "unknown"]
+        },
+        "supporting_facts": STRING_ARRAY,
+        "source_urls": {"type": "array", "items": {"type": "string"}},
+        "assumptions": STRING_ARRAY,
+        "data_gaps": STRING_ARRAY,
+        "already_priced_in": {"type": "boolean"},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    },
+}
+
+AI_ALLOCATOR_SIGNAL_OUTPUT_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "action",
+        "ticker",
+        "horizon",
+        "signed_return_probability_buckets",
+        "probability_status",
+        "thesis",
+        "supporting_evidence",
+        "source_urls",
+        "contrary_evidence",
+        "data_gaps",
+        "entry_condition",
+        "entry_now",
+        "invalidation_condition",
+        "thesis_valid_until",
+        "max_holding_trading_days",
+        "no_trade_reason",
+    ],
+    "properties": {
+        "action": {"enum": ["propose_trade", "no_trade"]},
+        "ticker": {"type": "string", "pattern": "^[A-Z][A-Z0-9.-]{0,9}$"},
+        "horizon": {
+            "enum": ["intraday_close", "next_close", "two_to_five_days"]
+        },
+        "signed_return_probability_buckets": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": list(_SIGNED_BUCKET_PROPERTIES),
+            "properties": _SIGNED_BUCKET_PROPERTIES,
+        },
+        "probability_status": {"const": "uncalibrated"},
+        "thesis": {"type": "string", "minLength": 1},
+        "supporting_evidence": STRING_ARRAY,
+        "source_urls": {"type": "array", "items": {"type": "string"}},
+        "contrary_evidence": STRING_ARRAY,
+        "data_gaps": STRING_ARRAY,
+        "entry_condition": {"type": "string", "minLength": 1},
+        "entry_now": {"type": "boolean"},
+        "invalidation_condition": {"type": "string", "minLength": 1},
+        "thesis_valid_until": {"type": ["string", "null"], "format": "date-time"},
+        "max_holding_trading_days": {"type": "integer", "minimum": 0, "maximum": 5},
+        "no_trade_reason": {"type": ["string", "null"]},
+    },
+}
+
+NEWS_DRIFT_HEADLINE_OUTPUT_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["signals", "data_gaps"],
+    "properties": {
+        "signals": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "event_index",
+                    "ticker",
+                    "company_name",
+                    "direction",
+                    "event_type",
+                    "materiality",
+                    "novelty",
+                    "ambiguity",
+                    "relation_type",
+                    "related_event_id",
+                    "confidence",
+                    "rationale",
+                ],
+                "properties": {
+                    "event_index": {"type": "integer", "minimum": 0},
+                    "ticker": {"type": ["string", "null"], "pattern": "^[A-Z][A-Z0-9.-]{0,9}$"},
+                    "company_name": {"type": ["string", "null"]},
+                    "direction": {"enum": ["positive", "negative", "neutral", "mixed", "unclear"]},
+                    "event_type": {
+                        "enum": [
+                            "earnings",
+                            "guidance",
+                            "merger_acquisition",
+                            "regulatory",
+                            "legal",
+                            "fda",
+                            "product",
+                            "management",
+                            "capital_allocation",
+                            "financing",
+                            "analyst_opinion",
+                            "other",
+                        ]
+                    },
+                    "materiality": {"type": "number", "minimum": 0, "maximum": 1},
+                    "novelty": {"type": "number", "minimum": 0, "maximum": 1},
+                    "ambiguity": {"type": "number", "minimum": 0, "maximum": 1},
+                    "relation_type": {
+                        "enum": [
+                            "new_event",
+                            "duplicate",
+                            "clarification",
+                            "material_update",
+                            "contradiction",
+                            "follow_up",
+                        ]
+                    },
+                    "related_event_id": {"type": ["string", "null"]},
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    "rationale": {"type": "string", "maxLength": 500},
+                },
+            },
+        },
+        "data_gaps": STRING_ARRAY,
+    },
+}
+
 OUTPUT_SCHEMAS = {
     "news_agent": NEWS_OUTPUT_SCHEMA,
     "challenge_agent": CHALLENGE_OUTPUT_SCHEMA,
@@ -317,6 +521,7 @@ OUTPUT_SCHEMAS = {
     "catalyst_bull_news_agent": CATALYST_RESEARCH_OUTPUT_SCHEMA,
     "catalyst_challenge_agent": CHALLENGE_OUTPUT_SCHEMA,
     "catalyst_decision_manager": CATALYST_DECISION_OUTPUT_SCHEMA,
+    "news_drift_headline_agent": NEWS_DRIFT_HEADLINE_OUTPUT_SCHEMA,
 }
 
 

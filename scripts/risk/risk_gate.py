@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
+import math
 
 from scripts.core.models import Account, Order, Position, Quote, parse_ts
-from scripts.risk.shared_portfolio_risk import check_shared_entry
+from scripts.risk.shared_portfolio_risk import check_shared_entry, daily_entry_limit_reason
+from scripts.runtime.market_clock import UsEquityMarketClock
+
+
+_MARKET_CLOCK = UsEquityMarketClock()
 
 
 @dataclass(frozen=True)
@@ -13,7 +18,28 @@ class RiskDecision:
     reason: str
 
 
-def validate_quote(quote: Quote | None, now: str, max_age_seconds: int, universe: dict) -> RiskDecision:
+def validate_order_session(now: str, config: dict, *, is_entry: bool) -> RiskDecision:
+    clock = _MARKET_CLOCK.status(now)
+    if not clock.is_regular:
+        return RiskDecision(False, f"outside regular market session: {clock.market_session}")
+    if (
+        is_entry
+        and clock.minutes_to_close is not None
+        and clock.minutes_to_close
+        <= int(config.get("paper", {}).get("exit_before_close_minutes", 10))
+    ):
+        return RiskDecision(False, "new entries blocked before market close")
+    return RiskDecision(True, "market session ok")
+
+
+def validate_quote(
+    quote: Quote | None,
+    now: str,
+    max_age_seconds: int,
+    universe: dict,
+    *,
+    enforce_entry_liquidity: bool = True,
+) -> RiskDecision:
     if quote is None:
         return RiskDecision(False, "missing quote")
     if quote.bid <= 0 or quote.ask <= 0 or quote.ask < quote.bid:
@@ -26,6 +52,16 @@ def validate_quote(quote: Quote | None, now: str, max_age_seconds: int, universe
         return RiskDecision(False, "stale quote")
     if quote.halted:
         return RiskDecision(False, "halted symbol")
+    if not enforce_entry_liquidity:
+        max_exit_spread_bps = float(
+            universe.get(
+                "max_exit_spread_bps",
+                universe.get("max_spread_bps", 999999),
+            )
+        )
+        if quote.spread_bps() > max_exit_spread_bps:
+            return RiskDecision(False, "exit quote spread too wide")
+        return RiskDecision(True, "exit quote ok")
     if quote.is_otc and not universe.get("allow_otc", False):
         return RiskDecision(False, "OTC not allowed")
     if quote.is_leveraged_etf and not universe.get("allow_leveraged_etf", False):
@@ -55,6 +91,7 @@ def check_order(
     now: str,
     option_positions: dict | None = None,
     option_orders: dict | None = None,
+    entry_nav_usd: float | None = None,
 ) -> RiskDecision:
     risk = config["risk"]
     universe = config["universe"]
@@ -63,6 +100,7 @@ def check_order(
         now,
         int(config["paper"].get("quote_stale_after_seconds", 60)),
         universe,
+        enforce_entry_liquidity=order.side == "buy",
     )
     if not quote_decision.approved:
         return quote_decision
@@ -70,6 +108,13 @@ def check_order(
 
     if order.side not in ("buy", "sell"):
         return RiskDecision(False, "unsupported side")
+    session_decision = validate_order_session(
+        now,
+        config,
+        is_entry=order.side == "buy",
+    )
+    if not session_decision.approved:
+        return session_decision
     if order.side == "sell" and float(positions.get(order.symbol, Position(order.symbol, 0, 0, now, now)).quantity) <= 0:
         return RiskDecision(False, "sell without position")
     if order.side == "buy" and not universe.get("allow_long_only", True):
@@ -77,8 +122,10 @@ def check_order(
     if order.quantity <= 0:
         return RiskDecision(False, "quantity must be positive")
 
-    if order.side == "buy" and int(counters.get("trades", 0)) >= int(risk.get("max_daily_trades", 0)):
-        return RiskDecision(False, "max daily trades reached")
+    if order.side == "buy":
+        limit_reason = daily_entry_limit_reason("equity", counters, config)
+        if limit_reason:
+            return RiskDecision(False, limit_reason)
 
     daily_loss_limit = account.initial_cash * float(risk.get("max_daily_loss_pct_of_initial_equity", 1))
     if order.side == "buy" and float(counters.get("daily_realized_pnl", 0)) <= -daily_loss_limit:
@@ -94,12 +141,28 @@ def check_order(
 
     estimated_price = quote.ask if order.side == "buy" else quote.bid
     notional = estimated_price * order.quantity
-    equity = account.equity(positions, {quote.symbol: quote})
+    if entry_nav_usd is not None and (
+        not math.isfinite(float(entry_nav_usd)) or float(entry_nav_usd) <= 0
+    ):
+        return RiskDecision(False, "invalid marked NAV")
+    equity = (
+        float(entry_nav_usd)
+        if entry_nav_usd is not None
+        else account.equity(positions, {quote.symbol: quote})
+    )
     if order.side == "buy":
         if notional >= equity:
             return RiskDecision(False, "all-in order blocked")
         if notional > equity * float(risk.get("max_order_pct_of_equity", 1)):
             return RiskDecision(False, "max order size exceeded")
+        stop_required_for = set(risk.get("require_planned_stop_for_strategies", []))
+        if order.strategy in stop_required_for:
+            if order.planned_stop_price is None or not 0 < order.planned_stop_price < estimated_price:
+                return RiskDecision(False, "allocator equity entry requires a planned stop")
+            planned_loss = (estimated_price - order.planned_stop_price) * order.quantity
+            max_planned_loss = equity * float(risk.get("max_planned_loss_pct_of_equity", 1))
+            if planned_loss > max_planned_loss + 1e-9:
+                return RiskDecision(False, "planned stop NAV risk exceeded")
 
     current_position = positions.get(order.symbol)
     if order.side == "buy":
@@ -124,6 +187,8 @@ def check_order(
             option_orders=option_orders or {},
             counters=counters,
             shared_config=config.get("shared_risk", {}),
+            new_underlying=order.symbol,
+            account_nav_usd=equity,
         )
         if not shared.approved:
             return RiskDecision(False, shared.reason)
@@ -135,6 +200,4 @@ def check_order(
 
 
 def is_regular_session(now: str) -> bool:
-    dt = parse_ts(now).astimezone(timezone(timedelta(hours=-4)))
-    minutes = dt.hour * 60 + dt.minute
-    return 9 * 60 + 30 <= minutes < 16 * 60
+    return _MARKET_CLOCK.status(now).is_regular
