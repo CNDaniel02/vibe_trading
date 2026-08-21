@@ -25,12 +25,18 @@ def evaluate_position_exit(
     minutes_to_close: float | None = None,
     exit_before_close_minutes: int = 10,
     apply_legacy_time_stop: bool = True,
+    stop_price_override: float | None = None,
 ) -> ExitDecision:
     if quote is None or quote.bid <= 0:
         return ExitDecision(False, "missing usable exit quote")
     if minutes_to_close is not None and minutes_to_close <= exit_before_close_minutes:
         return ExitDecision(True, "exit before market close", quote.bid)
-    stop_price = position.average_price * (1 - float(risk_config.get("stop_loss_pct", 0.03)))
+    stop_price = (
+        float(stop_price_override)
+        if stop_price_override is not None
+        else position.average_price
+        * (1 - float(risk_config.get("stop_loss_pct", 0.03)))
+    )
     if quote.bid <= stop_price:
         return ExitDecision(True, "deterministic stop loss", quote.bid)
     profit_price = position.average_price * (1 + float(risk_config.get("take_profit_pct", 0.06)))

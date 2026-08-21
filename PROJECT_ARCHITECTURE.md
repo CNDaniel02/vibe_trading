@@ -364,7 +364,7 @@ flowchart TD
 7. 股票 25% 是 notional cap，同时 planned stop loss 不得超过 NAV 1%。期权单笔 premium 不得超过 3%、aggregate 不得超过 8%。股票与期权合计最多 3 个仓位、每日 3 次 entry，同 underlying 只能有一个 executable exposure。
 8. `$2,000` counterfactual 只检查 allocator 已选中的完全相同 instrument 的可负担数量、风险比例和拒绝原因，不能重新选择 ticker、strike 或 expiration。
 9. `short_equity_counterfactual` 只是假设直接做空 underlying 的 shadow benchmark；它没有账户、没有订单，PnL 不与 long put 合并。
-10. 每个订单先注册 restart-safe mandate。`intraday_close` 当日退出，`next_close` 下一交易日退出，`two_to_five_days` 只持有指定 2-5 个交易日；actionable signal 的 `thesis_valid_until` 必须覆盖 `planned_exit_at`。allocator 以交易所 session 计算的 `planned_exit_at` 作为最长持仓期限，不再叠加旧策略的自然日 time stop，但止损、止盈、期权 DTE/到期/sellout、确定性失效和收盘强平继续生效。缺失、矛盾、损坏、到期或已触发失效的 mandate 会 fail closed 退出。
+10. 每个订单先注册 restart-safe mandate。新建 V2 mandate 会冻结 `max_holding_trading_days` 和股票 `planned_stop_price`。`intraday_close` 当日退出，`next_close` 下一交易日退出，`two_to_five_days` 只持有指定 2-5 个交易日；每次恢复和监控都会验证 `planned_exit_at` 位于 horizon 对应的 XNYS 正常 session、session 距离等于冻结天数且 `thesis_valid_until >= planned_exit_at`。allocator 以该时间作为最长持仓期限，以持久化价格作为股票权威止损，不会因后续 risk config 改变而重算；旧 V1 mandate 不迁移，只在 horizon 固有范围内兼容读取。旧策略仍使用原百分比止损和自然日 time stop。止盈、期权 DTE/到期/sellout、确定性失效和收盘强平继续生效；缺失、矛盾、损坏、到期或已触发失效的 mandate 会 fail closed 退出。
 
 ```mermaid
 flowchart TD

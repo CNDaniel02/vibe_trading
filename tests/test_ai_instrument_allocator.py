@@ -1570,6 +1570,7 @@ def test_allocator_plan_and_position_mandate_survive_restart(
         ticker="AAPL",
         instrument_type="equity",
         horizon="next_close",
+        max_holding_trading_days=1,
         created_at=REGULAR_NOW,
         planned_exit_at="2026-07-14T19:50:00+00:00",
         thesis_valid_until="2026-07-14T19:50:00+00:00",
@@ -1581,7 +1582,29 @@ def test_allocator_plan_and_position_mandate_survive_restart(
     restarted_mandates = PositionMandateStore(paper_root, namespace=namespace)
     assert restarted_plans.active_plans(REGULAR_NOW)[0]["plan_id"] == "plan-aapl"
     assert restarted_plans.allocations()["allocation-aapl"]["plan_id"] == "plan-aapl"
-    assert restarted_mandates.for_exposure("equity:AAPL")["horizon"] == "next_close"
+    persisted = restarted_mandates.for_exposure("equity:AAPL")
+    assert persisted["mandate_version"] == 2
+    assert persisted["horizon"] == "next_close"
+    assert persisted["max_holding_trading_days"] == 1
+
+    from jsonschema import Draft202012Validator, FormatChecker, ValidationError
+
+    schema = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "schemas"
+            / "position_mandate.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+    validator.validate(persisted)
+    legacy = dict(persisted)
+    legacy["mandate_version"] = 1
+    legacy.pop("max_holding_trading_days")
+    validator.validate(legacy)
+    inconsistent = {**persisted, "max_holding_trading_days": 5}
+    with pytest.raises(ValidationError):
+        validator.validate(inconsistent)
     assert (paper_root / "state" / "paper_account.json").read_bytes() == legacy_account_before
 
 
@@ -1601,14 +1624,25 @@ def test_position_mandate_exit_is_horizon_aware_and_fails_closed() -> None:
     from scripts.exit.position_mandates import evaluate_mandate_exit
 
     mandate = {
+        "mandate_version": 2,
         "exposure_id": "equity:AAPL",
+        "order_id": "paper-order-aapl",
+        "strategy": "ai_instrument_allocator_v1",
+        "snapshot_id": "snapshot-aapl",
         "status": "open",
         "ticker": "AAPL",
         "instrument_type": "equity",
         "horizon": "next_close",
+        "max_holding_trading_days": 1,
+        "created_at": REGULAR_NOW,
+        "entered_at": REGULAR_NOW,
         "planned_exit_at": "2026-07-14T19:50:00+00:00",
         "thesis_valid_until": "2026-07-14T19:50:00+00:00",
+        "invalidation_condition": "Close below 97.",
         "invalidation_triggered": False,
+        "planned_stop_price": 97.0,
+        "closed_at": None,
+        "close_reason": None,
     }
 
     assert evaluate_mandate_exit(mandate, "2026-07-14T18:00:00+00:00").should_exit is False
@@ -2668,29 +2702,196 @@ def _open_allocator_mandate(
     *,
     ticker: str = "AAPL",
     instrument_type: str = "equity",
+    horizon: str = "two_to_five_days",
+    max_holding_trading_days: int = 5,
     opened_at: str = "2026-07-10T13:32:00+00:00",
     planned_exit_at: str = "2026-07-17T19:50:00+00:00",
+    thesis_valid_until: str | None = None,
+    planned_stop_price: float | None = None,
 ) -> dict:
     return {
-        "mandate_version": 1,
+        "mandate_version": 2,
         "exposure_id": exposure_id,
         "order_id": f"seed-{exposure_id}",
         "strategy": "ai_instrument_allocator_v1",
         "snapshot_id": f"seed-{ticker}",
         "ticker": ticker,
         "instrument_type": instrument_type,
-        "horizon": "two_to_five_days",
+        "horizon": horizon,
+        "max_holding_trading_days": max_holding_trading_days,
         "status": "open",
         "created_at": opened_at,
         "entered_at": opened_at,
         "planned_exit_at": planned_exit_at,
-        "thesis_valid_until": planned_exit_at,
+        "thesis_valid_until": thesis_valid_until or planned_exit_at,
         "invalidation_condition": "Recorded research condition.",
         "invalidation_triggered": False,
-        "planned_stop_price": 97.0 if instrument_type == "equity" else None,
+        "planned_stop_price": (
+            planned_stop_price
+            if planned_stop_price is not None
+            else 97.0
+            if instrument_type == "equity"
+            else None
+        ),
         "closed_at": None,
         "close_reason": None,
     }
+
+
+@pytest.mark.parametrize(
+    (
+        "horizon",
+        "holding_days",
+        "created_at",
+        "planned_exit_at",
+        "thesis_valid_until",
+        "valid",
+    ),
+    [
+        (
+            "intraday_close",
+            0,
+            "2026-07-13T15:00:00+00:00",
+            "2026-07-13T19:50:00+00:00",
+            "2026-07-13T19:50:00+00:00",
+            True,
+        ),
+        (
+            "next_close",
+            1,
+            "2026-07-02T15:00:00+00:00",
+            "2026-07-06T19:50:00+00:00",
+            "2026-07-06T19:50:00+00:00",
+            True,
+        ),
+        (
+            "two_to_five_days",
+            5,
+            "2026-07-10T15:00:00+00:00",
+            "2026-07-17T19:50:00+00:00",
+            "2026-07-17T19:50:00+00:00",
+            True,
+        ),
+        (
+            "intraday_close",
+            0,
+            "2026-07-13T15:00:00+00:00",
+            "2026-07-14T19:50:00+00:00",
+            "2026-07-14T19:50:00+00:00",
+            False,
+        ),
+        (
+            "next_close",
+            1,
+            "2026-07-02T15:00:00+00:00",
+            "2026-07-07T19:50:00+00:00",
+            "2026-07-07T19:50:00+00:00",
+            False,
+        ),
+        (
+            "two_to_five_days",
+            5,
+            "2026-07-10T15:00:00+00:00",
+            "2026-07-16T19:50:00+00:00",
+            "2026-07-16T19:50:00+00:00",
+            False,
+        ),
+        (
+            "two_to_five_days",
+            5,
+            "2026-07-10T15:00:00+00:00",
+            "2026-07-20T19:50:00+00:00",
+            "2026-07-20T19:50:00+00:00",
+            False,
+        ),
+        (
+            "next_close",
+            1,
+            "2026-07-13T15:00:00+00:00",
+            "2026-07-14T19:50:00+00:00",
+            "2026-07-14T19:49:59+00:00",
+            False,
+        ),
+        (
+            "next_close",
+            1,
+            "2026-07-13T15:00:00+00:00",
+            "2026-07-14T12:00:00+00:00",
+            "2026-07-14T20:00:00+00:00",
+            False,
+        ),
+    ],
+)
+def test_allocator_persisted_mandate_semantics_are_exchange_session_consistent(
+    horizon: str,
+    holding_days: int,
+    created_at: str,
+    planned_exit_at: str,
+    thesis_valid_until: str,
+    valid: bool,
+) -> None:
+    from scripts.exit.position_mandates import evaluate_mandate_exit
+
+    mandate = _open_allocator_mandate(
+        "equity:AAPL",
+        horizon=horizon,
+        max_holding_trading_days=holding_days,
+        opened_at=created_at,
+        planned_exit_at=planned_exit_at,
+        thesis_valid_until=thesis_valid_until,
+    )
+
+    decision = evaluate_mandate_exit(mandate, created_at)
+
+    assert decision.should_exit is (not valid)
+    assert decision.reason == (
+        "position mandate remains valid"
+        if valid
+        else "invalid position mandate; fail closed"
+    )
+
+
+def test_allocator_legacy_v1_mandate_accepts_valid_two_to_five_session_range() -> None:
+    from scripts.exit.position_mandates import evaluate_mandate_exit
+
+    mandate = _open_allocator_mandate("equity:AAPL")
+    mandate["mandate_version"] = 1
+    mandate.pop("max_holding_trading_days")
+
+    decision = evaluate_mandate_exit(
+        mandate,
+        "2026-07-15T15:00:00+00:00",
+    )
+
+    assert decision.should_exit is False
+    assert decision.reason == "position mandate remains valid"
+
+
+def test_allocator_register_rejects_semantically_inconsistent_mandate(
+    paper_root: Path,
+) -> None:
+    from scripts.exit.position_mandates import PositionMandateStore
+
+    store = PositionMandateStore(paper_root)
+
+    with pytest.raises(ValueError, match="position mandate semantics are invalid"):
+        store.register_order(
+            order_id="bad-intraday",
+            exposure_id="equity:AAPL",
+            strategy="ai_instrument_allocator_v1",
+            snapshot_id="snapshot-bad-intraday",
+            ticker="AAPL",
+            instrument_type="equity",
+            horizon="intraday_close",
+            max_holding_trading_days=0,
+            created_at="2026-07-13T15:00:00+00:00",
+            planned_exit_at="2026-07-14T19:50:00+00:00",
+            thesis_valid_until="2026-07-14T19:50:00+00:00",
+            invalidation_condition="Recorded research condition.",
+            planned_stop_price=97.0,
+        )
+
+    assert store.mandates() == {}
 
 
 class _AllocatorMonitoringOptions(_AllocatorNoOptions):
@@ -2753,6 +2954,74 @@ def test_allocator_equity_monitor_uses_mandate_trading_horizon_not_calendar_stop
 
     assert pipeline.broker.store.positions() == {}
     assert exited["exits"][0]["reason"] == "position mandate planned exit reached"
+
+
+def test_allocator_equity_monitor_uses_persisted_stop_after_config_change(
+    paper_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.core.models import Position, Quote
+    from scripts.discovery.ai_instrument_allocator_pipeline import (
+        AiInstrumentAllocatorPipeline,
+    )
+
+    opened_at = "2026-07-13T15:00:00+00:00"
+    config = load_runtime_config(paper_root)
+    config["risk"]["stop_loss_pct"] = 0.01
+    tracker = UsageTracker()
+    discovery = _AllocatorExecutionDiscovery(opened_at)
+    quote_state = {"bid": 96.0, "asof": opened_at}
+
+    def fetch_quote(symbol: str, **_kwargs) -> Quote:
+        bid = quote_state["bid"]
+        return Quote(
+            symbol,
+            bid,
+            bid + 0.01,
+            bid + 0.005,
+            quote_state["asof"],
+            source="persisted-stop-test",
+            avg_daily_volume_usd=500_000_000,
+        )
+
+    monkeypatch.setattr(discovery, "fetch_current_quote", fetch_quote)
+    pipeline = AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=discovery,
+        news_adapter=_NoNews(),
+        option_data=_AllocatorNoOptions(),
+    )
+    pipeline.broker.store.save_positions(
+        {"AAPL": Position("AAPL", 1.0, 100.0, opened_at, opened_at)}
+    )
+    pipeline.mandates.store.write_json(
+        "position_mandates.json",
+        {
+            "equity:AAPL": _open_allocator_mandate(
+                "equity:AAPL",
+                horizon="next_close",
+                max_holding_trading_days=1,
+                opened_at=opened_at,
+                planned_exit_at="2026-07-14T19:50:00+00:00",
+                planned_stop_price=95.0,
+            )
+        },
+    )
+
+    held = pipeline.monitor_only(opened_at)
+
+    assert held["exits"] == []
+    assert set(pipeline.broker.store.positions()) == {"AAPL"}
+
+    stop_time = "2026-07-13T15:01:00+00:00"
+    quote_state.update({"bid": 95.0, "asof": stop_time})
+    exited = pipeline.monitor_only(stop_time)
+
+    assert pipeline.broker.store.positions() == {}
+    assert exited["exits"][0]["reason"] == "deterministic stop loss"
 
 
 def test_allocator_option_monitor_uses_mandate_trading_horizon_not_calendar_stop(

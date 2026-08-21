@@ -179,6 +179,20 @@ take-profit, option DTE/expiration/sellout, deterministic mandate invalidation,
 and close-of-session force-flatten rules remain active. Legacy strategy exits
 are unchanged.
 
+New mandates use `mandate_version: 2` and persist the exact
+`max_holding_trading_days`. Registration and every restart-time exit evaluation
+verify that `planned_exit_at` is inside the XNYS regular session implied by the
+horizon, that the persisted session distance equals the frozen holding-day
+count, and that `thesis_valid_until >= planned_exit_at`. Existing V1 mandates
+are not migrated or rewritten; they remain readable only when their planned
+session is within the horizon's inherent range. Any parseable but contradictory
+record fails closed.
+
+For allocator equity positions, the mandate's positive finite
+`planned_stop_price` is authoritative for the lifetime of the position. The
+monitor does not recompute that stop from a later risk configuration. The
+generic percentage stop remains the unchanged default for legacy strategies.
+
 `invalidation_condition` is free-text research and audit context in V1. It is
 not polled by an LLM and cannot by itself close a position. The separate
 `invalidation_triggered` flag is reserved for a deterministic rule, explicit
@@ -217,3 +231,5 @@ are the primary promotion evidence.
 - 2026-08-20: made exchange-session mandates authoritative for allocator time
   exits, required thesis validity to cover the full declared horizon, and
   documented free-text invalidation as audit-only.
+- 2026-08-20: added mandate V2 exact session-distance validation and made the
+  persisted allocator equity stop authoritative across restarts/config changes.

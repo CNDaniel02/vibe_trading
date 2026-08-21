@@ -1,5 +1,12 @@
 # Development Log
 
+## 2026-08-20 (America/Los_Angeles) - PR comment 5364112198 mandate 语义与冻结止损
+
+- 新建 position mandate 升级为 V2，并持久化精确 `max_holding_trading_days`。注册和 monitor 恢复都会用 XNYS 日历确认 `planned_exit_at` 位于 horizon 对应的正常 session、session 距离与冻结天数一致且 `thesis_valid_until >= planned_exit_at`；可解析但矛盾的记录统一 fail closed。
+- 旧 V1 mandate 不迁移、不改写。`intraday_close` 和 `next_close` 仍按固有 session 精确校验，`two_to_five_days` 在 2-5 session 范围内兼容恢复；超出范围或盘前/盘后伪退出时间会安全退出。
+- allocator 股票 monitor 现在使用 mandate 中的 `planned_stop_price`，不再按后来修改的 `risk.stop_loss_pct` 重算。旧策略继续使用原百分比止损，allocator 的止盈、DTE/到期/sellout、失效和强平规则保持。
+- 新增/受影响 focused 测试为 `14 passed`，全套 pytest 为 `316 passed`，仅有 4 条上游 `exchange_calendars` deprecation warning。Schema 覆盖 V1/V2 兼容、V2 horizon/day 条件和股票/期权 stop 字段约束。
+
 ## 2026-08-20 (America/Los_Angeles) - PR comment 5363719068 mandate horizon 修复
 
 - `ai_instrument_allocator_v1` 的最长持仓时间改为以交易所 session 计算并持久化的 `planned_exit_at`。allocator monitor 不再叠加旧策略的 `max_holding_calendar_days` 自然日 time stop；止损、止盈、期权 DTE/到期/sellout、确定性失效和收盘强平继续执行，旧策略默认行为保持不变。

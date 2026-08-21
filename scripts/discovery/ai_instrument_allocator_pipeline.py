@@ -189,6 +189,11 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                     self.config["paper"].get("exit_before_close_minutes", 10)
                 ),
                 apply_legacy_time_stop=False,
+                stop_price_override=(
+                    float(mandate["planned_stop_price"])
+                    if mandate is not None and not mandate_exit.should_exit
+                    else None
+                ),
             )
             reason = (
                 "allocator force flatten"
@@ -1003,6 +1008,7 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
             ticker=str(plan["ticker"]),
             instrument_type=instrument_type,
             horizon=str(signal["horizon"]),
+            max_holding_trading_days=int(signal["max_holding_trading_days"]),
             created_at=now,
             planned_exit_at=planned_exit_at,
             thesis_valid_until=str(signal["thesis_valid_until"]),

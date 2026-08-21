@@ -162,6 +162,7 @@
 - [x] Implement restart-safe plan and mandate stores with append-only events.
 - [x] Implement the new pipeline by reusing existing discovery/evidence methods, removing direction quotas, invoking the deterministic allocator, registering broker orders/mandates, and reconciling fills.
 - [x] Wire separate overnight, premarket update, pre-open revalidation, open execution, bounded intraday, monitor, and EOD jobs. Keep legacy monitors active even while entries are frozen.
+- [x] Harden mandate V2 with exact exchange-session distance, thesis-coverage validation, V1 compatibility without migration, and persisted equity-stop authority.
 - [x] Run focused tests and commit `feat: run horizon aware allocator paper sleeve`.
 
 ### Task 7: Calibration-Safe Samples and Cost Accounting
@@ -218,4 +219,3 @@
 - [x] Run `graphify update .` and verify graph output completes.
 - [x] Run `git diff --check`, inspect every changed file, scan tracked/staged content for credential patterns and runtime state, and confirm legacy state/log files are not staged.
 - [x] Commit any verification fixes, then commit remaining reviewed changes with `feat: complete AI instrument allocator v1`.
-

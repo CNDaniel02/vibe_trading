@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
+import math
 from pathlib import Path
 from typing import Any
 
@@ -29,23 +30,25 @@ def evaluate_mandate_exit(
     if not isinstance(mandate, dict):
         return MandateExitDecision(True, "missing position mandate; fail closed")
     required = {
+        "mandate_version",
         "exposure_id",
         "ticker",
         "instrument_type",
         "horizon",
+        "created_at",
         "planned_exit_at",
         "thesis_valid_until",
+        "planned_stop_price",
     }
     if required - set(mandate) or mandate.get("status") != "open":
+        return MandateExitDecision(True, "invalid position mandate; fail closed")
+    validated_times = _validated_mandate_times(mandate)
+    if validated_times is None:
         return MandateExitDecision(True, "invalid position mandate; fail closed")
     if mandate.get("invalidation_triggered", False):
         return MandateExitDecision(True, "thesis invalidation")
     current = parse_ts(now)
-    try:
-        planned_exit = parse_ts(str(mandate["planned_exit_at"]))
-        thesis_valid_until = parse_ts(str(mandate["thesis_valid_until"]))
-    except (TypeError, ValueError):
-        return MandateExitDecision(True, "invalid position mandate; fail closed")
+    planned_exit, thesis_valid_until = validated_times
     if current >= planned_exit:
         return MandateExitDecision(True, "position mandate planned exit reached")
     if current >= thesis_valid_until:
@@ -64,12 +67,18 @@ def planned_exit_time(
     entered = parse_ts(entered_at)
     session = clock.calendar.date_to_session(pd.Timestamp(entered.date()), direction="next")
     if horizon == "intraday_close":
+        if max_holding_trading_days != 0:
+            raise ValueError("intraday_close requires zero holding days")
         target = session
     elif horizon == "next_close":
+        if max_holding_trading_days != 1:
+            raise ValueError("next_close requires one holding day")
         target = clock.calendar.next_session(session)
     elif horizon == "two_to_five_days":
+        if not 2 <= max_holding_trading_days <= 5:
+            raise ValueError("two_to_five_days requires two to five holding days")
         target = session
-        for _ in range(max(2, min(5, int(max_holding_trading_days)))):
+        for _ in range(max_holding_trading_days):
             target = clock.calendar.next_session(target)
     else:
         raise ValueError("unsupported mandate horizon")
@@ -109,6 +118,7 @@ class PositionMandateStore:
         ticker: str,
         instrument_type: str,
         horizon: str,
+        max_holding_trading_days: int,
         created_at: str,
         planned_exit_at: str,
         thesis_valid_until: str,
@@ -119,12 +129,8 @@ class PositionMandateStore:
             raise ValueError("position mandate namespace mismatch")
         if horizon not in {"intraday_close", "next_close", "two_to_five_days"}:
             raise ValueError("unsupported mandate horizon")
-        parse_ts(created_at)
-        parse_ts(planned_exit_at)
-        parse_ts(thesis_valid_until)
-        values = self.mandates()
         mandate = {
-            "mandate_version": 1,
+            "mandate_version": 2,
             "exposure_id": exposure_id,
             "order_id": order_id,
             "strategy": strategy,
@@ -132,6 +138,7 @@ class PositionMandateStore:
             "ticker": ticker.upper(),
             "instrument_type": instrument_type,
             "horizon": horizon,
+            "max_holding_trading_days": max_holding_trading_days,
             "status": "pending_fill",
             "created_at": created_at,
             "entered_at": None,
@@ -143,6 +150,9 @@ class PositionMandateStore:
             "closed_at": None,
             "close_reason": None,
         }
+        if _validated_mandate_times(mandate) is None:
+            raise ValueError("position mandate semantics are invalid")
+        values = self.mandates()
         values[exposure_id] = mandate
         self.store.write_json("position_mandates.json", values)
         self._append("position_mandate_registered", mandate)
@@ -238,3 +248,78 @@ def _value(item: Any, name: str, default: Any = None) -> Any:
     if isinstance(item, dict):
         return item.get(name, default)
     return getattr(item, name, default)
+
+
+def _validated_mandate_times(
+    mandate: dict[str, Any],
+) -> tuple[datetime, datetime] | None:
+    try:
+        version = mandate["mandate_version"]
+        if type(version) is not int or version not in {1, 2}:
+            return None
+        created_at = parse_ts(str(mandate["created_at"]))
+        planned_exit = parse_ts(str(mandate["planned_exit_at"]))
+        thesis_valid_until = parse_ts(str(mandate["thesis_valid_until"]))
+        if planned_exit <= created_at or thesis_valid_until < planned_exit:
+            return None
+
+        horizon = str(mandate["horizon"])
+        holding_days = mandate.get("max_holding_trading_days")
+        if version == 2 and type(holding_days) is not int:
+            return None
+        if holding_days is not None and type(holding_days) is not int:
+            return None
+
+        instrument_type = str(mandate["instrument_type"])
+        planned_stop = mandate.get("planned_stop_price")
+        if instrument_type == "equity":
+            if (
+                isinstance(planned_stop, bool)
+                or not isinstance(planned_stop, (int, float))
+                or not math.isfinite(float(planned_stop))
+                or float(planned_stop) <= 0
+            ):
+                return None
+        elif instrument_type in {"call", "put"}:
+            if planned_stop is not None:
+                return None
+        else:
+            return None
+
+        calendar = UsEquityMarketClock().calendar
+        created_session = calendar.date_to_session(
+            pd.Timestamp(created_at.date()),
+            direction="next",
+        )
+        planned_day = pd.Timestamp(planned_exit.date())
+        if not calendar.is_session(planned_day):
+            return None
+        planned_session = calendar.date_to_session(planned_day, direction="none")
+        planned_timestamp = pd.Timestamp(planned_exit)
+        if not (
+            calendar.session_open(planned_session)
+            <= planned_timestamp
+            <= calendar.session_close(planned_session)
+        ):
+            return None
+        if planned_session < created_session:
+            return None
+        session_distance = len(
+            calendar.sessions_in_range(created_session, planned_session)
+        ) - 1
+
+        if horizon == "intraday_close":
+            valid_horizon = session_distance == 0
+        elif horizon == "next_close":
+            valid_horizon = session_distance == 1
+        elif horizon == "two_to_five_days":
+            valid_horizon = 2 <= session_distance <= 5
+        else:
+            return None
+        if not valid_horizon:
+            return None
+        if holding_days is not None and holding_days != session_distance:
+            return None
+    except (KeyError, TypeError, ValueError):
+        return None
+    return planned_exit, thesis_valid_until

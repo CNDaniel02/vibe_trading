@@ -326,6 +326,15 @@ force-flatten exits remain active. Free-text `invalidation_condition` is stored
 for research and audit only in V1. An exit requires a deterministic, manual, or
 replay transition to set `invalidation_triggered`.
 
+New position mandates are V2 records that freeze exact
+`max_holding_trading_days`. Registration and restart monitoring reject a
+planned exit outside the XNYS session implied by the horizon, a mismatched
+session distance, or thesis validity ending before that exit. Historical V1
+records are not rewritten and receive range-based compatibility validation.
+Allocator equity exits use the persisted `planned_stop_price`; later risk
+configuration changes cannot move an open position's stop. Legacy strategies
+continue to derive their stop from their existing percentage configuration.
+
 The news-drift lane does not wait for a technical buy candidate. DeepSeek sees
 only headline and source fields; ticker validation and all price, liquidity,
 spread, latency, initial-reaction, and budget checks happen afterward in Python.

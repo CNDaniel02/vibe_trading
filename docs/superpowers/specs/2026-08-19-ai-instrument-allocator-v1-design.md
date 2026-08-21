@@ -278,18 +278,28 @@ state or order, and is never merged with long-put PnL.
 
 ## 11. Position Mandates and Exit
 
-Every new filled position has a persisted mandate containing strategy version,
-snapshot, ticker, instrument, horizon, entered time, planned exit time, thesis
-validity, invalidation condition, and stop information.
+Every new filled position has a V2 persisted mandate containing strategy
+version, snapshot, ticker, instrument, horizon, exact
+`max_holding_trading_days`, entered time, planned exit time, thesis validity,
+invalidation condition, and stop information.
 
 - `intraday_close`: exit before the same session close
 - `next_close`: exit before the next trading-session close
 - `two_to_five_days`: hold only through the chosen 2-5 trading-day horizon
 - missing, inconsistent, or expired mandate: exit before the current close
 
-Price stop, take profit, thesis invalidation, liquidity failure, broker sellout,
-and expiry rules may exit earlier. Mandate state is restart-safe; all mandate
-changes also emit append-only audit events.
+Registration and every restart-time monitor validate that `planned_exit_at` is
+inside the XNYS regular session implied by the horizon, the exchange-session
+distance equals the persisted holding-day count, and
+`thesis_valid_until >= planned_exit_at`. Existing V1 records are never migrated
+or rewritten; range-valid records remain readable, while contradictory records
+fail closed.
+
+For allocator equity positions, the positive finite persisted
+`planned_stop_price` is the authoritative stop. A later configuration change
+cannot move it. Take profit, thesis invalidation, liquidity failure, broker
+sellout, and expiry rules may exit earlier. Mandate state is restart-safe; all
+mandate changes also emit append-only audit events.
 
 Legacy strategy positions do not receive migrated mandates and continue using
 their original exit rules.
@@ -339,6 +349,8 @@ Required tests cover:
 - same-session stop/invalidation re-entry block
 - conditional plans never order before regular-session revalidation
 - horizon-aware exits recover correctly after restart
+- persisted horizon/session contradictions fail closed without state migration
+- allocator equity exits retain the entry-time planned stop across config changes
 - `short_equity_counterfactual` remains shadow-only and separate from put PnL
 - append-only audit and exact cost identity
 - paper mode never exposes or calls Robinhood write tools
