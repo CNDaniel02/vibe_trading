@@ -36,8 +36,10 @@ authorization window. Exa and Robinhood are read-only observations. No live
 Robinhood order tool is present in the pipeline.
 
 `entry_now=false` in an after-hours or premarket model response means "do not
-order during research". It does not reject an otherwise valid saved conditional
-plan at 09:32. This exception applies only to plans whose recorded source stage
+order during research". Deterministic Python forces any noncompliant proposal
+to `false` and records that normalization; it never expands execution authority.
+The field does not reject an otherwise valid saved conditional plan at 09:32.
+This exception applies only to plans whose recorded source stage
 is `overnight`, `premarket_update`, or `preopen_revalidation`; regular-session
 fast proposals still require `entry_now=true`. `open_execution` is accepted only
 from 09:32 through 09:37 ET, so a late manual invocation cannot execute a stale
@@ -45,10 +47,21 @@ opening plan. The 09:25 stage must also persist a same-session
 `preopen_revalidated_at` permit, including when no new evidence is found. A
 missing permit or failed state write blocks open execution. A newer completed analysis for
 the same ticker supersedes the older active plan. A newer fail-closed or
-no-trade analysis invalidates the older plan. Every event actually sent to the
-successful ranker enters event/ticker cooldown even when it is outside the
-deep-analysis top set or the final decision is no-trade. A failed ranking may be
-retried but cannot create a plan or order.
+no-trade analysis invalidates the older plan. Waiting for a fresh quote, spread,
+remaining-move calculation, option chain, or Python risk gate is an
+execution-time gate, not a future thesis confirmation. A model returns
+`no_trade` only when the thesis itself depends on a future event, breakout, or
+fact that is not in the point-in-time snapshot.
+
+Ranking alone never starts ticker/event cooldown. Only a candidate that enters
+deep research records a stage/result transition. Default cooldowns are 120
+minutes after deep-research `no_trade`, 60 minutes for `watch`, 24 hours after a
+hard veto, 6 hours for an active plan, and 24 hours after an executed paper
+trade. A previously unseen event fingerprint bypasses ticker cooldown. Every
+transition and rejection records outcome, duration, expiry, reason, trigger
+stage, and the triggering transition ID when one exists. Legacy cooldown state
+remains fail-closed until its original 24-hour
+window expires and is never rewritten.
 
 Premarket replacement commits the new active plan and the old superseded status
 in one state-file write. Evidence refresh or model revalidation failure
@@ -58,9 +71,21 @@ both plans or execute a stale plan after a partial stage failure.
 ## Model contract
 
 The ranker may rank only deterministic candidates. News and Challenge may cite
-only URLs in the immutable evidence snapshot. Challenge veto is mandatory. The
-Decision stage returns exactly one horizon and seven mutually exclusive signed
-return buckets whose sum must equal one within `1e-6`.
+only URLs in the immutable evidence snapshot. Challenge returns typed hard-veto
+reasons and soft concerns. Hard veto is restricted to a critical fact conflict,
+out-of-snapshot evidence, temporal integrity failure, stale decision-critical
+evidence, missing required primary source, or invalid mandate/horizon. Ordinary
+uncertainty, partial price-in, valuation, chase/event risk, price-action conflict,
+or a secondary evidence gap lowers confidence but cannot automatically force
+`no_trade`. Legacy untyped veto records remain fail-closed and are not
+retroactively promoted. The Decision stage returns exactly one horizon and
+seven mutually exclusive signed return buckets whose sum must equal one within
+`1e-6`.
+
+The decision outcome is one of `propose_trade`, `watch`, or `no_trade`. A watch
+means there is a direction worth retaining but no complete actionable thesis;
+it is stored separately in `allocator_watches.json`, expires with the configured
+watch cooldown, and cannot create an active plan, allocation, or order.
 
 Python derives bullish, bearish, neutral, dominant bucket, and conservative
 move. The conservative move is the probability-weighted mean of the weakest
@@ -90,8 +115,9 @@ an invalid historical plan cannot reach order creation through a parse error.
 machine-executable trigger and cannot authorize an order. At 09:32 or intraday,
 only deterministic Python checks over the current quote, remaining forecast
 move, liquidity, spread, authorization lifetime, and account risk can permit an
-entry. A model condition that still needs a future price or confirmation must
-be `no_trade`.
+entry. Those execution observations may legitimately be pending when an
+overnight conditional proposal is created. A thesis that still needs a future
+price breakout, corporate event, or factual confirmation must be `no_trade`.
 
 ## Instrument allocation
 
@@ -271,6 +297,19 @@ gross midpoint PnL
 The identity residual must remain near zero. Forward paper results, not replay,
 are the primary promotion evidence.
 
+`scripts.replay.allocator_policy_replay` verifies immutable snapshot hashes and
+compares old/new funnel semantics without calling an LLM, broker, or stateful
+pipeline. A snapshot with any observation after its cutoff, plus linked
+decisions, allocations, orders, and fills, is excluded from the strict subset.
+Observed audit counts remain separate and are never presented as lookahead-safe
+performance. Legacy rank-only cooldown recovery is labeled an estimate; new
+cycles persist candidate/snapshot and cooldown-transition IDs for exact future
+linkage. Replay never synthesizes a missing historical decision, promotes an
+ambiguous legacy veto, or creates a historical order. Dashboard recomputes this
+48-hour report read-only only when append-only allocator inputs change and
+shows candidates, ranking input, deep research, `watch`, proposals, allocations,
+selected instruments, orders, fills, and explicit blocker categories.
+
 ## Revision record
 
 - 2026-08-20: added actionable-signal fail-closed semantics, account-risk
@@ -287,3 +326,6 @@ are the primary promotion evidence.
 - 2026-08-21: completed post-submit plan recovery, active-mandate overwrite
   protection, live post-fetch quote cutoffs, and persisted-position identity
   validation.
+- 2026-08-26: added overnight conditional-proposal semantics, stage/result
+  cooldowns with new-event bypass, typed Challenge hard/soft outcomes, separate
+  watch state, and strict read-only 48-hour allocator policy replay.

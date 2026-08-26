@@ -52,6 +52,8 @@ def test_allocator_paper_threshold_and_prompt_match_observed_forward_contract(
     assert "intraday_close -> 0" in normalized_prompt
     assert "next_close -> 1" in normalized_prompt
     assert "two_to_five_days -> 2, 3, 4, or 5" in normalized_prompt
+    assert "fresh quote, spread, remaining move, option chain, and Python risk gate" in normalized_prompt
+    assert "are execution-time gates, not future thesis confirmations" in normalized_prompt
 
 
 class _MustNotDiscover:
@@ -289,6 +291,7 @@ def _signed_signal(**overrides):
         "thesis_valid_until": "2026-07-15T20:00:00+00:00",
         "max_holding_trading_days": 1,
         "no_trade_reason": None,
+        "watch_reason": None,
     }
     signal.update(overrides)
     return signal
@@ -475,6 +478,38 @@ def test_allocator_team_uses_stage_specific_agents_and_never_selects_instrument(
     ]
 
 
+def test_allocator_team_normalizes_overnight_proposal_to_deferred_entry(
+    paper_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.agents.ai_instrument_allocator_team import AiInstrumentAllocatorTeam
+
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    team = AiInstrumentAllocatorTeam(config, MockProvider(tracker), tracker)
+    original_call = team._call
+
+    def eager_decision_call(agent_name, payload, schema):
+        result = original_call(agent_name, payload, schema)
+        if agent_name.endswith("decision_manager"):
+            result["entry_now"] = True
+        return result
+
+    monkeypatch.setattr(team, "_call", eager_decision_call)
+    analysis = team.analyze(
+        _allocator_snapshot(),
+        {"ticker": "AAPL", "score": 0.8, "rationale": "fixture", "risk_flags": []},
+        stage="overnight",
+    )
+
+    assert analysis["signal"]["action"] == "propose_trade"
+    assert analysis["signal"]["entry_now"] is False
+    assert analysis["normalizations"] == [
+        "overnight research proposal deferred to an execution stage"
+    ]
+    assert analysis["guardrail_actions"] == []
+
+
 def test_allocator_team_enforces_challenge_veto_as_no_trade(paper_root: Path) -> None:
     from scripts.agents.ai_instrument_allocator_team import AiInstrumentAllocatorTeam
 
@@ -495,6 +530,96 @@ def test_allocator_team_enforces_challenge_veto_as_no_trade(paper_root: Path) ->
         "ai_allocator_fast_challenge_agent",
         "ai_allocator_fast_decision_manager",
     ]
+
+
+def test_allocator_team_keeps_soft_concern_non_vetoing(
+    paper_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.agents.ai_instrument_allocator_team import AiInstrumentAllocatorTeam
+
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    team = AiInstrumentAllocatorTeam(config, MockProvider(tracker), tracker)
+    original_call = team._call
+
+    def soft_concern_call(agent_name, payload, schema):
+        if agent_name.endswith("challenge_agent"):
+            return {
+                "objections": ["Some of the move may already be priced in."],
+                "contradictions": [],
+                "missing_evidence": [],
+                "stale_evidence": [],
+                "chase_risk": "medium",
+                "event_risk": "low",
+                "recommendation": "reduce_confidence",
+                "confidence_adjustment": -0.15,
+                "hard_veto_reasons": [],
+                "soft_concerns": [
+                    {
+                        "code": "partial_price_in",
+                        "detail": "Some of the move may already be priced in.",
+                    }
+                ],
+            }
+        return original_call(agent_name, payload, schema)
+
+    monkeypatch.setattr(team, "_call", soft_concern_call)
+    analysis = team.analyze(
+        _allocator_snapshot(),
+        {"ticker": "AAPL", "score": 0.8, "rationale": "fixture", "risk_flags": []},
+        stage="overnight",
+    )
+
+    assert analysis["challenge"]["hard_veto"] is False
+    assert analysis["challenge"]["veto_recommended"] is False
+    assert analysis["challenge"]["concern_level"] == "soft_concern"
+    assert analysis["signal"]["action"] == "propose_trade"
+
+
+def test_allocator_team_enforces_only_structured_hard_veto(
+    paper_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.agents.ai_instrument_allocator_team import AiInstrumentAllocatorTeam
+
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    team = AiInstrumentAllocatorTeam(config, MockProvider(tracker), tracker)
+    original_call = team._call
+
+    def hard_veto_call(agent_name, payload, schema):
+        if agent_name.endswith("challenge_agent"):
+            return {
+                "objections": ["Required primary evidence is absent."],
+                "contradictions": [],
+                "missing_evidence": ["Issuer filing"],
+                "stale_evidence": [],
+                "chase_risk": "low",
+                "event_risk": "low",
+                "recommendation": "no_trade",
+                "confidence_adjustment": -0.4,
+                "hard_veto_reasons": [
+                    {
+                        "code": "missing_required_primary_source",
+                        "detail": "The thesis depends on an issuer filing that is absent.",
+                    }
+                ],
+                "soft_concerns": [],
+            }
+        return original_call(agent_name, payload, schema)
+
+    monkeypatch.setattr(team, "_call", hard_veto_call)
+    analysis = team.analyze(
+        _allocator_snapshot(),
+        {"ticker": "AAPL", "score": 0.8, "rationale": "fixture", "risk_flags": []},
+        stage="overnight",
+    )
+
+    assert analysis["challenge"]["hard_veto"] is True
+    assert analysis["challenge"]["veto_recommended"] is True
+    assert analysis["signal"]["action"] == "no_trade"
+    assert analysis["signal"]["entry_now"] is False
 
 
 def test_signed_return_signal_rejects_non_finite_probability() -> None:
@@ -2104,7 +2229,21 @@ def test_premarket_research_replaces_older_plan_for_same_ticker(
     overnight = pipeline.run_stage("overnight", "2026-07-13T00:00:00+00:00")
     old_plan_id = overnight["plans"][0]["plan_id"]
     old_signal = dict(overnight["plans"][0]["signal"])
-    news.direction = "negative"
+    original_search = news.search
+
+    def incremental_positive_search(ticker, decision_time, company_name=None):
+        events, sources = original_search(ticker, decision_time, company_name)
+        event = {
+            **events[0],
+            "headline": "Company raises guidance again after quarter close",
+            "published_at": "2026-07-13T11:30:00+00:00",
+            "event_at": "2026-07-13T11:25:00+00:00",
+            "first_seen_at": "2026-07-13T11:31:00+00:00",
+            "url": "https://company.example/investors/guidance-update",
+        }
+        return [event], sources
+
+    monkeypatch.setattr(news, "search", incremental_positive_search)
     pipeline.discovery = _MustNotDiscover()
     calls_before = len(tracker.records)
     requests_before = len(provider.requests)
@@ -2137,7 +2276,7 @@ def test_premarket_research_replaces_older_plan_for_same_ticker(
     incremental_requests = provider.requests[requests_before:]
     assert all(
         [event["headline"] for event in request.input_payload["available_news"]]
-        == ["Company withdraws full-year guidance"]
+        == ["Company raises guidance again after quarter close"]
         for request in incremental_requests
     )
     assert all(
@@ -2148,7 +2287,7 @@ def test_premarket_research_replaces_older_plan_for_same_ticker(
     assert plan_writes == 1
     assert len(active) == 1
     assert active[0]["plan_id"] != old_plan_id
-    assert derive_signal_summary(active[0]["signal"])["direction"] == "bearish"
+    assert derive_signal_summary(active[0]["signal"])["direction"] == "bullish"
     assert active[0]["signal"]["forecast_reference_price"] == old_signal[
         "forecast_reference_price"
     ]
@@ -2223,9 +2362,8 @@ def test_premarket_state_is_safe_before_decision_audit_append(
         pipeline.run_stage("premarket_update", "2026-07-13T12:00:00+00:00")
 
     active = pipeline.plans.active_plans(OPEN_EXECUTION_NOW)
-    assert len(active) == 1
-    assert active[0]["plan_id"] != old_plan_id
-    assert pipeline.plans.plans()[old_plan_id]["status"] == "superseded"
+    assert active == []
+    assert pipeline.plans.plans()[old_plan_id]["status"] == "invalidated"
 
 
 def test_premarket_no_trade_invalidates_older_plan_for_same_ticker(
@@ -2403,6 +2541,7 @@ def test_preopen_state_write_failure_blocks_open_execution(
 
 def test_no_trade_event_enters_cooldown_after_model_research(
     paper_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from scripts.discovery.ai_instrument_allocator_pipeline import (
         AiInstrumentAllocatorPipeline,
@@ -2416,23 +2555,208 @@ def test_no_trade_event_enters_cooldown_after_model_research(
         MockProvider(tracker),
         tracker,
         discovery_adapter=_AllocatorResearchDiscovery(),
-        news_adapter=_AllocatorResearchNews(already_priced_in=True),
+        news_adapter=_AllocatorResearchNews(),
         option_data=_AllocatorNoOptions(),
     )
+    original_analyze = pipeline.team.analyze
 
-    first = pipeline.run_stage("overnight", "2026-07-13T00:00:00+00:00")
-    repeated = pipeline.run_stage(
-        "premarket_update",
-        "2026-07-13T12:00:00+00:00",
-    )
+    def no_trade_analysis(*args, **kwargs):
+        analysis = original_analyze(*args, **kwargs)
+        analysis["signal"] = pipeline.team._no_trade(
+            analysis["signal"],
+            analysis["ticker"],
+            "Complete evidence was reviewed, but the model declined the setup.",
+        )
+        return analysis
+
+    monkeypatch.setattr(pipeline.team, "analyze", no_trade_analysis)
+
+    first = pipeline.run_stage("intraday", "2026-07-13T15:00:00+00:00")
+    repeated = pipeline.run_stage("intraday", "2026-07-13T16:00:00+00:00")
 
     assert first["model_calls"] == 4
     assert first["plans"] == []
     assert repeated["model_calls"] == 0
     assert repeated["plans"] == []
+    assert repeated["skipped"][0]["category"] == "cooldown"
+    assert repeated["skipped"][0]["cooldown"]["cooldown_type"] == "deep_research_no_trade"
+    assert repeated["skipped"][0]["cooldown"]["trigger_stage"] == "intraday"
+    transition_id = first["funnel"]["candidate_records"][0]["cooldown_transition_id"]
+    assert repeated["skipped"][0]["cooldown"]["trigger_transition_id"] == transition_id
+    assert repeated["funnel"]["candidate_records"][0][
+        "cooldown_trigger_transition_id"
+    ] == transition_id
 
 
-def test_rank_only_event_enters_cooldown_after_successful_ranking(
+def test_staged_cooldown_audits_active_expired_and_new_event_bypass(
+    paper_root: Path,
+) -> None:
+    from scripts.discovery.evidence_store import EvidenceSnapshotStore
+
+    store = EvidenceSnapshotStore(paper_root, namespace="ai_instrument_allocator")
+    first_event = store.normalize_events(
+        [
+            {
+                "ticker": "AAPL",
+                "headline": "Apple posts a material product update",
+                "published_at": "2026-07-13T14:00:00+00:00",
+                "url": "https://example.com/aapl-product",
+            }
+        ]
+    )
+    transition = store.mark_staged_research(
+        "allocator:AAPL",
+        first_event,
+        "2026-07-13T15:00:00+00:00",
+        stage="intraday",
+        outcome="deep_research_no_trade",
+        duration_minutes=120,
+        reason="fixture no trade",
+    )
+    cooldowns = {"deep_research_no_trade": 120}
+
+    active, _, active_audit = store.staged_research_eligibility(
+        "allocator:AAPL",
+        first_event,
+        "2026-07-13T16:00:00+00:00",
+        cooldown_minutes_by_outcome=cooldowns,
+        legacy_event_cooldown_hours=24,
+    )
+    expired, _, expired_audit = store.staged_research_eligibility(
+        "allocator:AAPL",
+        first_event,
+        "2026-07-13T17:00:00+00:00",
+        cooldown_minutes_by_outcome=cooldowns,
+        legacy_event_cooldown_hours=24,
+    )
+    new_event = store.normalize_events(
+        [
+            {
+                "ticker": "AAPL",
+                "headline": "Apple files a new material regulatory disclosure",
+                "published_at": "2026-07-13T15:30:00+00:00",
+                "url": "https://example.com/aapl-filing",
+            }
+        ]
+    )
+    bypassed, bypass_events, bypass_audit = store.staged_research_eligibility(
+        "allocator:AAPL",
+        new_event,
+        "2026-07-13T16:00:00+00:00",
+        cooldown_minutes_by_outcome=cooldowns,
+        legacy_event_cooldown_hours=24,
+    )
+
+    assert active is False
+    assert expired is True
+    assert bypassed is True and bypass_events == new_event
+    assert active_audit["trigger_transition_id"] == transition["transition_id"]
+    assert expired_audit["trigger_transition_id"] == transition["transition_id"]
+    assert bypass_audit["trigger_transition_id"] == transition["transition_id"]
+
+
+def test_watch_is_persisted_separately_and_never_becomes_plan_or_order(
+    paper_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.discovery.ai_instrument_allocator_pipeline import (
+        AiInstrumentAllocatorPipeline,
+    )
+
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    pipeline = AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=_AllocatorResearchDiscovery(),
+        news_adapter=_AllocatorResearchNews(),
+        option_data=_AllocatorNoOptions(),
+    )
+
+    def watch_analysis(snapshot, ranking, **_kwargs):
+        return {
+            "strategy": pipeline.STRATEGY,
+            "snapshot_id": snapshot["snapshot_id"],
+            "ticker": snapshot["ticker"],
+            "stage": "overnight",
+            "ranking": ranking,
+            "bull_news": {},
+            "challenge": {
+                "hard_veto": False,
+                "veto_recommended": False,
+                "concern_level": "soft_concern",
+                "hard_veto_reasons": [],
+                "soft_concerns": [
+                    {"code": "incomplete_context", "detail": "Guidance detail is incomplete."}
+                ],
+            },
+            "signal": _signed_signal(
+                action="watch",
+                entry_now=False,
+                thesis_valid_until=None,
+                max_holding_trading_days=0,
+                no_trade_reason=None,
+                watch_reason="Directional catalyst exists, but the thesis is incomplete.",
+            ),
+            "model_calls": 3,
+            "guardrail_actions": [],
+            "fail_closed": False,
+        }
+
+    monkeypatch.setattr(pipeline.team, "analyze", watch_analysis)
+    result = pipeline.run_stage("overnight", "2026-07-13T00:00:00+00:00")
+
+    assert result["plans"] == []
+    assert result["executions"] == []
+    assert result["paper_orders_created"] == 0
+    assert pipeline.plans.active_plans("2026-07-13T12:00:00+00:00") == []
+    watches = pipeline.plans.watches()
+    assert len(watches) == 1
+    watch = next(iter(watches.values()))
+    assert watch["status"] == "active"
+    assert watch["expires_at"] == "2026-07-13T01:00:00+00:00"
+    assert watch["cooldown_transition"]["transition_id"].startswith("cooldown_")
+    assert len(pipeline.plans.active_watches("2026-07-13T00:30:00+00:00")) == 1
+    assert pipeline.plans.active_watches("2026-07-13T01:00:00+00:00") == []
+    assert pipeline.plans.active_watches("2026-07-13T01:00:01+00:00") == []
+    candidate_record = result["funnel"]["candidate_records"][0]
+    assert candidate_record["ranking_entered"] is True
+    assert candidate_record["deep_research"] is True
+    assert candidate_record["decision_outcome"] == "watch"
+    assert candidate_record["cooldown_transition_id"] == (
+        watch["cooldown_transition"]["transition_id"]
+    )
+    assert pipeline.broker.store.orders() == {}
+    assert pipeline.option_broker.store.orders() == {}
+
+
+def test_allocator_watch_store_rejects_missing_or_non_future_expiry(
+    paper_root: Path,
+) -> None:
+    from scripts.strategies.allocator_state import AllocatorStateStore
+
+    store = AllocatorStateStore(paper_root, namespace="ai_instrument_allocator_v1")
+    watch = {
+        "watch_id": "watch-invalid-expiry",
+        "strategy": "ai_instrument_allocator_v1",
+        "ticker": "AAPL",
+        "created_at": "2026-07-13T15:00:00+00:00",
+        "status": "active",
+        "signal": {"action": "watch"},
+        "snapshot": {"snapshot_id": "watch-snapshot"},
+    }
+
+    with pytest.raises(ValueError, match="expires_at"):
+        store.save_watch(watch)
+    with pytest.raises(ValueError, match="after created_at"):
+        store.save_watch(
+            {**watch, "expires_at": "2026-07-13T15:00:00+00:00"}
+        )
+
+
+def test_rank_only_event_does_not_consume_deep_research_cooldown(
     paper_root: Path,
 ) -> None:
     from scripts.discovery.ai_instrument_allocator_pipeline import (
@@ -2455,14 +2779,19 @@ def test_rank_only_event_enters_cooldown_after_successful_ranking(
     )
 
     ranked = pipeline.run_stage("overnight", "2026-07-13T00:00:00+00:00")
-    repeated = pipeline.run_stage(
-        "premarket_update",
-        "2026-07-13T12:00:00+00:00",
-    )
+    repeated = pipeline.run_stage("intraday", "2026-07-13T15:00:00+00:00")
 
     assert ranked["model_calls"] == 1
     assert ranked["plans"] == []
-    assert repeated["model_calls"] == 0
+    assert all(
+        item["ranking_entered"] and not item["deep_research"]
+        for item in ranked["funnel"]["candidate_records"]
+    )
+    assert all(
+        item["cooldown_transition_id"] is None
+        for item in ranked["funnel"]["candidate_records"]
+    )
+    assert repeated["model_calls"] == 1
 
 
 def test_allocator_explicit_replay_rejects_future_option_quote(

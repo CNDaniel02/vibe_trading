@@ -31,6 +31,10 @@ from scripts.options.exit_policy import evaluate_option_exit
 from scripts.options.risk_gate import validate_option_quote
 from scripts.risk.risk_gate import validate_quote
 from scripts.risk.shared_portfolio_risk import shared_deployment
+from scripts.strategies.allocator_policy import (
+    allocator_cooldown_minutes,
+    allocator_decision_outcome,
+)
 from scripts.strategies.allocator_state import AllocatorStateStore
 
 
@@ -104,9 +108,15 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
             )
 
         if stage == "premarket_update":
-            research = self._premarket_update(decision_time)
+            research = self._premarket_update(
+                decision_time,
+                live_execution=now is None,
+            )
         elif stage == "preopen_revalidation":
-            research = self._preopen_revalidation(decision_time)
+            research = self._preopen_revalidation(
+                decision_time,
+                live_execution=now is None,
+            )
         else:
             research = self._research_stage(
                 stage,
@@ -117,8 +127,10 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
             stage,
             decision_time,
             plans=research["plans"],
+            watches=research.get("watches", []),
             executions=research["executions"],
             skipped=research["skipped"],
+            funnel=research.get("funnel"),
             model_calls=len(self.tracker.records) - calls_before,
             monitor=monitor,
         )
@@ -428,8 +440,14 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
             "live_order_tools_called": False,
         }
 
-    def _premarket_update(self, decision_time: str) -> dict[str, Any]:
+    def _premarket_update(
+        self,
+        decision_time: str,
+        *,
+        live_execution: bool = False,
+    ) -> dict[str, Any]:
         plans: list[dict[str, Any]] = []
+        watches: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
         for prior_plan in self.plans.active_plans(decision_time):
             try:
@@ -437,6 +455,7 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                     prior_plan,
                     decision_time,
                     stage="premarket_update",
+                    live_execution=live_execution,
                 )
             except Exception as exc:
                 reason = f"incremental evidence refresh failed closed: {type(exc).__name__}: {exc}"
@@ -495,15 +514,54 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
             actionable = not analysis.get("fail_closed") and signal.get(
                 "action"
             ) == "propose_trade"
+            outcome = allocator_decision_outcome(analysis)
+            transition: dict[str, Any]
             if not actionable:
-                reason = signal.get("no_trade_reason") or "premarket update failed closed"
+                reason = (
+                    signal.get("watch_reason")
+                    or signal.get("no_trade_reason")
+                    or "premarket update failed closed"
+                )
                 self.plans.set_plan_status(
                     str(prior_plan["plan_id"]),
                     "invalidated",
                     reason=reason,
-                    now=decision_time,
+                    now=snapshot["decision_time"],
                 )
-                skipped.append({"ticker": prior_plan["ticker"], "reason": reason})
+                transition = self._record_research_outcome(
+                    ticker=str(prior_plan["ticker"]),
+                    events=new_events,
+                    decision_time=str(snapshot["decision_time"]),
+                    stage="premarket_update",
+                    outcome=outcome,
+                    reason=str(reason),
+                )
+                if signal.get("action") == "watch":
+                    watch = self.plans.save_watch(
+                        {
+                            "watch_id": f"watch_{uuid4().hex}",
+                            "strategy": self.STRATEGY,
+                            "ticker": prior_plan["ticker"],
+                            "created_at": snapshot["decision_time"],
+                            "expires_at": transition["expires_at"],
+                            "status": "active",
+                            "stage": "premarket_update",
+                            "signal": signal,
+                            "snapshot": snapshot,
+                            "ranking": ranking,
+                            "evidence_snapshot": evidence_snapshot,
+                            "cooldown_transition": transition,
+                        }
+                    )
+                    watches.append(watch)
+                else:
+                    skipped.append(
+                        {
+                            "ticker": prior_plan["ticker"],
+                            "reason": reason,
+                            "category": outcome,
+                        }
+                    )
             else:
                 plan = self.plans.replace_plan(
                     str(prior_plan["plan_id"]),
@@ -521,22 +579,37 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                         "evidence_snapshot": evidence_snapshot,
                     },
                     reason="replaced by incremental premarket analysis",
-                    now=decision_time,
+                    now=snapshot["decision_time"],
                 )
                 plans.append(plan)
+                transition = self._record_research_outcome(
+                    ticker=str(prior_plan["ticker"]),
+                    events=new_events,
+                    decision_time=str(snapshot["decision_time"]),
+                    stage="premarket_update",
+                    outcome=outcome,
+                    reason="active plan refreshed",
+                )
+            record["decision_outcome"] = outcome
+            record["cooldown_transition"] = transition
             append_jsonl(
                 self.root,
                 f"strategy_sleeves/{self.namespace}/decisions.jsonl",
                 record,
             )
-            self.evidence.mark_researched(
-                f"allocator:{prior_plan['ticker']}",
-                new_events,
-                decision_time,
-            )
-        return {"plans": plans, "executions": [], "skipped": skipped}
+        return {
+            "plans": plans,
+            "watches": watches,
+            "executions": [],
+            "skipped": skipped,
+        }
 
-    def _preopen_revalidation(self, decision_time: str) -> dict[str, Any]:
+    def _preopen_revalidation(
+        self,
+        decision_time: str,
+        *,
+        live_execution: bool = False,
+    ) -> dict[str, Any]:
         plans: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
         for plan in self.plans.active_plans(decision_time):
@@ -545,6 +618,7 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                     plan,
                     decision_time,
                     stage="preopen_revalidation",
+                    live_execution=live_execution,
                 )
             except Exception as exc:
                 reason = f"pre-open evidence refresh failed closed: {type(exc).__name__}: {exc}"
@@ -574,6 +648,7 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                 )
                 continue
             snapshot, new_events, evidence_snapshot = refreshed
+            effective_time = str(snapshot["decision_time"])
             try:
                 assessment = self.team.revalidate(
                     snapshot,
@@ -588,12 +663,14 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                     str(plan["plan_id"]),
                     "invalidated",
                     reason=reason,
-                    now=decision_time,
+                    now=effective_time,
                 )
                 skipped.append({"ticker": plan["ticker"], "reason": reason})
                 continue
             challenge = assessment.get("challenge") or {}
-            if assessment.get("fail_closed") or challenge.get("veto_recommended"):
+            hard_veto = bool(challenge.get("hard_veto", challenge.get("veto_recommended")))
+            outcome = "hard_veto" if assessment.get("fail_closed") or hard_veto else "active_plan"
+            if outcome == "hard_veto":
                 reason = str(
                     assessment.get("failure_reason")
                     or "new evidence invalidated the active plan"
@@ -610,18 +687,31 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                     {
                         **plan,
                         "stage": "preopen_revalidation",
-                        "preopen_revalidated_at": decision_time,
+                        "preopen_revalidated_at": effective_time,
                         "snapshot": snapshot,
                         "evidence_snapshot": evidence_snapshot,
-                        "updated_at": decision_time,
+                        "updated_at": effective_time,
                         "revalidation": {
-                            "decision_time": decision_time,
+                            "decision_time": effective_time,
                             "snapshot_id": snapshot["snapshot_id"],
+                            "hard_veto": False,
                             "veto_recommended": False,
                         },
                     }
                 )
                 plans.append(updated)
+            transition = self._record_research_outcome(
+                ticker=str(plan["ticker"]),
+                events=new_events,
+                decision_time=str(snapshot["decision_time"]),
+                stage="preopen_revalidation",
+                outcome=outcome,
+                reason=(
+                    str(assessment.get("failure_reason") or "structured Challenge hard veto")
+                    if outcome == "hard_veto"
+                    else "active plan revalidated"
+                ),
+            )
             append_jsonl(
                 self.root,
                 f"strategy_sleeves/{self.namespace}/decisions.jsonl",
@@ -632,13 +722,10 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                     "evidence_snapshot": evidence_snapshot,
                     "prior_plan_id": plan["plan_id"],
                     "revalidation_only": True,
+                    "decision_outcome": outcome,
+                    "cooldown_transition": transition,
                     **uncalibrated_metadata(str(plan["signal"]["horizon"])),
                 },
-            )
-            self.evidence.mark_researched(
-                f"allocator:{plan['ticker']}",
-                new_events,
-                decision_time,
             )
         return {"plans": plans, "executions": [], "skipped": skipped}
 
@@ -648,9 +735,11 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
         decision_time: str,
         *,
         stage: str,
+        live_execution: bool = False,
     ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]] | None:
         ticker = str(plan["ticker"]).upper()
         events, sources = self.news.search(ticker, decision_time)
+        observation_time = utc_now() if live_execution else decision_time
         normalized = self.evidence.normalize_events(events, ticker=ticker)
         prior_snapshot = dict(plan["snapshot"])
         prior_events = self.evidence.normalize_events(
@@ -682,9 +771,9 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
         snapshot = {
             **prior_snapshot,
             "snapshot_id": f"allocator_{stage}_{ticker}_{uuid4().hex}",
-            "decision_time": decision_time,
-            "data_cutoff_time": decision_time,
-            "market_session": self.clock.status(decision_time).market_session,
+            "decision_time": observation_time,
+            "data_cutoff_time": observation_time,
+            "market_session": self.clock.status(observation_time).market_session,
             "available_news": combined_events,
             "source_metadata": [
                 *sources,
@@ -693,15 +782,59 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
         }
         evidence_snapshot = self.evidence.write_snapshot(
             snapshot_type=f"allocator-{stage}-{ticker}",
-            decision_time=decision_time,
+            decision_time=observation_time,
             payload={
                 "prior_plan_id": plan["plan_id"],
                 "new_events": new_events,
                 "events": combined_events,
                 "source_metadata": snapshot["source_metadata"],
+                "agent_snapshot": snapshot,
             },
         )
         return snapshot, new_events, evidence_snapshot
+
+    def _record_research_outcome(
+        self,
+        *,
+        ticker: str,
+        events: list[dict[str, Any]],
+        decision_time: str,
+        stage: str,
+        outcome: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        return self.evidence.mark_staged_research(
+            f"allocator:{ticker}",
+            events,
+            decision_time,
+            stage=stage,
+            outcome=outcome,
+            duration_minutes=allocator_cooldown_minutes(self.profile, outcome),
+            reason=reason,
+        )
+
+    @staticmethod
+    def _validate_research_cutoff(
+        candidate: dict[str, Any],
+        events: list[dict[str, Any]],
+        sources: list[dict[str, Any]],
+        cutoff_time: str,
+    ) -> None:
+        cutoff = parse_ts(cutoff_time)
+        observations: list[tuple[str, Any]] = [
+            ("quote asof", candidate.get("market_context", {}).get("quote", {}).get("asof"))
+        ]
+        observations.extend(
+            (f"news {field}", event.get(field))
+            for event in events
+            for field in ("published_at", "first_seen_at", "retrieved_at")
+        )
+        observations.extend(
+            ("source retrieved_at", source.get("retrieved_at")) for source in sources
+        )
+        for label, raw_time in observations:
+            if raw_time and parse_ts(str(raw_time)) > cutoff:
+                raise ValueError(f"{label} exceeds point-in-time cutoff")
 
     def _research_stage(
         self,
@@ -712,7 +845,26 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
     ) -> dict[str, Any]:
         skipped: list[dict[str, Any]] = []
         plans: list[dict[str, Any]] = []
+        watches: list[dict[str, Any]] = []
         executions: list[dict[str, Any]] = []
+        funnel: dict[str, Any] = {
+            "stage": stage,
+            "candidate_discovery": 0,
+            "technical_eligible": 0,
+            "technical_selected": 0,
+            "evidence_snapshots": 0,
+            "cooldown_rejected": 0,
+            "ranking_input": 0,
+            "ranked": 0,
+            "deep_research": 0,
+            "candidate_records": [],
+            "outcomes": {
+                "propose_trade": 0,
+                "watch": 0,
+                "no_trade": 0,
+                "hard_veto": 0,
+            },
+        }
         try:
             seeds = self.discovery.collect_seed_candidates(
                 decision_time,
@@ -723,6 +875,7 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                 for item in seeds
                 if item.get("ticker")
             }
+            funnel["candidate_discovery"] = len(seed_by_ticker)
             occupied = set(self.broker.store.positions())
             occupied.update(
                 position.contract.underlying.upper()
@@ -743,14 +896,18 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                 seed_by_ticker,
                 decision_time,
             )
+            funnel["technical_eligible"] = len(candidates)
             selected = self._select_technical_candidates(
                 candidates,
                 int(self.profile.get("top_technical_candidates", 8)),
             )
+            funnel["technical_selected"] = len(selected)
         except Exception as exc:
             return {
                 "plans": [],
+                "watches": [],
                 "executions": [],
+                "funnel": funnel,
                 "skipped": [
                     {"stage": "discovery", "reason": f"{type(exc).__name__}: {exc}"}
                 ],
@@ -769,10 +926,17 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                     decision_time,
                     company_name=instrument.get("name"),
                 )
+                observation_time = utc_now() if live_execution else decision_time
                 normalized = self.evidence.normalize_events(events, ticker=ticker)
+                self._validate_research_cutoff(
+                    candidate,
+                    normalized,
+                    sources,
+                    observation_time,
+                )
                 snapshot_ref = self.evidence.write_snapshot(
                     snapshot_type=f"allocator-{stage}-{ticker}",
-                    decision_time=decision_time,
+                    decision_time=observation_time,
                     payload={
                         "candidate": candidate,
                         "instrument": instrument,
@@ -780,19 +944,51 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                         "source_metadata": sources,
                     },
                 )
-                eligible, model_events, reason = self.evidence.research_eligibility(
+                funnel["evidence_snapshots"] += 1
+                candidate_record = {
+                    "ticker": ticker,
+                    "stage": stage,
+                    "evidence_snapshot": snapshot_ref,
+                    "ranking_entered": False,
+                    "deep_research": False,
+                    "decision_outcome": None,
+                    "cooldown_trigger_transition_id": None,
+                    "cooldown_transition_id": None,
+                }
+                funnel["candidate_records"].append(candidate_record)
+                eligible, model_events, cooldown = self.evidence.staged_research_eligibility(
                     f"allocator:{ticker}",
                     normalized,
-                    decision_time,
-                    ticker_cooldown_minutes=int(
-                        self.profile.get("ticker_cooldown_minutes", 120)
-                    ),
-                    event_cooldown_hours=int(
+                    observation_time,
+                    cooldown_minutes_by_outcome={
+                        outcome: allocator_cooldown_minutes(self.profile, outcome)
+                        for outcome in (
+                            "deep_research_no_trade",
+                            "watch",
+                            "hard_veto",
+                            "active_plan",
+                            "executed_trade",
+                        )
+                    },
+                    legacy_event_cooldown_hours=int(
                         self.profile.get("event_cooldown_hours", 24)
                     ),
                 )
+                candidate_record["cooldown_check"] = cooldown
+                candidate_record["cooldown_trigger_transition_id"] = cooldown.get(
+                    "trigger_transition_id"
+                )
                 if not eligible:
-                    skipped.append({"ticker": ticker, "reason": reason})
+                    funnel["cooldown_rejected"] += 1
+                    skipped.append(
+                        {
+                            "ticker": ticker,
+                            "reason": cooldown["reason"],
+                            "category": "cooldown",
+                            "trigger_stage": cooldown.get("trigger_stage"),
+                            "cooldown": cooldown,
+                        }
+                    )
                     continue
                 researched.append(
                     {
@@ -800,9 +996,11 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                         "events": model_events,
                         "source_metadata": sources,
                         "evidence_snapshot": snapshot_ref,
+                        "cooldown_check": cooldown,
                         "instrument": instrument,
-                        "research_time": decision_time,
-                        "market_session": self.clock.status(decision_time).market_session,
+                        "research_time": observation_time,
+                        "market_session": self.clock.status(observation_time).market_session,
+                        "_funnel_record": candidate_record,
                     }
                 )
             except Exception as exc:
@@ -811,26 +1009,43 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                 )
 
         if not researched:
-            return {"plans": plans, "executions": executions, "skipped": skipped}
+            return {
+                "plans": plans,
+                "watches": watches,
+                "executions": executions,
+                "skipped": skipped,
+                "funnel": funnel,
+            }
+        funnel["ranking_input"] = len(researched)
         cycle_id = f"allocator_{uuid4().hex}"
+        for item in researched:
+            item["_funnel_record"]["ranking_entered"] = True
+            item["_funnel_record"]["ranking_call_id"] = cycle_id
         try:
+            ranking_time = max(
+                parse_ts(str(item["research_time"])) for item in researched
+            ).isoformat()
             ranking = self.team.rank(
                 snapshot_id=cycle_id,
-                decision_time=decision_time,
+                decision_time=ranking_time,
                 candidates=[self._ranking_payload(item) for item in researched],
             )
         except (ProviderError, ValueError) as exc:
             skipped.append({"stage": "ranking", "reason": str(exc)})
-            return {"plans": plans, "executions": executions, "skipped": skipped}
-        for item in researched:
-            self.evidence.mark_researched(
-                f"allocator:{item['ticker']}",
-                item["events"],
-                decision_time,
-            )
+            return {
+                "plans": plans,
+                "watches": watches,
+                "executions": executions,
+                "skipped": skipped,
+                "funnel": funnel,
+            }
         ranked = self._validated_ranking(ranking, researched)
+        funnel["ranked"] = len(ranked)
         for rank in ranked[: int(self.profile.get("top_deep_research_candidates", 3))]:
+            funnel["deep_research"] += 1
             item = next(value for value in researched if value["ticker"] == rank["ticker"])
+            candidate_record = item["_funnel_record"]
+            candidate_record["deep_research"] = True
             snapshot = self._agent_snapshot(item, rank)
             analysis = self.team.analyze(snapshot, rank, stage=stage)
             signal = analysis["signal"]
@@ -841,14 +1056,14 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                 "evidence_snapshot": item["evidence_snapshot"],
                 **uncalibrated_metadata(str(signal["horizon"])),
             }
-            append_jsonl(
-                self.root,
-                f"strategy_sleeves/{self.namespace}/decisions.jsonl",
-                record,
-            )
             actionable = not analysis.get("fail_closed") and signal.get(
                 "action"
             ) == "propose_trade"
+            outcome = allocator_decision_outcome(analysis)
+            if outcome == "hard_veto":
+                funnel["outcomes"]["hard_veto"] += 1
+            else:
+                funnel["outcomes"][str(signal.get("action") or "no_trade")] += 1
             for existing in self.plans.active_plans(snapshot["decision_time"]):
                 if existing["ticker"] != item["ticker"]:
                     continue
@@ -859,8 +1074,55 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                     now=snapshot["decision_time"],
                 )
             if not actionable:
-                skipped.append(
-                    {"ticker": item["ticker"], "reason": signal.get("no_trade_reason")}
+                reason = str(
+                    signal.get("watch_reason")
+                    or signal.get("no_trade_reason")
+                    or "model returned no trade"
+                )
+                transition = self._record_research_outcome(
+                    ticker=str(item["ticker"]),
+                    events=item["events"],
+                    decision_time=str(snapshot["decision_time"]),
+                    stage=stage,
+                    outcome=outcome,
+                    reason=reason,
+                )
+                if signal.get("action") == "watch":
+                    watch = self.plans.save_watch(
+                        {
+                            "watch_id": f"watch_{uuid4().hex}",
+                            "strategy": self.STRATEGY,
+                            "ticker": item["ticker"],
+                            "created_at": snapshot["decision_time"],
+                            "expires_at": transition["expires_at"],
+                            "status": "active",
+                            "stage": stage,
+                            "signal": signal,
+                            "snapshot": snapshot,
+                            "ranking": rank,
+                            "evidence_snapshot": item["evidence_snapshot"],
+                            "cooldown_transition": transition,
+                        }
+                    )
+                    watches.append(watch)
+                else:
+                    skipped.append(
+                        {
+                            "ticker": item["ticker"],
+                            "reason": reason,
+                            "category": outcome,
+                        }
+                    )
+                candidate_record["decision_outcome"] = outcome
+                candidate_record["cooldown_transition_id"] = transition[
+                    "transition_id"
+                ]
+                record["decision_outcome"] = outcome
+                record["cooldown_transition"] = transition
+                append_jsonl(
+                    self.root,
+                    f"strategy_sleeves/{self.namespace}/decisions.jsonl",
+                    record,
                 )
                 continue
             plan = self.plans.save_plan(
@@ -879,6 +1141,25 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                 }
             )
             plans.append(plan)
+            transition = self._record_research_outcome(
+                ticker=str(item["ticker"]),
+                events=item["events"],
+                decision_time=str(snapshot["decision_time"]),
+                stage=stage,
+                outcome="active_plan",
+                reason="evidence-backed proposal saved as active plan",
+            )
+            candidate_record["decision_outcome"] = "active_plan"
+            candidate_record["cooldown_transition_id"] = transition[
+                "transition_id"
+            ]
+            record["decision_outcome"] = "active_plan"
+            record["cooldown_transition"] = transition
+            append_jsonl(
+                self.root,
+                f"strategy_sleeves/{self.namespace}/decisions.jsonl",
+                record,
+            )
             if stage == "intraday":
                 executions.append(
                     self._execute_plan(
@@ -887,7 +1168,13 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                         stage=stage,
                     )
                 )
-        return {"plans": plans, "executions": executions, "skipped": skipped}
+        return {
+            "plans": plans,
+            "watches": watches,
+            "executions": executions,
+            "skipped": skipped,
+            "funnel": funnel,
+        }
 
     def _execute_plan(
         self,
@@ -1150,11 +1437,22 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
             reason=submitted.reject_reason,
             now=execution_now,
         )
+        cooldown_transition = None
+        if submitted.status in {"filled", "open", "partially_filled"}:
+            cooldown_transition = self._record_research_outcome(
+                ticker=ticker,
+                events=list(plan.get("snapshot", {}).get("available_news", [])),
+                decision_time=execution_now,
+                stage=stage,
+                outcome="executed_trade",
+                reason=f"paper order reached {submitted.status}",
+            )
         return {
             "status": submitted.status,
             "reason": submitted.reject_reason,
             "allocation": allocation,
             "order": submitted.to_dict(),
+            "cooldown_transition": cooldown_transition,
             "live_order_tools_called": False,
         }
 
@@ -1431,12 +1729,15 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
         *,
         reason: str | None = None,
         plans: list[dict[str, Any]] | None = None,
+        watches: list[dict[str, Any]] | None = None,
         executions: list[dict[str, Any]] | None = None,
         skipped: list[dict[str, Any]] | None = None,
+        funnel: dict[str, Any] | None = None,
         model_calls: int = 0,
         monitor: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         plans = plans or []
+        watches = watches or []
         executions = executions or []
         result = {
             "event": "ai_instrument_allocator_stage_complete",
@@ -1445,8 +1746,10 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
             "decision_time": decision_time,
             "reason": reason,
             "plans": plans,
+            "watches": watches,
             "executions": executions,
             "skipped": skipped or [],
+            "funnel": funnel or {},
             "model_calls": model_calls,
             "paper_orders_created": sum(
                 1 for item in executions if isinstance(item.get("order"), dict)

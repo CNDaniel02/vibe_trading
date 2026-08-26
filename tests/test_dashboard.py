@@ -1048,6 +1048,13 @@ def test_trade_funnel_finds_allocator_proposal_bottleneck() -> None:
     allocator_decisions = [
         {
             "ts": "2026-08-21T18:01:00+00:00",
+            "challenge": {
+                "hard_veto": True,
+                "hard_veto_reasons": [
+                    {"code": "critical_fact_conflict", "detail": "Conflicting filing."}
+                ],
+                "soft_concerns": [],
+            },
             "signal": {"action": "no_trade"},
         },
         {
@@ -1069,8 +1076,16 @@ def test_trade_funnel_finds_allocator_proposal_bottleneck() -> None:
         },
         {
             "ts": "2026-08-21T18:03:00+00:00",
+            "challenge": {
+                "hard_veto": False,
+                "hard_veto_reasons": [],
+                "soft_concerns": [
+                    {"code": "partial_price_in", "detail": "Partly priced in."}
+                ],
+            },
             "signal": {
-                "action": "propose_trade",
+                "action": "watch",
+                "watch_reason": "Direction exists but thesis is incomplete.",
                 "horizon": "next_close",
                 "probability_status": "uncalibrated",
                 "signed_return_probability_buckets": {
@@ -1100,8 +1115,13 @@ def test_trade_funnel_finds_allocator_proposal_bottleneck() -> None:
 
     assert funnel["window_hours"] == 48
     assert funnel["allocator"]["candidate_reviews"] == 5
+    assert funnel["allocator"]["ranking_inputs"] == 3
+    assert funnel["allocator"]["deep_research"] == 3
     assert funnel["allocator"]["model_decisions"] == 3
-    assert funnel["allocator"]["trade_proposals"] == 2
+    assert funnel["allocator"]["watch"] == 1
+    assert funnel["allocator"]["trade_proposals"] == 1
+    assert funnel["allocator"]["hard_veto"] == 1
+    assert funnel["allocator"]["soft_concern"] == 1
     assert funnel["allocator"]["direction_threshold_passes"] == 1
     assert funnel["allocator"]["execution_attempts"] == 1
     assert funnel["allocator"]["paper_orders"] == 0
@@ -1113,6 +1133,180 @@ def test_trade_funnel_finds_allocator_proposal_bottleneck() -> None:
     assert funnel["blockers"][0]["count"] >= 1
 
 
+def test_trade_funnel_uses_frozen_allocator_replay_for_point_in_time_counts() -> None:
+    replay = {
+        "window_hours": 48,
+        "window_started_at": "2026-08-24T07:16:12+00:00",
+        "asof": "2026-08-26T07:16:12+00:00",
+        "old_policy": {
+            "candidates": 0,
+            "ranking_input": 0,
+            "deep_research": 0,
+            "structured_decisions": 0,
+            "watch": 0,
+            "proposals": 0,
+            "allocations": 0,
+            "selected_instruments": 0,
+            "paper_orders": 0,
+            "paper_fills": 0,
+        },
+        "new_policy": {
+            "candidates": 0,
+            "ranking_input": 0,
+            "deep_research": 0,
+            "structured_decisions": 0,
+            "watch": 0,
+            "proposals": 0,
+            "allocations": 0,
+            "selected_instruments": 0,
+            "paper_orders": 0,
+            "paper_fills": 0,
+        },
+        "observed_audit_funnel": {
+            "candidates": 56,
+            "ranking_input": 40,
+            "deep_research": 20,
+            "structured_decisions": 22,
+            "watch": 0,
+            "proposals": 2,
+            "allocations": 1,
+            "selected_instruments": 0,
+            "paper_orders": 0,
+            "paper_fills": 0,
+        },
+        "comparison": {
+            "proposal_delta": 0,
+            "watch_delta": 0,
+            "estimated_avoidable_rank_only_cooldowns": 11,
+            "candidate_linkage_complete": False,
+            "legacy_ambiguous_veto_count": 17,
+            "explanation": "Strict replay does not synthesize model decisions.",
+        },
+        "blockers": {
+            "cooldown": 16,
+            "hard_veto": 17,
+            "soft_concern": 3,
+            "model_no_trade": 3,
+            "direction_gate": 1,
+            "option_affordability": 6,
+            "spread_liquidity": 20,
+        },
+        "point_in_time": {
+            "violation_count": 171,
+            "replayable_snapshot_count": 0,
+            "excluded_snapshot_count": 58,
+        },
+        "snapshot_integrity": {"checked": 58, "valid": 58, "invalid": 0},
+        "historical_orders_created": 0,
+        "live_order_tools_called": False,
+    }
+
+    funnel = _build_trade_funnel(
+        now="2026-08-26T08:00:00+00:00",
+        allocator_profile={
+            "minimum_direction_mass": 0.50,
+            "minimum_direction_margin": 0.15,
+        },
+        audit_records=[],
+        allocator_cycles=[],
+        allocator_decisions=[],
+        allocator_fill_records=[],
+        allocator_policy_replay=replay,
+    )
+
+    assert funnel["asof"] == replay["asof"]
+    assert funnel["allocator"]["candidate_reviews"] == 56
+    assert funnel["allocator"]["ranking_inputs"] == 40
+    assert funnel["allocator"]["model_decisions"] == 22
+    assert funnel["allocator"]["trade_proposals"] == 2
+    assert funnel["allocator"]["selected_instruments"] == 0
+    assert funnel["replay_comparison"]["new_policy"]["ranking_input"] == 0
+    assert funnel["replay_comparison"]["observed_audit_funnel"]["ranking_input"] == 40
+    assert funnel["replay_comparison"]["comparison"]["proposal_delta"] == 0
+    assert funnel["replay_comparison"]["historical_orders_created"] == 0
+    assert funnel["blockers"][0]["code"] == "spread_liquidity"
+
+
+def test_dashboard_state_loads_allocator_policy_replay_artifact(paper_root) -> None:
+    replay_path = (
+        paper_root
+        / "state"
+        / "strategy_sleeves"
+        / "ai_instrument_allocator_v1"
+        / "allocator_policy_replay_latest.json"
+    )
+    replay_path.parent.mkdir(parents=True, exist_ok=True)
+    replay_path.write_text(
+        json.dumps(
+            {
+                "window_hours": 48,
+                "window_started_at": "2026-08-24T07:16:12+00:00",
+                "asof": "2026-08-26T07:16:12+00:00",
+                "old_policy": {
+                    "candidates": 0,
+                    "ranking_input": 0,
+                    "deep_research": 0,
+                    "structured_decisions": 0,
+                    "watch": 0,
+                    "proposals": 0,
+                    "allocations": 0,
+                    "selected_instruments": 0,
+                    "paper_orders": 0,
+                    "paper_fills": 0,
+                },
+                "new_policy": {
+                    "candidates": 0,
+                    "ranking_input": 0,
+                    "deep_research": 0,
+                    "structured_decisions": 0,
+                    "watch": 0,
+                    "proposals": 0,
+                    "allocations": 0,
+                    "selected_instruments": 0,
+                    "paper_orders": 0,
+                    "paper_fills": 0,
+                },
+                "observed_audit_funnel": {
+                    "candidates": 56,
+                    "ranking_input": 40,
+                    "deep_research": 20,
+                    "structured_decisions": 22,
+                    "watch": 0,
+                    "proposals": 2,
+                    "allocations": 1,
+                    "selected_instruments": 0,
+                    "paper_orders": 0,
+                    "paper_fills": 0,
+                },
+                "comparison": {"proposal_delta": 0},
+                "blockers": {"cooldown": 16},
+                "snapshot_integrity": {"checked": 58, "valid": 58, "invalid": 0},
+                "point_in_time": {
+                    "violation_count": 171,
+                    "replayable_snapshot_count": 0,
+                    "excluded_snapshot_count": 58,
+                },
+                "historical_orders_created": 0,
+                "live_order_tools_called": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    state = build_dashboard_state(paper_root)
+
+    assert state["trade_funnel"]["asof"] == "2026-08-26T07:16:12+00:00"
+    assert state["trade_funnel"]["allocator"]["candidate_reviews"] == 56
+    assert (
+        state["trade_funnel"]["replay_comparison"]["observed_audit_funnel"]["ranking_input"]
+        == 40
+    )
+
+
 def test_beginner_dashboard_contains_rolling_opportunity_funnel() -> None:
-    assert "过去 48 小时机会漏斗" in _BEGINNER_PAGE
+    assert "过去 48 小时观测审计漏斗" in _BEGINNER_PAGE
+    assert "不是严格 point-in-time 回放" in _BEGINNER_PAGE
     assert "不代表订单" in _BEGINNER_PAGE
+    assert "观察 Watch" in _BEGINNER_PAGE
+    assert "旧规则 → 新规则" in _BEGINNER_PAGE
+    assert "估计" in _BEGINNER_PAGE

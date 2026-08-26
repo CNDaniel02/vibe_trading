@@ -1,5 +1,15 @@
 # Development Log
 
+## 2026-08-26 (America/Los_Angeles) - Issue #3 allocator proposal recall
+
+- 冻结读取 `2026-08-24T08:16:12Z` 至 `2026-08-26T08:16:12Z` 的真实 append-only 日志和 58 份不可变 snapshot。observed audit 漏斗为 `56 candidates → 40 ranking inputs → 20 deep research → 22 structured decisions（含 2 次盘前更新）→ 2 proposals → 1 allocation → 0 selected instruments → 0 orders/fills`；根因仍在 cooldown 与研究/提案转换，不在 paper broker。两份 proposal 是盘中 XPEV 与夜间 INTU；XPEV 的 signed direction 不足，INTU 在窗口结束时仍是等待次日执行门的 conditional plan。
+- 58/58 份 snapshot 的 SHA-256 完整，但旧 writer 在网络采集前冻结 envelope cutoff，留下 229 个去重后的 observation-after-cutoff 记录（55 quote、58 news first-seen、58 news retrieved、58 source retrieved）。严格 replay 因此排除全部 58 份 snapshot、22 条关联 decision 和 1 条 allocation，old/new 可重放子集均为 0，不能把 observed audit 漏斗描述成 lookahead-safe 绩效回放。历史文件未改写；新版 live research/premarket snapshot 改用 post-collection cutoff，显式 replay 时间仍固定并拒绝 lookahead。
+- 夜间和盘前允许 `propose_trade + entry_now=false`。Python 会把模型误给的 `entry_now=true` 收紧为 `false` 并记录 normalization，不扩大执行权限。等待 fresh quote、spread、remaining move、option chain 和 Python risk gate 明确属于 execution-time gate；只有 thesis 本身依赖未来事件、突破或事实时才 `no_trade`。
+- ranking-only 候选不再写 24 小时 event cooldown。deep no-trade、watch、hard veto、active plan 和 executed trade 分别使用 120 分钟、60 分钟、24 小时、6 小时和 24 小时 cooldown；新 event fingerprint 绕过 ticker cooldown。eligibility 保存触发它的 prior transition ID，深研结果保存新的 outcome transition ID，并同时记录 stage、reason、duration 和 expiry。旧日志只能估计 11 次 rank-only cooldown 可能可避免，不能声称精确 `40 → 51`；新版 cycle 保存 candidate snapshot、ranking/deep 标记和两类 transition 关联，供以后做可验证关联。
+- allocator Challenge 新增独立 strict schema。关键事实冲突、快照外/时间错误、关键证据 stale、缺必要 primary source、mandate/horizon 无效才是 hard veto；普通不确定性、partial price-in、估值、追高和次要证据缺口为 soft concern。旧无类型 veto 保持 fail-closed。
+- 新增 `watch` 结果和独立 `allocator_watches.json`；watch 带明确 expiry，过期后不再出现在 active watch 结果中，也不创建 plan、allocation 或 order。Dashboard 以只读输入签名缓存 replay，分开展示 observed audit funnel 与严格可重放子集，并拆分全部 Issue 指定 blocker。replay 验证 hash，不调用模型或 broker，不生成历史订单。
+- allocator、replay 与 Dashboard 定向测试为 `187 passed`；全套 pytest 为 `379 passed`，仅有 4 条既有上游 `exchange_calendars` deprecation warning。Dashboard 使用真实 48 小时输入在桌面 `1440x1000` 与移动端 `390x844` 完成 Playwright 验证，均无横向溢出，console 为 0 error / 0 warning；临时验证服务已关闭，用户原有 forward service/dashboard 未停止。
+
 ## 2026-08-21 (America/Los_Angeles) - 48 小时 0-trade 漏斗与 paper 门槛校准
 
 - 读取 2026-08-19 至 2026-08-21 的真实 append-only 运行记录，未改写任何历史账户、订单、成交、PnL 或日志。主 forward 线完成约 3,800 份快照并产生 527 次股票加权候选；期权线完成 1,064 次方向判断，其中 898 次为 `buy_to_open`。两者没有下单是当前权限设计的结果：股票加权为 `shadow_only`，旧方向期权为 `entry_frozen`，只能继续管理旧仓。

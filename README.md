@@ -231,6 +231,9 @@ each data-collection stage are written to append-only runtime logs.
 # Vibe 5-minute point-in-time replay
 .\.venv\Scripts\python.exe -m scripts.replay.vibe_replay_run_manager --start-date 2026-07-10 --end-date 2026-07-10 --symbols AAPL,MSFT,NVDA,SPY
 
+# Read-only allocator policy replay; verifies immutable snapshots and creates no orders
+.\.venv\Scripts\python.exe -m scripts.replay.allocator_policy_replay --root . --hours 48
+
 # Performance report
 .\.venv\Scripts\python.exe -m scripts.evaluation.generate_performance_report --root .
 
@@ -249,9 +252,11 @@ The dashboard is a five-view read-only control center:
   distinct; completed history is collapsed by default.
 - `策略表现` compares execution mode, account ownership, decisions, entries,
   closed trades, PnL, win rate, and the latest no-trade reason by strategy. It
-  also shows a rolling 48-hour allocator funnel from reviewed candidates to
-  model decisions, proposals, deterministic execution, paper orders, and fills,
-  with an automatic plain-language diagnosis of the largest zero-trade drop.
+  also shows a frozen 48-hour allocator funnel from candidates through ranking,
+  deep research, `no_trade/watch/propose_trade`, allocation, selected instrument,
+  paper order, and fill. It compares old/new policy semantics and separates
+  cooldown, hard veto, soft concern, model no-trade, direction, remaining move,
+  affordability, spread/liquidity, and deterministic risk blockers.
 - `AI 决策` shows candidate ranking, Exa evidence, structured DeepSeek output,
   Challenge review, and the deterministic Python risk verdict without raw
   private chain-of-thought.
@@ -259,9 +264,10 @@ The dashboard is a five-view read-only control center:
 
 The browser polls every 15 seconds and pauses while its tab is hidden. The
 server reads bounded JSONL tails instead of loading complete growing logs on
-every refresh. Metrics are cached by the signatures of their config, account,
-and log inputs and are recomputed after any input changes, including SQLite WAL
-updates and the News Drift/AI logs used by derived metrics. Equity quote age,
+every refresh. Metrics and the read-only allocator policy replay are cached by
+the signatures of their config, account, snapshot, and log inputs and are
+recomputed only after relevant inputs change, including SQLite WAL updates and
+the News Drift/AI logs used by derived metrics. Equity quote age,
 option quote age, and the service heartbeat are reported separately; malformed
 or future timestamps fail closed as stale. The latest forward exchange session
 takes precedence over a daily counter that has not rolled because no entry was
@@ -312,8 +318,10 @@ conditional plan, refreshes quotes, reprices instruments, and reruns risk.
 The 09:25 stage records a same-session `preopen_revalidated_at` execution
 permit even when there is no new evidence. A missing or failed state write
 leaves the plan non-executable at 09:32.
-An after-hours or premarket signal must set `entry_now=false`; that field blocks
-an order during research but does not cancel the saved conditional plan. Only a
+An after-hours or premarket signal must set `entry_now=false`; deterministic
+Python normalizes a noncompliant proposal to `false` and records the change.
+That field blocks an order during research but does not cancel the saved
+conditional plan. Only a
 plan created by an approved non-regular research stage can reach 09:32
 revalidation, and the configured execution window closes at 09:37 ET. Newer
 analysis for the same ticker supersedes the older plan, and
