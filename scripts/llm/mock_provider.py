@@ -47,7 +47,7 @@ class MockProvider(LLMProvider):
             "ai_allocator_challenge_agent",
             "ai_allocator_fast_challenge_agent",
         }:
-            data = self._catalyst_challenge(request.input_payload)
+            data = self._allocator_challenge(request.input_payload)
         elif request.agent_name in {
             "ai_allocator_decision_manager",
             "ai_allocator_fast_decision_manager",
@@ -292,7 +292,7 @@ class MockProvider(LLMProvider):
         news = context.get("bull_news", {})
         challenge = context.get("challenge", {})
         direction = str(news.get("direction", "unclear"))
-        veto = bool(challenge.get("veto_recommended", False))
+        veto = bool(challenge.get("hard_veto", challenge.get("veto_recommended", False)))
         if direction == "positive":
             buckets = {
                 "return_lt_minus_5_pct": 0.02,
@@ -323,11 +323,13 @@ class MockProvider(LLMProvider):
                 "return_plus_2_to_plus_5_pct": 0.07,
                 "return_gt_plus_5_pct": 0.03,
             }
-        actionable = bool(news.get("supporting_facts")) and not veto
+        grounded = bool(news.get("supporting_facts"))
+        actionable = grounded and direction in {"positive", "negative"} and not veto
+        watch = grounded and not actionable and not veto
         decision_time = parse_ts(str(payload["decision_time"]))
         horizon = "next_close"
         return {
-            "action": "propose_trade" if actionable else "no_trade",
+            "action": "propose_trade" if actionable else ("watch" if watch else "no_trade"),
             "ticker": str(payload["ticker"]),
             "horizon": horizon,
             "signed_return_probability_buckets": buckets,
@@ -340,9 +342,69 @@ class MockProvider(LLMProvider):
             "entry_condition": "Fresh executable economics clear deterministic hurdles.",
             "entry_now": actionable and payload.get("market_session") == "regular",
             "invalidation_condition": "Grounded evidence is contradicted or expires.",
-            "thesis_valid_until": (decision_time + timedelta(days=2)).isoformat(),
-            "max_holding_trading_days": 1,
-            "no_trade_reason": None if actionable else "Challenge veto or insufficient grounded evidence.",
+            "thesis_valid_until": (decision_time + timedelta(days=2)).isoformat() if actionable else None,
+            "max_holding_trading_days": 1 if actionable else 0,
+            "no_trade_reason": None if actionable or watch else "Challenge hard veto or insufficient grounded evidence.",
+            "watch_reason": "Directional evidence exists, but the thesis is incomplete." if watch else None,
+        }
+
+    @staticmethod
+    def _allocator_challenge(payload: dict[str, Any]) -> dict[str, Any]:
+        context = payload.get("agent_context", {})
+        bull = context.get("bull_news", {})
+        objections: list[str] = []
+        hard_reasons: list[dict[str, str]] = []
+        soft_concerns: list[dict[str, str]] = []
+        missing = list(bull.get("data_gaps", []))
+
+        if not bull.get("supporting_facts"):
+            hard_reasons.append(
+                {
+                    "code": "missing_required_primary_source",
+                    "detail": "No grounded event evidence supports the thesis.",
+                }
+            )
+        if context.get("revalidation_only") or context.get("incremental_update"):
+            prior_direction = context.get("prior_direction")
+            new_direction = bull.get("direction")
+            if (prior_direction, new_direction) in {
+                ("bullish", "negative"),
+                ("bearish", "positive"),
+            }:
+                detail = "New evidence contradicts the active plan direction."
+                objections.append(detail)
+                hard_reasons.append(
+                    {"code": "critical_fact_conflict", "detail": detail}
+                )
+        if bull.get("direction") in {"mixed", "unclear"}:
+            detail = "Catalyst direction is not yet clear."
+            objections.append(detail)
+            soft_concerns.append({"code": "uncertainty", "detail": detail})
+        if bull.get("already_priced_in"):
+            detail = "Some of the catalyst may already be priced in."
+            objections.append(detail)
+            soft_concerns.append({"code": "partial_price_in", "detail": detail})
+
+        if hard_reasons:
+            recommendation = "no_trade"
+            adjustment = -0.4
+        elif soft_concerns:
+            recommendation = "reduce_confidence"
+            adjustment = -0.15
+        else:
+            recommendation = "proceed"
+            adjustment = 0.0
+        return {
+            "objections": objections,
+            "contradictions": [],
+            "missing_evidence": missing,
+            "stale_evidence": [],
+            "chase_risk": "low",
+            "event_risk": "low",
+            "recommendation": recommendation,
+            "confidence_adjustment": adjustment,
+            "hard_veto_reasons": hard_reasons,
+            "soft_concerns": soft_concerns,
         }
 
     @staticmethod

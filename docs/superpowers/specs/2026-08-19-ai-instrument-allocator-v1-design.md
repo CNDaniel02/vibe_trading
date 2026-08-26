@@ -98,18 +98,29 @@ An overnight or premarket plan can never create an order. Every executable
 entry receives a fresh quote and a deterministic authorization window no longer
 than 300 seconds.
 
-The model must set `entry_now=false` outside regular hours. That value prevents
-research-time execution; it does not discard a saved conditional plan. At the
+The model must set `entry_now=false` outside regular hours, and deterministic
+Python normalizes any noncompliant proposal to `false` while recording the
+normalization. That value prevents research-time execution; it does not discard
+a saved conditional plan. At the
 open, only a plan carrying an `overnight`, `premarket_update`, or
 `preopen_revalidation` source stage may proceed to fresh executable economics
 and deterministic risk, and only after the same-session pre-open permit was
 persisted. A missing permit or failed state write blocks execution. The
 open-execution window is 09:32 through 09:37 ET;
 late calls and plans originating from `intraday` are rejected. New completed analysis for the same ticker supersedes
-the older plan, while no-trade or fail-closed analysis invalidates it. Events
-included in a successful ranking enter cooldown even when they are outside the
-deep-analysis top set or the final action is no-trade. Failed ranking can be
-retried but cannot create a plan or order.
+the older plan, while no-trade or fail-closed analysis invalidates it. Fresh
+quote, spread, remaining move, option-chain, and deterministic risk checks are
+execution-time gates and do not make an otherwise complete overnight thesis
+conditional on a future fact. A thesis that requires a future event, breakout,
+or factual confirmation is `no_trade`.
+
+Ranking alone does not consume cooldown. A stage/result cooldown starts only
+after deep research: deep `no_trade`, `watch`, hard veto, active plan, and
+executed paper trade have separate durations. A new event fingerprint bypasses
+ticker cooldown. Logs persist both the prior transition ID that triggered an
+eligibility result and the new outcome transition ID, plus candidate snapshot
+reference, ranking/deep flags, reason, duration, expiry, and trigger stage.
+Failed ranking can be retried but cannot create a plan or order.
 
 Replacing a premarket plan is one atomic state-file transition: the replacement
 becomes active in the same write that supersedes the prior plan. Refresh or
@@ -139,10 +150,21 @@ are present and their sum is within `1e-6` of 1. The output also contains:
   condition, thesis validity, and a no-trade reason
 - `probability_status: uncalibrated`
 
+The outcome is `propose_trade`, `watch`, or `no_trade`. `watch` records a
+directional but incomplete thesis in separate state, expires with its watch
+cooldown, and cannot create a plan or order. Challenge emits typed
+`hard_veto_reasons` and `soft_concerns`. Only
+critical fact/time/source/mandate failures are hard vetoes; uncertainty,
+partial price-in, valuation, secondary evidence gaps, chase risk, and event risk
+are soft concerns that reduce confidence without automatically forcing
+`no_trade`.
+
 `entry_condition` and `invalidation_condition` are audit-only free text in V1.
 Only deterministic Python quote, remaining-move, liquidity, authorization-time,
-risk, or explicit invalidation transitions can affect execution. A model still
-waiting for a future price or confirmation must return `no_trade`.
+risk, or explicit invalidation transitions can affect execution. Waiting for
+those execution observations is allowed for an overnight conditional proposal;
+a thesis still waiting for a future event, breakout, or fact must return
+`no_trade`.
 
 The model does not output a final instrument. Python derives bullish, bearish,
 and neutral mass, the dominant signed bucket, and conservative move scenarios.
@@ -339,6 +361,13 @@ risk decision, fixed forecast reference/target, realized and remaining move,
 market-implied move comparison, $2,000 counterfactual, mandate lifecycle,
 fills, and calibration sample metadata. Every record includes decision time and
 data cutoff time.
+
+The policy replay separates the observed audit funnel from a strict replayable
+subset. Any snapshot containing an observation after cutoff, together with its
+linked decision/allocation/order/fill, is excluded from the strict subset.
+Legacy rank-only cooldown recovery without candidate-level linkage is reported
+only as an estimate. No replay path invokes a model or broker or creates a
+historical order.
 
 Closed-trade reporting decomposes:
 

@@ -5,6 +5,7 @@
     "action": {
       "enum": [
         "propose_trade",
+        "watch",
         "no_trade"
       ]
     },
@@ -21,7 +22,6 @@
       "type": "array"
     },
     "entry_condition": {
-      "description": "Audit-only V1 research text; deterministic Python quote, remaining-move, liquidity, and risk gates exclusively authorize entry.",
       "minLength": 1,
       "type": "string"
     },
@@ -129,6 +129,12 @@
     "ticker": {
       "pattern": "^[A-Z][A-Z0-9.-]{0,9}$",
       "type": "string"
+    },
+    "watch_reason": {
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "required": [
@@ -147,7 +153,8 @@
     "invalidation_condition",
     "thesis_valid_until",
     "max_holding_trading_days",
-    "no_trade_reason"
+    "no_trade_reason",
+    "watch_reason"
   ],
   "type": "object"
 }

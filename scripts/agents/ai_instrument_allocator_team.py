@@ -12,13 +12,14 @@ from scripts.decision.signed_return_signal import (
 )
 from scripts.llm.base_provider import LLMProvider, ProviderError, ProviderRequest
 from scripts.llm.schemas import (
+    AI_ALLOCATOR_CHALLENGE_OUTPUT_SCHEMA,
     AI_ALLOCATOR_RANKING_OUTPUT_SCHEMA,
     AI_ALLOCATOR_RESEARCH_OUTPUT_SCHEMA,
     AI_ALLOCATOR_SIGNAL_OUTPUT_SCHEMA,
-    CHALLENGE_OUTPUT_SCHEMA,
     validate_agent_input,
 )
 from scripts.llm.usage_tracker import UsageTracker
+from scripts.strategies.allocator_policy import normalize_allocator_challenge
 
 
 _PROMPTS = {
@@ -43,7 +44,13 @@ class AiInstrumentAllocatorTeam:
     ) -> None:
         self.provider = provider
         self.tracker = tracker
-        self.prompt_version = str(runtime_config.get("llm", {}).get("prompt_version", "v1"))
+        profile = runtime_config.get("strategies", {}).get(self.STRATEGY, {})
+        self.prompt_version = str(
+            profile.get(
+                "prompt_version",
+                runtime_config.get("llm", {}).get("prompt_version", "v1"),
+            )
+        )
         self.prompt_dir = Path(__file__).resolve().parents[1] / "llm" / "prompts"
 
     def rank(
@@ -123,8 +130,9 @@ class AiInstrumentAllocatorTeam:
             challenge = self._call(
                 names["challenge"],
                 challenge_payload,
-                CHALLENGE_OUTPUT_SCHEMA,
+                AI_ALLOCATOR_CHALLENGE_OUTPUT_SCHEMA,
             )
+            challenge = normalize_allocator_challenge(challenge)
             decision_payload = dict(model_snapshot)
             decision_payload["agent_context"] = {
                 **base_context,
@@ -136,6 +144,16 @@ class AiInstrumentAllocatorTeam:
                 decision_payload,
                 AI_ALLOCATOR_SIGNAL_OUTPUT_SCHEMA,
             )
+            normalizations: list[str] = []
+            if (
+                stage in {"overnight", "premarket_update", "preopen_revalidation"}
+                and signal.get("action") == "propose_trade"
+                and signal.get("entry_now") is not False
+            ):
+                signal = {**signal, "entry_now": False}
+                normalizations.append(
+                    f"{stage} research proposal deferred to an execution stage"
+                )
             validate_signed_return_signal(signal)
             if prior_signal is not None:
                 raw_reference_price = prior_signal.get("forecast_reference_price")
@@ -192,9 +210,9 @@ class AiInstrumentAllocatorTeam:
         ) - (incremental_urls | prior_urls):
             guardrails.append("model cited evidence absent from immutable snapshot")
             signal = self._no_trade(signal, ticker, "Model cited unsupported evidence.")
-        if challenge["veto_recommended"] and signal["action"] != "no_trade":
+        if challenge["hard_veto"] and signal["action"] != "no_trade":
             guardrails.append("challenge veto enforced")
-            signal = self._no_trade(signal, ticker, "Challenge veto is mandatory.")
+            signal = self._no_trade(signal, ticker, "Structured Challenge hard veto is mandatory.")
         return {
             "strategy": self.STRATEGY,
             "snapshot_id": snapshot["snapshot_id"],
@@ -206,6 +224,7 @@ class AiInstrumentAllocatorTeam:
             "signal": signal,
             "model_calls": len(self.tracker.records) - calls_before,
             "guardrail_actions": guardrails,
+            "normalizations": normalizations,
             "fail_closed": False,
         }
 
@@ -250,8 +269,9 @@ class AiInstrumentAllocatorTeam:
             challenge = self._call(
                 "ai_allocator_fast_challenge_agent",
                 challenge_payload,
-                CHALLENGE_OUTPUT_SCHEMA,
+                AI_ALLOCATOR_CHALLENGE_OUTPUT_SCHEMA,
             )
+            challenge = normalize_allocator_challenge(challenge)
             allowed_urls = {
                 str(item.get("url"))
                 for item in incremental_news
@@ -273,6 +293,7 @@ class AiInstrumentAllocatorTeam:
                 "signal": prior_signal,
                 "model_calls": len(self.tracker.records) - calls_before,
                 "guardrail_actions": ["pre-open revalidation failed closed"],
+                "normalizations": [],
                 "failure_reason": f"structured model failure: {exc}",
                 "fail_closed": True,
             }
@@ -287,6 +308,7 @@ class AiInstrumentAllocatorTeam:
             "signal": prior_signal,
             "model_calls": len(self.tracker.records) - calls_before,
             "guardrail_actions": [],
+            "normalizations": [],
             "fail_closed": False,
         }
 
@@ -326,6 +348,7 @@ class AiInstrumentAllocatorTeam:
             "signal": self._no_trade({}, ticker, reason),
             "model_calls": len(self.tracker.records) - calls_before,
             "guardrail_actions": ["pipeline failed closed"],
+            "normalizations": [],
             "fail_closed": True,
         }
 
@@ -363,4 +386,5 @@ class AiInstrumentAllocatorTeam:
             "thesis_valid_until": decision_time,
             "max_holding_trading_days": 0,
             "no_trade_reason": reason,
+            "watch_reason": None,
         }

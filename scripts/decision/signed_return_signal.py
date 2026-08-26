@@ -66,8 +66,16 @@ def validate_actionable_signal(
 ) -> None:
     validate_signed_return_signal(signal)
     action = signal.get("action")
-    if action not in {"propose_trade", "no_trade"}:
+    if action not in {"propose_trade", "watch", "no_trade"}:
         raise ValueError("unsupported signal action")
+    if action == "watch":
+        if signal.get("entry_now") is not False:
+            raise ValueError("watch signal cannot authorize entry")
+        if not str(signal.get("watch_reason") or "").strip():
+            raise ValueError("watch signal requires watch_reason")
+        if signal.get("max_holding_trading_days") != 0:
+            raise ValueError("watch signal cannot declare a holding period")
+        return
     if action != "propose_trade":
         return
 

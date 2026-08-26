@@ -393,6 +393,77 @@ AI_ALLOCATOR_RESEARCH_OUTPUT_SCHEMA: dict[str, Any] = {
     },
 }
 
+_ALLOCATOR_CHALLENGE_REASON = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["code", "detail"],
+    "properties": {
+        "code": {
+            "enum": [
+                "critical_fact_conflict",
+                "out_of_snapshot_evidence",
+                "temporal_integrity_failure",
+                "stale_decision_critical_evidence",
+                "missing_required_primary_source",
+                "mandate_horizon_invalid",
+            ]
+        },
+        "detail": {"type": "string", "minLength": 1},
+    },
+}
+
+_ALLOCATOR_SOFT_CONCERN = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["code", "detail"],
+    "properties": {
+        "code": {
+            "enum": [
+                "uncertainty",
+                "partial_price_in",
+                "valuation",
+                "secondary_evidence_gap",
+                "chase_risk",
+                "event_risk",
+                "price_action_conflict",
+                "incomplete_context",
+                "other",
+            ]
+        },
+        "detail": {"type": "string", "minLength": 1},
+    },
+}
+
+AI_ALLOCATOR_CHALLENGE_OUTPUT_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "objections",
+        "contradictions",
+        "missing_evidence",
+        "stale_evidence",
+        "chase_risk",
+        "event_risk",
+        "recommendation",
+        "confidence_adjustment",
+        "hard_veto_reasons",
+        "soft_concerns",
+    ],
+    "properties": {
+        "objections": STRING_ARRAY,
+        "contradictions": STRING_ARRAY,
+        "missing_evidence": STRING_ARRAY,
+        "stale_evidence": STRING_ARRAY,
+        "chase_risk": {"enum": ["low", "medium", "high"]},
+        "event_risk": {"enum": ["low", "medium", "high"]},
+        "recommendation": {"enum": ["proceed", "reduce_confidence", "no_trade"]},
+        "confidence_adjustment": {"type": "number", "minimum": -1, "maximum": 0.25},
+        "hard_veto_reasons": {"type": "array", "items": _ALLOCATOR_CHALLENGE_REASON},
+        "soft_concerns": {"type": "array", "items": _ALLOCATOR_SOFT_CONCERN},
+    },
+}
+
 AI_ALLOCATOR_SIGNAL_OUTPUT_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
@@ -414,9 +485,10 @@ AI_ALLOCATOR_SIGNAL_OUTPUT_SCHEMA: dict[str, Any] = {
         "thesis_valid_until",
         "max_holding_trading_days",
         "no_trade_reason",
+        "watch_reason",
     ],
     "properties": {
-        "action": {"enum": ["propose_trade", "no_trade"]},
+        "action": {"enum": ["propose_trade", "watch", "no_trade"]},
         "ticker": {"type": "string", "pattern": "^[A-Z][A-Z0-9.-]{0,9}$"},
         "horizon": {
             "enum": ["intraday_close", "next_close", "two_to_five_days"]
@@ -439,6 +511,7 @@ AI_ALLOCATOR_SIGNAL_OUTPUT_SCHEMA: dict[str, Any] = {
         "thesis_valid_until": {"type": ["string", "null"], "format": "date-time"},
         "max_holding_trading_days": {"type": "integer", "minimum": 0, "maximum": 5},
         "no_trade_reason": {"type": ["string", "null"]},
+        "watch_reason": {"type": ["string", "null"]},
     },
 }
 

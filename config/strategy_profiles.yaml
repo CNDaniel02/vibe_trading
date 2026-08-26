@@ -143,12 +143,19 @@ ai_instrument_allocator_v1:
   share_order_state_with_baseline: false
   state_namespace: ai_instrument_allocator_v1
   paper_initial_cash_usd: 10000
+  prompt_version: v3-allocator-recall
   top_technical_candidates: 8
   top_deep_research_candidates: 3
   minimum_technical_prefilter_score: 0.48
   minimum_model_rank_score: 0.55
   ticker_cooldown_minutes: 120
   event_cooldown_hours: 24
+  cooldowns:
+    deep_research_no_trade_minutes: 120
+    watch_minutes: 60
+    hard_veto_minutes: 1440
+    active_plan_minutes: 360
+    executed_trade_minutes: 1440
   max_parallel_exa_searches: 3
   intraday_cycle_seconds: 3600
   max_entry_validity_seconds: 300

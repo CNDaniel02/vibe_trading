@@ -320,7 +320,7 @@ Exa 负责外部非结构化证据，不替代报价、historicals、fundamental
 2. Python 同时计算 bullish 和 bearish 技术分数，选择前 5 至 8 个有界候选，并为已确认的财报 surprise 保留少量位置。
 3. Exa 对候选做有限并行搜索，DeepSeek 先做一次低成本结构化排序。
 4. 对最多三个深度候选补充 primary-source evidence；如果排名结果中有足够 bearish 候选，至少两个位置保留给 bearish 方向，再用整体最高分填满其余位置。
-5. 运行 News/Bull、Challenge 和 Decision。Challenge 可以 veto，Decision 可以 no-trade。
+5. 运行 News/Bull、Challenge 和 Decision。Challenge 把不可交易的事实/时间/来源/mandate 问题列为 hard veto，把不确定性、price-in、估值和次要证据缺口列为 soft concern；Decision 输出 `propose_trade`、`watch` 或 `no_trade`。
 6. trade action 必须同时给出 `entry_now=true`、`max_entry_price`、可选 `min_entry_price` 和最多五分钟有效的 `entry_valid_until`。模型写在自然语言里的“等待回调”或“缺口不超过某值”不能绕过这些字段。
 7. Python 刷新 underlying quote，逐项检查有效期和 ask 是否位于模型价格边界；不满足就记录 no-trade，不创建 pending 条件单。
 8. 当天因 stop loss 退出的 ticker 会在发现阶段和执行阶段同时被阻止重新入场，避免同一事件反复研究和止损重买。
@@ -370,10 +370,11 @@ flowchart TD
 flowchart TD
     R["Robinhood 只读候选与技术分"] --> T["Top 8"]
     T --> X["Exa 不可变证据 snapshot"] --> K["DeepSeek rank"]
-    K --> N["News"] --> C["Challenge"] --> D["Decision signed buckets"]
-    D --> V{"Python schema / sum=1 / veto"}
-    V -- "失败" --> NT["no_trade"]
-    V -- "通过" --> Q["fresh stock + option quotes"]
+    K --> N["News"] --> C["Challenge hard veto / soft concern"] --> D["Decision signed buckets"]
+    D --> V{"Python schema / sum=1 / hard veto?"}
+    V -- "失败或 hard veto" --> NT["no_trade"]
+    V -- "thesis 不完整" --> W["watch 独立状态；无 plan/order"]
+    V -- "完整 proposal" --> Q["fresh stock + option quotes"]
     Q --> S["underlying/time/IV scenario repricing"]
     S --> I{"equity / call / put clears executable hurdle?"}
     I -- "否" --> NT
@@ -385,9 +386,11 @@ flowchart TD
     V --> B["short_equity_counterfactual shadow-only"]
 ```
 
-两速时钟：20:00 ET 生成慢速 conditional plans；08:00 和 09:25 只更新/失效计划；09:32 ET 不调用 LLM，只用 active plan 和 fresh quote 重建执行经济性；正常交易时段以有界间隔运行 fast research。09:25 无论是否出现新证据，都必须成功写入当日 `preopen_revalidated_at` 执行许可；任务缺席或状态写入失败时，09:32 必须拒绝旧计划。夜间和盘前模型的 `entry_now=false` 只禁止研究阶段下单，不会取消已保存计划；只有带合法非正常时段来源且通过当日盘前复核的计划能在 09:32-09:37 ET 重验，窗口外调用和 intraday plan 均拒绝。相同 ticker 的更新分析会 supersede 旧计划，no-trade/fail-closed 会 invalidate 旧计划。成功 rank 后全部候选事件都进入 cooldown，不只 top-3 deep analysis。每次真正执行授权最多有效 300 秒。
+两速时钟：20:00 ET 生成慢速 conditional plans；08:00 和 09:25 只更新/失效计划；09:32 ET 不调用 LLM，只用 active plan 和 fresh quote 重建执行经济性；正常交易时段以有界间隔运行 fast research。09:25 无论是否出现新证据，都必须成功写入当日 `preopen_revalidated_at` 执行许可；任务缺席或状态写入失败时，09:32 必须拒绝旧计划。夜间和盘前模型的 `entry_now=false` 只禁止研究阶段下单，不会取消已保存计划；等待 fresh quote、spread、remaining move、option chain 和 Python risk gate 是执行门，不是未来 thesis 确认。只有 thesis 本身依赖未来事件、突破或事实时才必须 `no_trade`。只有带合法非正常时段来源且通过当日盘前复核的计划能在 09:32-09:37 ET 重验，窗口外调用和 intraday plan 均拒绝。相同 ticker 的更新分析会 supersede 旧计划，no-trade/fail-closed 会 invalidate 旧计划。仅进入 ranking、没有进入 deep research 的候选不消耗 cooldown；deep no-trade、watch、hard veto、active plan 和 executed trade 分阶段计时，新 event fingerprint 可绕过 ticker cooldown。每次真正执行授权最多有效 300 秒。
 
 allocator live 路径不会把网络请求开始时间冒充数据 cutoff。`now=None` 会在 underlying、option 和 holding mark 返回后读取新的 wall clock，最终 execution/data cutoff 不早于任何实际使用的报价；显式 replay 时间保持固定，晚于它的报价一律按 lookahead 拒绝。
+
+Dashboard 的 48 小时 allocator replay 是只读诊断：按 append-only 输入签名缓存，验证 snapshot SHA-256，并把 observed audit funnel 与严格 point-in-time 子集分开。任何 observation 晚于 cutoff 的 snapshot 及其关联 decision/allocation/order/fill 都从严格子集排除；旧日志缺少逐候选关联时，rank-only cooldown 影响只能标成估计。新版 cycle 会保存 candidate snapshot、ranking/deep 标记、decision outcome 和 cooldown transition ID。界面明确列出 cooldown、hard veto、soft concern、model no-trade、direction gate、remaining move、option affordability、spread/liquidity 和 risk gate。它不调用模型或 broker，不修改状态，也不反向生成历史订单。旧的无类型 veto 保持 fail-closed，因此 replay 不会把模糊历史记录推测成新 proposal。
 
 mandate 中的 `invalidation_condition` 是研究与审计自由文本，V1 不会用周期性 LLM 自动判断它。只有确定性规则、明确人工动作或 replay 事件设置 `invalidation_triggered` 后，monitor 才以 thesis invalidation 退出；Dashboard 也会明确区分“仅记录条件”和真正已触发状态。
 

@@ -167,6 +167,73 @@ class AllocatorStateStore:
         )
         return plan
 
+    def save_watch(self, watch: dict[str, Any]) -> dict[str, Any]:
+        required = {
+            "watch_id",
+            "strategy",
+            "ticker",
+            "created_at",
+            "expires_at",
+            "status",
+            "signal",
+            "snapshot",
+        }
+        missing = sorted(required - set(watch))
+        if missing:
+            raise ValueError(f"allocator watch missing fields: {', '.join(missing)}")
+        if watch["strategy"] != self.namespace:
+            raise ValueError("allocator watch namespace mismatch")
+        created_at = parse_ts(str(watch["created_at"]))
+        expires_at = parse_ts(str(watch["expires_at"]))
+        if expires_at <= created_at:
+            raise ValueError("allocator watch expires_at must be after created_at")
+        watches = self.watches()
+        value = dict(watch)
+        value["ticker"] = str(value["ticker"]).upper()
+        value["updated_at"] = str(value.get("updated_at") or utc_now())
+        for watch_id, existing in watches.items():
+            if (
+                existing.get("status") == "active"
+                and str(existing.get("ticker") or "").upper() == value["ticker"]
+            ):
+                existing["status"] = "superseded"
+                existing["status_reason"] = "replaced by newer watch decision"
+                existing["updated_at"] = value["updated_at"]
+                watches[watch_id] = existing
+        watches[str(value["watch_id"])] = value
+        self.store.write_json("allocator_watches.json", watches)
+        append_jsonl(
+            self.root,
+            self.log_name,
+            {"event": "allocator_watch_saved", "namespace": self.namespace, "watch": value},
+        )
+        return value
+
+    def watches(self) -> dict[str, dict[str, Any]]:
+        raw = self.store.read_json("allocator_watches.json", {})
+        return _record_mapping(raw)
+
+    def active_watches(self, now: str) -> list[dict[str, Any]]:
+        current = parse_ts(now)
+        active: list[dict[str, Any]] = []
+        for value in self.watches().values():
+            try:
+                expires_at = value.get("expires_at")
+                eligible = (
+                    value.get("status") == "active"
+                    and parse_ts(str(value["created_at"])) <= current
+                    and expires_at is not None
+                    and current < parse_ts(str(expires_at))
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+            if eligible:
+                active.append(value)
+        return sorted(
+            active,
+            key=lambda value: (str(value["created_at"]), str(value["watch_id"])),
+        )
+
     def record_allocation(self, allocation: dict[str, Any]) -> dict[str, Any]:
         allocation_id = str(allocation.get("allocation_id") or "")
         if not allocation_id:

@@ -25,6 +25,9 @@ from scripts.decision.signed_return_signal import derive_signal_summary
 from scripts.runtime.process_lock import ProcessLock
 from scripts.evaluation.calculate_metrics import calculate_metrics
 from scripts.evaluation.evaluate_news_drift import calculate_news_drift_metrics
+from scripts.replay.allocator_policy_replay import run_allocator_policy_replay
+from scripts.strategies.allocator_policy import normalize_allocator_challenge
+from scripts.strategies.allocator_state import AllocatorStateStore
 
 
 _COMPLETED_ORDER_STATUSES = {"filled", "cancelled", "expired", "rejected"}
@@ -161,6 +164,49 @@ def _safe_news_drift_metrics(root: Path) -> dict[str, Any]:
         }
 
 
+@lru_cache(maxsize=8)
+def _cached_allocator_policy_replay(
+    root_text: str,
+    signature: tuple[tuple[str, int | None, int | None], ...],
+) -> dict[str, Any]:
+    del signature
+    return run_allocator_policy_replay(Path(root_text), hours=48)
+
+
+def _safe_allocator_policy_replay(
+    root: Path,
+    namespace: str,
+    fallback: dict[str, Any],
+) -> dict[str, Any]:
+    """Recompute only when append-only allocator inputs change; never write state."""
+    try:
+        resolved = root.resolve()
+        log_dir = resolved / "logs" / "strategy_sleeves" / namespace
+        signature = _file_signature(
+            [
+                log_dir / "cycles.jsonl",
+                log_dir / "decisions.jsonl",
+                log_dir / "allocations.jsonl",
+                log_dir / "paper_fills.jsonl",
+                log_dir / "paper_option_fills.jsonl",
+                resolved / "logs" / "ai_instrument_allocator_snapshots",
+            ]
+        )
+        report = _cached_allocator_policy_replay(str(resolved), signature)
+        if not isinstance(report, dict):
+            raise TypeError("allocator policy replay must return an object")
+        return report
+    except (
+        OSError,
+        json.JSONDecodeError,
+        AttributeError,
+        TypeError,
+        ValueError,
+        KeyError,
+    ):
+        return fallback
+
+
 def _read_jsonl(path: Path, limit: int = 400) -> list[dict[str, Any]]:
     if limit <= 0:
         return []
@@ -212,10 +258,25 @@ def _build_trade_funnel(
     allocator_cycles: list[dict[str, Any]],
     allocator_decisions: list[dict[str, Any]],
     allocator_fill_records: list[dict[str, Any]],
+    allocator_policy_replay: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Summarize the rolling paper-entry path without changing runtime state."""
-    current = parse_ts(now)
-    cutoff = current - timedelta(hours=48)
+    replay = _as_dict(allocator_policy_replay)
+    replay_old = _as_dict(replay.get("old_policy"))
+    replay_new = _as_dict(replay.get("new_policy"))
+    replay_observed = _as_dict(replay.get("observed_audit_funnel"))
+    replay_comparison = _as_dict(replay.get("comparison"))
+    try:
+        current = parse_ts(str(replay.get("asof"))) if replay_old else parse_ts(now)
+    except (TypeError, ValueError):
+        current = parse_ts(now)
+        replay = {}
+        replay_old = {}
+        replay_new = {}
+        replay_observed = {}
+        replay_comparison = {}
+    window_hours = max(1, int(replay.get("window_hours") or 48))
+    cutoff = current - timedelta(hours=window_hours)
 
     def recent(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         kept: list[dict[str, Any]] = []
@@ -295,6 +356,12 @@ def _build_trade_funnel(
         for item in (cycle.get("plans") or [])
         if isinstance(item, dict)
     ]
+    cycle_watches = [
+        item
+        for cycle in cycles
+        for item in (cycle.get("watches") or [])
+        if isinstance(item, dict)
+    ]
     executions = [
         item
         for cycle in cycles
@@ -306,6 +373,39 @@ def _build_trade_funnel(
         for record in decisions
         if _as_dict(record.get("signal")).get("action") == "propose_trade"
     ]
+    watches = [
+        record
+        for record in decisions
+        if _as_dict(record.get("signal")).get("action") == "watch"
+    ]
+    hard_veto_count = 0
+    soft_concern_count = 0
+    model_no_trade_count = 0
+    for record in decisions:
+        challenge = _as_dict(record.get("challenge"))
+        normalized = normalize_allocator_challenge(
+            challenge,
+            legacy_fail_closed=True,
+        )
+        if normalized["hard_veto"]:
+            hard_veto_count += 1
+        elif normalized["soft_concerns"]:
+            soft_concern_count += 1
+        if (
+            _as_dict(record.get("signal")).get("action") == "no_trade"
+            and not normalized["hard_veto"]
+        ):
+            model_no_trade_count += 1
+
+    funnel_totals: Counter[str] = Counter()
+    for cycle in cycles:
+        funnel = _as_dict(cycle.get("funnel"))
+        for key in (
+            "candidate_discovery",
+            "ranking_input",
+            "deep_research",
+        ):
+            funnel_totals[key] += int(funnel.get(key) or 0)
 
     minimum_mass = float(allocator_profile.get("minimum_direction_mass", 0.55))
     minimum_margin = float(
@@ -332,25 +432,42 @@ def _build_trade_funnel(
         ):
             direction_threshold_passes += 1
 
-    blocker_counts: Counter[str] = Counter()
-    for item in skipped:
-        reason = str(item.get("reason") or "").lower()
-        if "cooldown" in reason:
-            blocker_counts["cooldown"] += 1
-        elif "holding period does not match horizon" in reason:
-            blocker_counts["holding_period_mismatch"] += 1
-        elif "unsupported evidence" in reason:
-            blocker_counts["unsupported_evidence"] += 1
-        else:
-            blocker_counts["challenge_or_no_trade"] += 1
-    for execution in executions:
-        if execution.get("status") != "no_trade":
-            continue
-        reason = str(execution.get("reason") or "").lower()
-        if "risk" in reason:
-            blocker_counts["deterministic_risk"] += 1
-        else:
-            blocker_counts["execution_data"] += 1
+    blocker_counts: Counter[str] = Counter(
+        {
+            str(code): max(0, int(count or 0))
+            for code, count in _as_dict(replay.get("blockers")).items()
+        }
+    )
+    if not blocker_counts:
+        blocker_counts.update(
+            {
+                "hard_veto": hard_veto_count,
+                "soft_concern": soft_concern_count,
+                "model_no_trade": model_no_trade_count,
+            }
+        )
+        for item in skipped:
+            reason = str(item.get("reason") or "").lower()
+            if "cooldown" in reason:
+                blocker_counts["cooldown"] += 1
+            elif "holding period does not match horizon" in reason:
+                blocker_counts["holding_period_mismatch"] += 1
+            elif "unsupported evidence" in reason or "snapshot" in reason:
+                blocker_counts["unsupported_evidence"] += 1
+        for execution in executions:
+            if execution.get("status") != "no_trade":
+                continue
+            reason = str(execution.get("reason") or "").lower()
+            if "risk" in reason or "position" in reason or "daily" in reason:
+                blocker_counts["risk_gate"] += 1
+            elif "remaining move" in reason:
+                blocker_counts["remaining_move"] += 1
+            elif "afford" in reason or "premium" in reason or "budget" in reason:
+                blocker_counts["option_affordability"] += 1
+            elif "spread" in reason or "liquidity" in reason or "stale" in reason:
+                blocker_counts["spread_liquidity"] += 1
+            else:
+                blocker_counts["execution_data"] += 1
 
     blocker_labels = {
         "cooldown": (
@@ -368,12 +485,42 @@ def _build_trade_funnel(
             "引用无法在当时保存的证据快照中核对，因此不能交易。",
             "warn",
         ),
-        "challenge_or_no_trade": (
-            "Challenge / Decision 认为不值得交易",
-            "反证、追高风险或信息不足使模型主动输出 no-trade。",
+        "hard_veto": (
+            "Challenge 硬否决",
+            "存在关键事实、时间、来源、mandate 或 horizon 冲突，必须 fail-closed。",
+            "bad",
+        ),
+        "soft_concern": (
+            "Challenge 软顾虑",
+            "不确定性、部分 price-in 或次要证据不足会降置信度，但不会自动否决。",
+            "warn",
+        ),
+        "model_no_trade": (
+            "Decision 主动不交易",
+            "完整研究后仍没有足够方向、催化或可证伪 thesis。",
             "info",
         ),
-        "deterministic_risk": (
+        "direction_gate": (
+            "方向概率门槛未通过",
+            "未校准 signed buckets 的单侧质量或领先幅度不足；不会据此计算概率 EV。",
+            "info",
+        ),
+        "remaining_move": (
+            "剩余可交易空间不足",
+            "相对固定 reference price 的剩余 move 不足以覆盖成本与保守 hurdle。",
+            "info",
+        ),
+        "option_affordability": (
+            "期权权利金超预算",
+            "合约未通过单笔 premium 风险或 $2,000 可负担性对照。",
+            "warn",
+        ),
+        "spread_liquidity": (
+            "期权价差、流动性或时效不合格",
+            "报价过期或 spread 超过硬上限，确定性执行层拒绝使用。",
+            "warn",
+        ),
+        "risk_gate": (
             "确定性风控拒绝",
             "提案未通过账户、仓位或交易规则检查。",
             "warn",
@@ -395,6 +542,7 @@ def _build_trade_funnel(
         for code, count in sorted(
             blocker_counts.items(), key=lambda item: (-item[1], item[0])
         )
+        if code in blocker_labels and count > 0
     ]
 
     entry_fills = 0
@@ -403,36 +551,71 @@ def _build_trade_funnel(
         if fill.get("side") == "buy" or fill.get("intent") == "buy_to_open":
             entry_fills += 1
     paper_orders = sum(int(cycle.get("paper_orders_created") or 0) for cycle in cycles)
-    rejected_by_model = max(0, len(decisions) - len(proposals))
+    candidate_reviews = (
+        funnel_totals["candidate_discovery"]
+        or len(skipped) + len(plans) + len(cycle_watches)
+    )
+    ranking_inputs = funnel_totals["ranking_input"] or len(decisions)
+    deep_research = funnel_totals["deep_research"] or len(decisions)
+    model_decisions = len(decisions)
+    watch_count = len(watches)
+    trade_proposals = len(proposals)
+    allocation_attempts = len(executions)
+    selected_instruments = sum(
+        execution.get("status") == "selected" for execution in executions
+    )
+    display_funnel = replay_observed or replay_old
+    if display_funnel:
+        candidate_reviews = int(display_funnel.get("candidates") or 0)
+        ranking_inputs = int(display_funnel.get("ranking_input") or 0)
+        deep_research = int(
+            display_funnel.get("deep_research")
+            or display_funnel.get("structured_decisions")
+            or 0
+        )
+        model_decisions = int(display_funnel.get("structured_decisions") or 0)
+        watch_count = int(display_funnel.get("watch") or 0)
+        trade_proposals = int(display_funnel.get("proposals") or 0)
+        allocation_attempts = int(display_funnel.get("allocations") or 0)
+        selected_instruments = int(
+            display_funnel.get("selected_instruments") or 0
+        )
+        paper_orders = int(display_funnel.get("paper_orders") or 0)
+        entry_fills = int(display_funnel.get("paper_fills") or 0)
+        hard_veto_count = int(blocker_counts.get("hard_veto") or 0)
+        soft_concern_count = int(blocker_counts.get("soft_concern") or 0)
+        model_no_trade_count = int(blocker_counts.get("model_no_trade") or 0)
+    rejected_by_model = max(0, model_decisions - trade_proposals)
     if paper_orders:
         root_cause = {
             "code": "orders_created",
             "title": "漏斗已经产生模拟订单",
             "detail": f"过去 48 小时创建了 {paper_orders} 笔模拟订单。",
         }
-    elif rejected_by_model >= max(1, len(executions)):
+    elif rejected_by_model >= max(1, allocation_attempts):
         root_cause = {
             "code": "allocator_proposal_bottleneck",
             "title": "多数候选停在 AI 研究与质询阶段",
             "detail": (
-                f"{len(decisions)} 次结构化模型决策仅形成 {len(proposals)} 个交易提案；"
+                f"{model_decisions} 次结构化模型决策形成 {watch_count} 个 watch、"
+                f"{trade_proposals} 个交易提案；"
                 "确定性执行层没有足够提案可处理。"
             ),
         }
-    elif executions:
+    elif allocation_attempts:
         root_cause = {
             "code": "allocator_execution_bottleneck",
             "title": "提案停在执行前数据或风控检查",
             "detail": (
-                f"已尝试执行 {len(executions)} 次，但没有创建模拟订单；"
+                f"已进入 allocation / 执行检查 {allocation_attempts} 次，但没有创建模拟订单；"
                 "请查看下方执行前行情、合约数据和风控原因。"
             ),
         }
-    elif proposals:
+    elif trade_proposals:
         root_cause = {
             "code": "allocator_waiting_for_execution",
             "title": "已有提案，但尚未进入允许的执行窗口",
-            "detail": f"过去 48 小时形成 {len(proposals)} 个提案，尚无执行尝试。",
+            "detail": f"过去 48 小时形成 {trade_proposals} 个提案，尚无执行尝试。",
         }
     else:
         root_cause = {
@@ -442,21 +625,45 @@ def _build_trade_funnel(
         }
 
     return {
-        "window_hours": 48,
+        "window_hours": window_hours,
         "window_started_at": cutoff.isoformat(),
         "asof": current.isoformat(),
         "root_cause": root_cause,
         "allocator": {
-            "candidate_reviews": len(skipped) + len(plans),
-            "model_decisions": len(decisions),
-            "trade_proposals": len(proposals),
+            "candidate_reviews": candidate_reviews,
+            "ranking_inputs": ranking_inputs,
+            "deep_research": deep_research,
+            "model_decisions": model_decisions,
+            "watch": watch_count,
+            "trade_proposals": trade_proposals,
+            "hard_veto": hard_veto_count,
+            "soft_concern": soft_concern_count,
+            "model_no_trade": model_no_trade_count,
             "direction_threshold_passes": direction_threshold_passes,
-            "execution_attempts": len(executions),
+            "allocation_attempts": allocation_attempts,
+            "selected_instruments": selected_instruments,
+            "execution_attempts": allocation_attempts,
             "paper_orders": paper_orders,
             "paper_fills": entry_fills,
             "minimum_direction_mass": minimum_mass,
             "minimum_direction_margin": minimum_margin,
         },
+        "replay_comparison": {
+            "old_policy": replay_old,
+            "new_policy": replay_new,
+            "observed_audit_funnel": replay_observed,
+            "comparison": replay_comparison,
+            "snapshot_integrity": _as_dict(replay.get("snapshot_integrity")),
+            "point_in_time": _as_dict(replay.get("point_in_time")),
+            "historical_orders_created": int(
+                replay.get("historical_orders_created") or 0
+            ),
+            "live_order_tools_called": bool(
+                replay.get("live_order_tools_called", False)
+            ),
+        }
+        if replay_old
+        else None,
         "baselines": {
             "equity": {
                 "screened": equity_screened,
@@ -799,12 +1006,23 @@ def _safe_allocator_decision(record: dict[str, Any]) -> dict[str, Any]:
                 "invalidation_condition",
                 "max_holding_trading_days",
                 "no_trade_reason",
+                "watch_reason",
             )
         },
         "challenge": {
             key: challenge.get(key)
-            for key in ("recommendation", "veto_recommended", "objections")
+            for key in (
+                "recommendation",
+                "veto_recommended",
+                "hard_veto",
+                "concern_level",
+                "hard_veto_reasons",
+                "soft_concerns",
+                "objections",
+            )
         },
+        "decision_outcome": record.get("decision_outcome"),
+        "cooldown_transition": record.get("cooldown_transition"),
         "fail_closed": bool(record.get("fail_closed", False)),
     }
 
@@ -1368,6 +1586,10 @@ def build_dashboard_state(root: str | Path) -> dict[str, Any]:
     )
     allocator_state_dir = state_dir / "strategy_sleeves" / allocator_namespace
     allocator_log_dir = logs_dir / "strategy_sleeves" / allocator_namespace
+    allocator_state = AllocatorStateStore(
+        root_path,
+        namespace=allocator_namespace,
+    )
     allocator_account_exists = (allocator_state_dir / "paper_account.json").exists()
     allocator_orders_raw = (
         _read_json(allocator_state_dir / "paper_orders.json", {})
@@ -1398,6 +1620,17 @@ def build_dashboard_state(root: str | Path) -> dict[str, Any]:
             limit=1000,
         ),
     ]
+    allocator_policy_replay_artifact = _as_dict(
+        _read_json(
+            allocator_state_dir / "allocator_policy_replay_latest.json",
+            {},
+        )
+    )
+    allocator_policy_replay = _safe_allocator_policy_replay(
+        root_path,
+        allocator_namespace,
+        allocator_policy_replay_artifact,
+    )
     short_counterfactuals = _read_jsonl(
         allocator_log_dir / "short_equity_counterfactual.jsonl",
         limit=100,
@@ -1430,6 +1663,7 @@ def build_dashboard_state(root: str | Path) -> dict[str, Any]:
         allocator_cycles=allocator_cycles,
         allocator_decisions=allocator_decisions,
         allocator_fill_records=allocator_fill_records,
+        allocator_policy_replay=allocator_policy_replay,
     )
     market_data = _market_data_observations(
         decision_records,
@@ -1585,6 +1819,7 @@ def build_dashboard_state(root: str | Path) -> dict[str, Any]:
             "plans": _dict_values(
                 _read_json(allocator_state_dir / "allocator_plans.json", {})
             ),
+            "watches": allocator_state.active_watches(now),
             "mandates": _dict_values(
                 _read_json(allocator_state_dir / "position_mandates.json", {})
             ),
@@ -2039,6 +2274,7 @@ th,td{padding:10px 12px;text-align:left;vertical-align:top;border-bottom:1px sol
 tbody tr:last-child td{border-bottom:0}.num{font-variant-numeric:tabular-nums;white-space:nowrap}.muted{color:var(--muted)}.small{font-size:12px}
 .reason{max-width:540px;color:var(--muted);overflow-wrap:anywhere}
 .pipeline{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:0;padding:14px 16px}
+.opportunity-pipeline{grid-template-columns:repeat(6,minmax(0,1fr))}
 .pipeline-step{padding:8px 12px;min-width:0;border-right:1px solid var(--line)}.pipeline-step:last-child{border-right:0}
 .pipeline-step strong{display:block;font-size:13px}.pipeline-step span{display:block;color:var(--muted);font-size:11px;margin-top:2px}
 .stat-strip{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border-bottom:1px solid var(--line)}
@@ -2334,7 +2570,7 @@ function renderPortfolio(state){
 }
 function strategyDetailRows(state){
   const b=state.beginner_summary||{},lines=b.strategy_lines||{},metrics=state.metrics||{},metricLines=metrics.lines||{},ai=state.ai_gated||{},allocator=state.ai_instrument_allocator||{},news=state.news_drift||{};
-  const aiMetrics=ai.metrics||{},allocatorMetrics=allocator.metrics||{};
+  const aiMetrics=ai.metrics||{},allocatorMetrics=allocator.metrics||{},allocatorFunnel=((state.trade_funnel||{}).allocator)||{};
   const latestCandidate=array(state.candidates).slice().sort((a,b)=>number(b.score)-number(a.score))[0]||{};
   const latestOption=array(state.option_decisions).slice().sort((a,b)=>Math.max(number(b.call_score),number(b.put_score))-Math.max(number(a.call_score),number(a.put_score)))[0]||{};
   const latestAi=array(ai.decisions).slice(-1)[0]||{},latestAllocation=allocator.latest_allocation||{},newsMetrics=news.metrics||{},newsNext=(((newsMetrics.horizons||{}).next_close||{}).portfolio_day)||{};
@@ -2342,24 +2578,30 @@ function strategyDetailRows(state){
     {name:"weighted_relative_strength_v2",label:"股票加权",mode:(state.strategy_modes||{}).weighted_relative_strength_v2==="shadow_only"?"只观察":"模拟交易",kind:"info",account:"旧 $2,000",decisions:(lines.equity||{}).watchlist_count,entries:(lines.equity||{}).entries,closed:(metricLines.equity||{}).closed_trade_count,pnl:(metricLines.equity||{}).net_pnl,win:(metricLines.equity||{}).win_rate,reason:firstReason(latestCandidate.reasons,latestCandidate.action==="buy"?"最近候选达到技术门槛":"暂无候选")},
     {name:"long_directional_options_v2_weighted",label:"方向期权",mode:(state.strategy_modes||{}).long_directional_options_v2_weighted_new_entries?"模拟交易":"只管理旧仓",kind:"warn",account:"旧 $2,000",decisions:(lines.options||{}).direction_evaluations,entries:(lines.options||{}).orders,closed:(metricLines.options||{}).closed_trade_count,pnl:(metricLines.options||{}).net_pnl,win:(metricLines.options||{}).win_rate,reason:firstReason(latestOption.reasons,"最近没有通过合约筛选")},
     {name:"ai_gated_technical_v1",label:"旧 AI Gated",mode:(state.strategy_modes||{}).ai_gated_technical_v1_new_entries?"模拟交易":"影子研究 / 管理旧仓",kind:"warn",account:"旧 AI sleeve",decisions:(lines.ai||{}).cycles,entries:metricEntryCount(aiMetrics),closed:aiMetrics.closed_trade_count,pnl:metricTotalPnl(aiMetrics),win:aiMetrics.win_rate,reason:humanReason((latestAi.execution||{}).reason||(latestAi.decision||{}).no_trade_reason||(latestAi.decision||{}).thesis||"暂无最近决策")},
-    {name:"ai_instrument_allocator_v1",label:"AI 工具分配器",mode:String((state.strategy_modes||{}).ai_instrument_allocator_v1||"").includes("paper")?"模拟交易":"未启用",kind:"good",account:"$10,000 allocator",decisions:array(allocator.decisions).length,entries:metricEntryCount(allocatorMetrics),closed:allocatorMetrics.closed_trade_count,pnl:metricTotalPnl(allocatorMetrics),win:allocatorMetrics.win_rate,reason:humanReason(latestAllocation.reason||((latestAllocation.selected_instrument||{}).ticker?"已选择工具，等待执行或持仓管理":"最近没有选择可执行工具"))},
+    {name:"ai_instrument_allocator_v1",label:"AI 工具分配器",mode:String((state.strategy_modes||{}).ai_instrument_allocator_v1||"").includes("paper")?"模拟交易":"未启用",kind:"good",account:"$10,000 allocator",decisions:allocatorFunnel.model_decisions??array(allocator.decisions).length,entries:metricEntryCount(allocatorMetrics),closed:allocatorMetrics.closed_trade_count,pnl:metricTotalPnl(allocatorMetrics),win:allocatorMetrics.win_rate,reason:humanReason(latestAllocation.reason||((latestAllocation.selected_instrument||{}).ticker?"已选择工具，等待执行或持仓管理":"最近没有选择可执行工具"))},
     {name:"llm_news_drift_v1",label:"新闻漂移实验",mode:"只观察",kind:"info",account:"不进入账户",decisions:newsMetrics.proposal_count,entries:0,closed:"—",pnl:null,win:newsNext.hit_rate,reason:`${newsMetrics.valid_return_label_count||0} 个有效结果标签 · ${newsMetrics.profitability||"insufficient_forward_evidence"}`},
   ];
 }
 function renderOpportunityFunnel(state){
-  const funnel=state.trade_funnel||{},a=funnel.allocator||{},root=funnel.root_cause||{},baselines=funnel.baselines||{},equity=baselines.equity||{},options=baselines.options||{};
+  const funnel=state.trade_funnel||{},a=funnel.allocator||{},root=funnel.root_cause||{},baselines=funnel.baselines||{},equity=baselines.equity||{},options=baselines.options||{},replay=funnel.replay_comparison||{},oldPolicy=replay.old_policy||{},newPolicy=replay.new_policy||{},observed=replay.observed_audit_funnel||{},comparison=replay.comparison||{},pointInTime=replay.point_in_time||{};
   const steps=[
-    {label:"候选被查看",value:a.candidate_reviews,detail:"发现、筛选或冷却判断"},
-    {label:"完成 AI 判断",value:a.model_decisions,detail:"News + Challenge + Decision"},
-    {label:"AI 建议交易",value:a.trade_proposals,detail:"不代表订单"},
-    {label:"尝试确定性执行",value:a.execution_attempts,detail:"报价、工具选择和风控"},
+    {label:"候选被发现",value:a.candidate_reviews,detail:"原始候选；尚未调用深度模型"},
+    {label:"进入 AI 排名",value:a.ranking_inputs,detail:"通过 cooldown 后的 ranking input"},
+    {label:"完成深度研究",value:a.deep_research,detail:"保存 point-in-time 证据后研究"},
+    {label:"结构化结论",value:a.model_decisions,detail:`硬否决 ${a.hard_veto||0} / 不交易 ${a.model_no_trade||0} / 观察 ${a.watch||0} / 提案 ${a.trade_proposals||0}`},
+    {label:"工具分配 / 选中",value:`${a.allocation_attempts||0} / ${a.selected_instruments||0}`,detail:"股票与期权重新定价及确定性门槛"},
     {label:"订单 / 成交",value:`${a.paper_orders||0} / ${a.paper_fills||0}`,detail:"仅 $10,000 paper sleeve"},
   ];
   const stepHtml=steps.map(step=>`<div class="pipeline-step"><strong>${esc(step.label)} · ${esc(step.value??0)}</strong><span>${esc(step.detail)}</span></div>`).join("");
   const blockers=array(funnel.blockers).slice(0,6).map(item=>`<div class="issue ${item.kind==="bad"?"error":""}"><span class="issue-mark"></span><div><div class="issue-title">${esc(item.label)}</div><div class="issue-copy">${esc(item.explanation)}</div></div><div class="issue-count">${esc(item.count)} 次</div></div>`).join("");
-  return `<section class="section-block"><div class="section-head"><div><h3>过去 48 小时机会漏斗</h3><p>只统计真正允许新增仓的 AI 工具分配器；候选和建议都不代表订单。</p></div>${statusBadge(root.title||"正在统计",(a.paper_orders||0)>0?"good":"warn")}</div>
-    <div class="pipeline">${stepHtml}</div>
-    <div class="issue-list"><div class="issue"><span class="issue-mark"></span><div><div class="issue-title">自动定位：${esc(root.title||"暂无结论")}</div><div class="issue-copy">${esc(root.detail||"等待更多运行记录。")}</div></div></div>${blockers}</div>
+  const proposalExplanation=number(comparison.proposal_delta)===0?"严格回放不会补造缺失的模型判断，也不会把旧版模糊否决猜成新提案，所以可重放子集的 proposal 数不变。":"已有结构化且时间有效的历史结论在新规则下增加了 proposal。";
+  const estimatedAvoidable=number(comparison.estimated_avoidable_rank_only_cooldowns);
+  const replayHtml=Object.keys(oldPolicy).length?`<div class="definition-grid"><div class="definition"><strong>旧规则 → 新规则（严格子集）</strong><span>可重放候选 ${esc(oldPolicy.candidates||0)}；进入排名 ${esc(oldPolicy.ranking_input||0)} → ${esc(newPolicy.ranking_input||0)}；Watch ${esc(oldPolicy.watch||0)} → ${esc(newPolicy.watch||0)}；Proposal ${esc(oldPolicy.proposals||0)} → ${esc(newPolicy.proposals||0)}。</span></div><div class="definition"><strong>历史 cooldown 影响估计</strong><span>观察日志显示 ranking input ${esc(observed.ranking_input||0)}；估计有 ${esc(estimatedAvoidable)} 次 rank-only cooldown 可避免。旧日志缺少逐候选关联，不能把该估计写成精确新漏斗。</span></div><div class="definition"><strong>回放证据边界</strong><span>${esc(proposalExplanation)} 排除时间不合格 snapshot ${esc(pointInTime.excluded_snapshot_count||0)} 个；历史订单 ${esc(replay.historical_orders_created||0)}；真实下单工具 ${replay.live_order_tools_called?"曾调用（异常）":"未调用"}。</span></div></div>`:"";
+  return `<section class="section-block"><div class="section-head"><div><h3>过去 48 小时观测审计漏斗</h3><p>冻结时间 ${localDateTime(funnel.asof)}；这是实际日志计数，不是严格 point-in-time 回放，候选、观察和提案都不代表订单。</p></div>${statusBadge(root.title||"正在统计",(a.paper_orders||0)>0?"good":"warn")}</div>
+    <div class="pipeline opportunity-pipeline">${stepHtml}</div>
+    <div class="stat-strip"><div class="stat"><div class="stat-label">硬否决 Hard veto</div><div class="stat-value">${esc(a.hard_veto||0)}</div></div><div class="stat"><div class="stat-label">软顾虑 Soft concern</div><div class="stat-value">${esc(a.soft_concern||0)}</div></div><div class="stat"><div class="stat-label">观察 Watch</div><div class="stat-value">${esc(a.watch||0)}</div></div><div class="stat"><div class="stat-label">交易提案 Proposal</div><div class="stat-value">${esc(a.trade_proposals||0)}</div></div></div>
+    <div class="issue-list"><div class="issue"><span class="issue-mark"></span><div><div class="issue-title">自动定位：${esc(root.title||"暂无结论")}</div><div class="issue-copy">${esc(root.detail||"等待更多运行记录。")} 拒绝次数不是互斥人数：同一个候选可同时产生多份期权合约诊断。</div></div></div>${blockers}</div>
+    ${replayHtml}
     <div class="definition-grid"><div class="definition"><strong>为什么股票信号没有下单</strong><span>股票加权过去 48 小时产生 ${esc(equity.signals||0)} 次候选信号，但当前是 shadow_only，只观察不新增仓。</span></div><div class="definition"><strong>为什么期权信号没有下单</strong><span>方向期权产生 ${esc(options.signals||0)} 次 buy_to_open 判断，但旧策略 entry_frozen，只管理旧仓。</span></div><div class="definition"><strong>当前 paper 方向门槛</strong><span>单侧未校准概率质量至少 ${(number(a.minimum_direction_mass)*100).toFixed(0)}%，且领先第二方向 ${(number(a.minimum_direction_margin)*100).toFixed(0)} 个百分点；仍须通过全部确定性风控。</span></div></div>
   </section>`;
 }
@@ -2373,7 +2615,7 @@ function renderStrategies(state){
 }
 function renderAiDecisions(state){
   const allocator=state.ai_instrument_allocator||{},allocation=allocator.latest_allocation||{},selected=allocation.selected_instrument||{},decisions=array(allocator.decisions).slice().reverse().slice(0,12);
-  const decisionRows=decisions.map(item=>{const signal=item.signal||{},challenge=item.challenge||{};return `<tr><td data-label="时间" class="num">${localDateTime(item.asof)}</td><td data-label="股票"><strong>${esc(item.ticker)}</strong></td><td data-label="研究阶段">${esc(({overnight:"晚间研究",premarket_update:"盘前更新",preopen_revalidation:"开盘前复核",open_execution:"开盘执行",intraday:"盘中研究"})[item.stage]||item.stage)}</td><td data-label="方向">${esc(signal.action||"no_trade")}</td><td data-label="期限">${esc(signal.horizon||"—")}</td><td data-label="Challenge">${challenge.veto_recommended?statusBadge("建议否决","bad"):statusBadge(challenge.recommendation||"已检查","info")}</td><td data-label="结构化结论" class="reason">${expandableEvidence(signal.thesis||signal.no_trade_reason||"—")}</td></tr>`}).join("");
+  const decisionRows=decisions.map(item=>{const signal=item.signal||{},challenge=item.challenge||{},hard=challenge.hard_veto===true||challenge.veto_recommended===true,soft=array(challenge.soft_concerns).length,actionLabel=signal.action==="propose_trade"?"交易提案":signal.action==="watch"?"观察":signal.action==="no_trade"?"不交易":signal.action||"不交易",challengeLabel=hard?statusBadge("硬否决","bad"):soft?statusBadge(`软顾虑 ${soft} 条`,"warn"):statusBadge("未否决","good");return `<tr><td data-label="时间" class="num">${localDateTime(item.asof)}</td><td data-label="股票"><strong>${esc(item.ticker)}</strong></td><td data-label="研究阶段">${esc(({overnight:"晚间研究",premarket_update:"盘前更新",preopen_revalidation:"开盘前复核",open_execution:"开盘执行",intraday:"盘中研究"})[item.stage]||item.stage)}</td><td data-label="方向">${statusBadge(actionLabel,signal.action==="propose_trade"?"good":signal.action==="watch"?"warn":"info")}</td><td data-label="期限">${esc(signal.horizon||"—")}</td><td data-label="Challenge">${challengeLabel}</td><td data-label="结构化结论" class="reason">${expandableEvidence(signal.thesis||signal.watch_reason||signal.no_trade_reason||"—")}</td></tr>`}).join("");
   const catalystRows=array(state.catalyst_decisions).slice().reverse().slice(0,6).map(item=>{const bull=item.bull_news||{},challenge=item.challenge||{},decision=item.decision||{};return `<tr><td data-label="时间" class="num">${localDateTime(item.asof)}</td><td data-label="股票"><strong>${esc(item.ticker)}</strong><div class="small muted">${esc(item.instrument||"—")}</div></td><td data-label="Bull / News" class="reason">${expandableEvidence(bull.catalyst_summary||"没有保存催化摘要")}</td><td data-label="Challenge" class="reason">${expandableEvidence(firstReason(challenge.objections,challenge.veto_recommended?"建议否决":"未提出关键反对"))}</td><td data-label="Decision" class="reason">${expandableEvidence(decision.thesis||decision.no_trade_reason||"—")}</td><td data-label="Python 风控">${statusBadge(item.risk_approved?"通过":"拒绝",item.risk_approved?"good":"bad")}<div class="small muted">${expandableEvidence(humanReason(item.risk_reason))}</div></td></tr>`}).join("");
   const candidateRows=array(state.candidates).slice().sort((a,b)=>number(b.score)-number(a.score)).slice(0,8).map(item=>`<tr><td data-label="股票"><strong>${esc(item.ticker)}</strong></td><td data-label="综合分" class="num">${(number(item.score)*100).toFixed(1)}</td><td data-label="入场线" class="num">${(number(item.minimum_entry_score)*100).toFixed(1)}</td><td data-label="系统动作">${statusBadge(item.action==="buy"?"候选":"不交易",item.action==="buy"?"good":"warn")}</td><td data-label="原因" class="reason">${esc(firstReason(item.reasons,item.action==="buy"?"达到候选门槛":"暂无原因"))}</td></tr>`).join("");
   const selectedLabel=selected.ticker?`${selected.ticker} · ${selected.instrument_type==="put"?"看跌 Put":selected.instrument_type==="call"?"看涨 Call":"股票"}`:"尚未选择工具";

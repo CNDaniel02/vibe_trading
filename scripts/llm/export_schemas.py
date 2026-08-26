@@ -5,6 +5,7 @@ from pathlib import Path
 
 from scripts.llm.schemas import (
     AGENT_INPUT_SCHEMA,
+    AI_ALLOCATOR_CHALLENGE_OUTPUT_SCHEMA,
     AI_ALLOCATOR_SIGNAL_OUTPUT_SCHEMA,
     CHALLENGE_OUTPUT_SCHEMA,
     DECISION_OUTPUT_SCHEMA,
@@ -22,6 +23,7 @@ def export(root: str | Path) -> list[Path]:
         "challenge_agent_output.schema.json": CHALLENGE_OUTPUT_SCHEMA,
         "decision_manager_output.schema.json": DECISION_OUTPUT_SCHEMA,
         "news_drift_headline_output.schema.json": NEWS_DRIFT_HEADLINE_OUTPUT_SCHEMA,
+        "ai_allocator_challenge.schema.json": AI_ALLOCATOR_CHALLENGE_OUTPUT_SCHEMA,
         "ai_allocator_signal.schema.json": AI_ALLOCATOR_SIGNAL_OUTPUT_SCHEMA,
     }
     paths = []
