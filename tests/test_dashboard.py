@@ -1310,3 +1310,62 @@ def test_beginner_dashboard_contains_rolling_opportunity_funnel() -> None:
     assert "观察 Watch" in _BEGINNER_PAGE
     assert "旧规则 → 新规则" in _BEGINNER_PAGE
     assert "估计" in _BEGINNER_PAGE
+
+
+def test_dashboard_separates_functional_historical_and_forward_evidence(
+    paper_root: Path,
+) -> None:
+    report_path = paper_root / "reports" / "allocator_validation_latest.json"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-08-26T20:00:00+00:00",
+                "functional_liveness": {
+                    "status": "passed",
+                    "summary": {"passed": 3, "scenario_count": 3},
+                },
+                "historical_performance": {
+                    "historical_performance_available": False,
+                    "strict_funnel": {
+                        "counts": {
+                            "candidates": 12,
+                            "proposals": 2,
+                            "paper_fills": 1,
+                        }
+                    },
+                    "time_validation": {"admitted_violation_count": 0},
+                    "data_completeness": {
+                        "options": {"executable_pnl_claim_allowed": False}
+                    },
+                },
+                "forward_evidence": {
+                    "profitability_claim": "insufficient_forward_evidence",
+                    "closed_trade_count": 4,
+                    "realized_pnl_usd": -12.5,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    validation = build_dashboard_state(paper_root)["allocator_validation"]
+
+    assert [line["key"] for line in validation["evidence_lines"]] == [
+        "functional_liveness",
+        "historical_performance",
+        "forward_evidence",
+    ]
+    assert validation["evidence_lines"][0]["status"] == "passed"
+    assert validation["evidence_lines"][1]["status"] == "diagnostic_only"
+    assert validation["evidence_lines"][2]["status"] == "insufficient_forward_evidence"
+    assert validation["strict_funnel"]["candidates"] == 12
+    assert validation["option_claim"] == "synthetic_option_sensitivity_only"
+
+
+def test_beginner_dashboard_explains_validation_evidence_boundaries() -> None:
+    assert "三种证据不要混淆" in _BEGINNER_PAGE
+    assert "功能能跑通、历史数据表现、真实向前模拟是三件不同的事" in _BEGINNER_PAGE
+    assert "synthetic option sensitivity" in _BEGINNER_PAGE
+    assert "不能把它当成期权历史 PnL" in _BEGINNER_PAGE
+    assert "保守情景估计（非成交 PnL）" in _BEGINNER_PAGE

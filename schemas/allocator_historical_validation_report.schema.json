@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://auto-trading-skill.local/schemas/allocator_historical_validation_report.schema.json",
+  "title": "Allocator historical validation report",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "strategy",
+    "generated_at",
+    "functional_liveness",
+    "historical_performance",
+    "forward_evidence",
+    "evidence_boundaries",
+    "acceptance"
+  ],
+  "properties": {
+    "schema_version": {"const": "allocator-historical-validation-v1"},
+    "strategy": {"const": "ai_instrument_allocator_v1"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "functional_liveness": {
+      "type": "object",
+      "required": ["status", "historical_performance_claimed", "forward_performance_claimed"]
+    },
+    "historical_performance": {
+      "type": "object",
+      "required": ["evidence_type", "historical_performance_available", "strict_funnel", "manifest"]
+    },
+    "forward_evidence": {
+      "type": "object",
+      "required": ["evidence_type", "source", "profitability_claim"]
+    },
+    "evidence_boundaries": {
+      "type": "object",
+      "required": ["functional_liveness", "historical_performance", "forward_evidence"]
+    },
+    "acceptance": {
+      "type": "object",
+      "required": [
+        "time_violation_count",
+        "admitted_time_violation_count",
+        "historical_orders_created",
+        "live_broker_write_calls"
+      ]
+    }
+  }
+}

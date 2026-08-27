@@ -470,8 +470,30 @@ def _all_file_hashes(root: Path) -> dict[str, str]:
     }
 
 
+def test_strict_jsonl_capture_hashes_exact_bytes_and_counts_malformed_rows(
+    tmp_path: Path,
+) -> None:
+    from scripts.replay.allocator_historical_replay import _read_jsonl_snapshot
+
+    path = tmp_path / "cycles.jsonl"
+    payload = b'{"ts":"2026-07-13T15:00:00+00:00"}\n{malformed\n[]\n'
+    path.write_bytes(payload)
+
+    rows, digest, errors = _read_jsonl_snapshot(path)
+
+    assert rows == [{"ts": "2026-07-13T15:00:00+00:00"}]
+    assert digest == hashlib.sha256(payload).hexdigest()
+    assert errors == 2
+
+
+@pytest.mark.parametrize(
+    ("execution_allocation_id", "expected_orders"),
+    [("allocation-nvda", 1), ("wrong-allocation", 0)],
+)
 def test_natural_strict_replay_reports_funnel_without_creating_historical_orders(
     paper_root: Path,
+    execution_allocation_id: str,
+    expected_orders: int,
 ) -> None:
     from scripts.replay.allocator_historical_replay import (
         run_natural_strict_replay,
@@ -556,8 +578,16 @@ def test_natural_strict_replay_reports_funnel_without_creating_historical_orders
                 "watches": [{"ticker": "AAPL"}],
                 "executions": [
                     {
-                        "allocation": {"plan_id": "plan-nvda"},
-                        "order": {"order_id": "paper-order-nvda", "status": "filled"},
+                        "allocation": {
+                            "plan_id": "plan-nvda",
+                            "allocation_id": execution_allocation_id,
+                        },
+                        "order": {
+                            "order_id": "paper-order-nvda",
+                            "status": "filled",
+                            "created_at": "2026-07-13T15:20:10+00:00",
+                            "quote_seen_at": "2026-07-13T15:20:00+00:00",
+                        },
                     }
                 ],
                 "paper_orders_created": 1,
@@ -605,6 +635,15 @@ def test_natural_strict_replay_reports_funnel_without_creating_historical_orders
     )
 
     assert _all_file_hashes(paper_root) == before
+    if expected_orders == 0:
+        assert report["strict_funnel"]["counts"]["paper_orders"] == 0
+        assert report["strict_funnel"]["counts"]["paper_fills"] == 0
+        assert report["rejection_reasons"][
+            "lineage: order_without_selected_allocation"
+        ] == 1
+        assert report["historical_orders_created_by_replay"] == 0
+        assert report["live_broker_write_calls"] == 0
+        return
     assert report["strict_funnel"]["counts"] == {
         "candidates": 3,
         "ranking_input": 3,
@@ -621,6 +660,7 @@ def test_natural_strict_replay_reports_funnel_without_creating_historical_orders
     assert report["strict_funnel"]["conversion_rates"]["order_to_fill"] == 1.0
     assert report["rejection_reasons"]["model_no_trade: Evidence is ambiguous."] == 1
     assert report["time_validation"] == {
+        "time_violation_count": 0,
         "source_violation_count": 0,
         "admitted_violation_count": 0,
         "excluded_snapshot_count": 0,
@@ -642,6 +682,13 @@ def test_natural_strict_replay_reports_funnel_without_creating_historical_orders
     assert report["manifest"]["source_revision"] == "test-revision"
     assert report["data_completeness"]["equity"]["executable_backtest_ready"] is True
     assert report["data_completeness"]["options"]["executable_pnl_claim_allowed"] is False
+
+
+def test_natural_strict_replay_requires_explicit_asof(paper_root: Path) -> None:
+    from scripts.replay.allocator_historical_replay import run_natural_strict_replay
+
+    with pytest.raises(ValueError, match="requires an explicit asof cutoff"):
+        run_natural_strict_replay(paper_root)
 
 
 def test_natural_strict_replay_excludes_late_and_missing_market_data(

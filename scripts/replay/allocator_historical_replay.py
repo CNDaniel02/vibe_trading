@@ -24,31 +24,37 @@ from scripts.replay.allocator_validation_contracts import (
 _NAMESPACE = "ai_instrument_allocator_v1"
 
 
-def _read_jsonl_snapshot(path: Path) -> tuple[list[dict[str, Any]], str | None]:
+def _read_jsonl_snapshot(
+    path: Path,
+) -> tuple[list[dict[str, Any]], str | None, int]:
     if not path.is_file():
-        return [], None
+        return [], None, 0
     payload = path.read_bytes()
     rows: list[dict[str, Any]] = []
+    parse_errors = 0
     for line in payload.decode("utf-8-sig").splitlines():
         if not line.strip():
             continue
         try:
             value = json.loads(line)
         except json.JSONDecodeError:
+            parse_errors += 1
             continue
         if isinstance(value, dict):
             rows.append(value)
-    return rows, hashlib.sha256(payload).hexdigest()
+        else:
+            parse_errors += 1
+    return rows, hashlib.sha256(payload).hexdigest(), parse_errors
 
 
 def _record_time(record: dict[str, Any]):
     fill = record.get("fill") if isinstance(record.get("fill"), dict) else {}
     for raw in (
+        fill.get("filled_at"),
         record.get("decision_time"),
         record.get("data_cutoff_time"),
-        record.get("ts"),
         record.get("asof"),
-        fill.get("filled_at"),
+        record.get("ts"),
     ):
         if raw:
             try:
@@ -74,13 +80,6 @@ def _recent(
 
 def _path_key(path: str | Path) -> str:
     return str(Path(path).resolve()).lower()
-
-
-def _record_snapshot_path(record: dict[str, Any]) -> str | None:
-    reference = record.get("evidence_snapshot")
-    if not isinstance(reference, dict) or not reference.get("path"):
-        return None
-    return _path_key(str(reference["path"]))
 
 
 def _candidate_records(cycles: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -196,12 +195,15 @@ def run_natural_strict_replay(
     current = parse_ts(asof)
     log_dir = root_path / "logs" / "strategy_sleeves" / _NAMESPACE
     captured_hashes: dict[str, str] = {}
+    capture_parse_errors: Counter[str] = Counter()
 
     def capture(name: str) -> list[dict[str, Any]]:
         path = log_dir / name
-        rows, digest = _read_jsonl_snapshot(path)
+        rows, digest, parse_errors = _read_jsonl_snapshot(path)
         if digest is not None:
             captured_hashes[str(path.resolve())] = digest
+        if parse_errors:
+            capture_parse_errors[name] += parse_errors
         return rows
 
     cycles_all = capture("cycles.jsonl")
@@ -249,6 +251,8 @@ def run_natural_strict_replay(
     fills = _recent(fills_all, cutoff=window_start, asof=current)
 
     rejections: Counter[str] = Counter()
+    for name, count in capture_parse_errors.items():
+        rejections[f"input_parse_error: {name}"] += count
     source_violations: list[dict[str, Any]] = []
     invalid_time_snapshot_paths: set[str] = set()
     admissible_paths: set[str] = set()
@@ -387,13 +391,12 @@ def run_natural_strict_replay(
             reason = str(allocation.get("reason") or "unspecified")
             rejections[f"allocation: {reason}"] += 1
 
-    selected_plan_ids = {
-        str(allocation.get("plan_id") or "")
+    selected_allocations = {
+        str(allocation.get("allocation_id") or ""): allocation
         for allocation in admissible_allocations
-        if allocation.get("status") == "selected"
+        if allocation.get("status") == "selected" and allocation.get("allocation_id")
     }
-    order_ids: set[str] = set()
-    order_count = 0
+    order_times: dict[str, Any] = {}
     for cycle in cycles:
         for execution in cycle.get("executions") or []:
             if not isinstance(execution, dict):
@@ -402,24 +405,58 @@ def run_natural_strict_replay(
             order = execution.get("order")
             if not isinstance(allocation, dict) or not isinstance(order, dict):
                 continue
-            if str(allocation.get("plan_id") or "") not in selected_plan_ids:
+            allocation_id = str(allocation.get("allocation_id") or "")
+            admitted_allocation = selected_allocations.get(allocation_id)
+            if admitted_allocation is None:
+                rejections["lineage: order_without_selected_allocation"] += 1
                 continue
-            order_count += 1
-            if order.get("order_id"):
-                order_ids.add(str(order["order_id"]))
-    admitted_fills = [
-        record
-        for record in fills
-        if str(
-            (
-                record.get("fill")
-                if isinstance(record.get("fill"), dict)
-                else record
-            ).get("order_id")
-            or ""
-        )
-        in order_ids
-    ]
+            allocation_cutoff = admitted_allocation.get(
+                "data_cutoff_time"
+            ) or admitted_allocation.get("decision_time")
+            order_validation = validate_point_in_time_snapshot(
+                {
+                    "decision_time": allocation_cutoff,
+                    "data_cutoff_time": allocation_cutoff,
+                    "order": order,
+                },
+                replay_asof=current.isoformat(),
+            )
+            if not order_validation["valid"]:
+                for violation in order_validation["violations"]:
+                    rejections[f"point_in_time: {violation['reason']}"] += 1
+                continue
+            order_id = str(order.get("order_id") or "")
+            raw_created_at = order.get("created_at") or order.get("submitted_at")
+            if not order_id or not raw_created_at:
+                rejections["lineage: incomplete_order_identity"] += 1
+                continue
+            try:
+                created_at = parse_ts(str(raw_created_at))
+                allocation_time = parse_ts(str(allocation_cutoff))
+            except (TypeError, ValueError):
+                rejections["lineage: invalid_order_timestamp"] += 1
+                continue
+            if created_at < allocation_time or created_at > current:
+                rejections["lineage: order_timestamp_out_of_sequence"] += 1
+                continue
+            order_times[order_id] = created_at
+
+    admitted_fill_keys: set[tuple[str, str]] = set()
+    for record in fills:
+        fill = record.get("fill") if isinstance(record.get("fill"), dict) else record
+        order_id = str(fill.get("order_id") or "")
+        raw_filled_at = fill.get("filled_at")
+        if order_id not in order_times or not raw_filled_at:
+            continue
+        try:
+            filled_at = parse_ts(str(raw_filled_at))
+        except (TypeError, ValueError):
+            rejections["lineage: invalid_fill_timestamp"] += 1
+            continue
+        if filled_at < order_times[order_id] or filled_at > current:
+            rejections["lineage: fill_timestamp_out_of_sequence"] += 1
+            continue
+        admitted_fill_keys.add((order_id, filled_at.isoformat()))
     actions = Counter(
         str((record.get("signal") or {}).get("action") or "no_trade")
         for record in admissible_decisions
@@ -437,8 +474,8 @@ def run_natural_strict_replay(
             allocation.get("status") == "selected"
             for allocation in admissible_allocations
         ),
-        "paper_orders": order_count,
-        "paper_fills": len(admitted_fills),
+        "paper_orders": len(order_times),
+        "paper_fills": len(admitted_fill_keys),
     }
     strict_funnel = funnel_with_conversion(counts)
     strict_funnel["conversion_rates"].update(
@@ -488,6 +525,7 @@ def run_natural_strict_replay(
         "strict_funnel": strict_funnel,
         "rejection_reasons": dict(sorted(rejections.items())),
         "time_validation": {
+            "time_violation_count": 0,
             "source_violation_count": len(invalid_time_snapshot_paths),
             "admitted_violation_count": 0,
             "excluded_snapshot_count": len(snapshots) - len(admissible_paths),
@@ -506,6 +544,8 @@ def run_natural_strict_replay(
             "mode": "single_read_in_memory",
             "jsonl_file_count": len(captured_hashes),
             "jsonl_hashes": dict(sorted(captured_hashes.items())),
+            "parse_error_count": sum(capture_parse_errors.values()),
+            "parse_errors_by_file": dict(sorted(capture_parse_errors.items())),
         },
         "issue_3_observed_funnel": policy_report["observed_audit_funnel"],
         "issue_3_policy_replay": {
@@ -523,7 +563,7 @@ def run_natural_strict_replay(
         },
         "model_calls": 0,
         "historical_orders_created_by_replay": 0,
-        "recorded_historical_orders_observed": order_count,
+        "recorded_historical_orders_observed": len(order_times),
         "live_broker_write_calls": 0,
         "live_order_tools_called": False,
         "historical_performance_available": False,

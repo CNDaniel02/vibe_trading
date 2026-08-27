@@ -115,11 +115,11 @@ Synthetic option sensitivity is never displayed as executable option PnL.
 ## Acceptance Evidence
 
 - all three golden fixtures complete the production path and close with PnL;
-- strict replay has `time_violation_count == 0` after exclusions;
+- strict replay has admitted `time_violation_count == 0` after exclusions and
+  reports excluded source violations separately;
 - validation records no live broker write calls;
 - before/after hashes show the forward allocator state/logs were not changed by
   validation commands;
 - full local pytest and GitHub Actions pass;
 - desktop and mobile Dashboard checks show no overflow or console errors;
 - reports explicitly label functional, historical, and forward evidence.
-

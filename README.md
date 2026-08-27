@@ -85,6 +85,14 @@ read-only scans and technical top 8 + Exa evidence
         -> separate short_equity_counterfactual shadow benchmark
 ```
 
+The allocator also has an independent historical validation plane. Golden
+fixtures use the production allocator, paper broker, fill WAL, mandate, exit,
+and PnL paths inside temporary roots. Natural strict replay reads frozen
+point-in-time evidence only, records input hashes, excludes post-cutoff data,
+and never calls a model or broker. Functional liveness, historical diagnostic
+evidence, and forward paper performance are reported separately. See
+[`references/allocator_historical_validation.md`](references/allocator_historical_validation.md).
+
 `llm_news_drift_v1` is a faster, price-blind experiment:
 
 ```text
@@ -234,6 +242,15 @@ each data-collection stage are written to append-only runtime logs.
 # Read-only allocator policy replay; verifies immutable snapshots and creates no orders
 .\.venv\Scripts\python.exe -m scripts.replay.allocator_policy_replay --root . --hours 48
 
+# Isolated production-path liveness for equity, call, and put fixtures
+.\.venv\Scripts\python.exe -m scripts.replay.allocator_functional_replay --root .
+
+# Strict point-in-time historical funnel; --asof is intentionally mandatory
+.\.venv\Scripts\python.exe -m scripts.replay.allocator_historical_replay --root . --project-root . --hours 48 --asof 2026-08-26T18:13:07+00:00
+
+# Evidence-separated report consumed by Dashboard; reports/*.json is ignored
+.\.venv\Scripts\python.exe -m scripts.replay.allocator_validation_report --project-root . --data-root . --hours 48 --asof 2026-08-26T18:13:07+00:00 --output reports/allocator_validation_latest.json
+
 # Performance report
 .\.venv\Scripts\python.exe -m scripts.evaluation.generate_performance_report --root .
 
@@ -247,7 +264,10 @@ each data-collection stage are written to append-only runtime logs.
 The dashboard is a five-view read-only control center:
 
 - `总览` separates the legacy `$2,000` ledger from the independent `$10,000`
-  allocator sleeve and shows current blockers before historical incidents.
+  allocator sleeve and shows current blockers before historical incidents. It
+  also separates functional liveness, strict historical diagnostics, and real
+  forward paper evidence; incomplete option history is labelled synthetic
+  sensitivity rather than executable PnL.
 - `持仓与订单` keeps positions, open orders, and completed order history
   distinct; completed history is collapsed by default.
 - `策略表现` compares execution mode, account ownership, decisions, entries,

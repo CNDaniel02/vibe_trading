@@ -62,13 +62,13 @@
 
 **Interfaces:**
 - Consumes: immutable snapshot references and linked historical records.
-- Produces: `run_natural_strict_replay(root, hours=48, asof=None) -> dict` with counts, conversions, exclusions, and rejection reasons.
+- Produces: `run_natural_strict_replay(root, hours=48, asof=<required>) -> dict` with counts, conversions, exclusions, and rejection reasons.
 
-- [ ] Write failing tests for late news/quote/option-chain exclusion and absent-value fail-closed behavior.
-- [ ] Write a test proving no historical order/state file is created or modified.
-- [ ] Implement lineage validation and strict funnel calculation.
-- [ ] Keep the Issue #3 observed funnel in a separately named report section.
-- [ ] Run focused replay tests.
+- [x] Write failing tests for late news/quote/option-chain exclusion and absent-value fail-closed behavior.
+- [x] Write a test proving no historical order/state file is created or modified.
+- [x] Implement lineage validation and strict funnel calculation.
+- [x] Keep the Issue #3 observed funnel in a separately named report section.
+- [x] Run focused replay tests.
 
 ### Task 4: Aggregate Report and Dashboard
 
@@ -81,11 +81,11 @@
 **Interfaces:**
 - Produces: a JSON report with `functional_liveness`, `strict_historical_performance`, `walk_forward_readiness`, and `forward_evidence_boundary`.
 
-- [ ] Write failing report and Dashboard state tests for all three evidence lanes.
-- [ ] Implement a CLI that defaults to read-only historical/data audit and requires an explicit flag for temporary golden replay.
-- [ ] Load only a precomputed report in Dashboard request handling.
-- [ ] Add beginner-facing labels that distinguish unavailable executable option PnL from synthetic sensitivity.
-- [ ] Run Dashboard unit tests.
+- [x] Write failing report and Dashboard state tests for all three evidence lanes.
+- [x] Implement a CLI with explicit historical cutoff and optional temporary golden replay.
+- [x] Load only a precomputed report in Dashboard request handling.
+- [x] Add beginner-facing labels that distinguish unavailable executable option PnL from synthetic sensitivity.
+- [x] Run Dashboard unit tests.
 
 ### Task 5: Documentation and Verification
 
@@ -95,7 +95,7 @@
 - Modify: `CHANGELOG.md`
 - Modify: `DEVELOPMENT_LOG.md`
 
-- [ ] Document commands, evidence boundaries, dataset requirements, and interpretation rules.
+- [x] Document commands, evidence boundaries, dataset requirements, and interpretation rules.
 - [ ] Run focused replay tests, then the full pytest suite.
 - [ ] Run functional and natural replay CLIs and verify `time_violation_count == 0` after exclusion and `live_broker_write_calls == 0`.
 - [ ] Compare forward state/log hashes immediately before and after validation.

@@ -1,5 +1,14 @@
 # Development Log
 
+## 2026-08-26 (America/Los_Angeles) - Allocator 独立历史验证体系
+
+- 新增三个彼此隔离的证据层。`bullish_equity`、`bullish_call`、`bearish_put` golden fixtures 使用正式 allocator、instrument comparison、deterministic risk、股票/期权 paper broker、fill WAL、position mandate、monitor、exit 和 PnL attribution，但全部写入自动删除的临时 root；3/3 场景通过，真实 broker write calls 为 0。这只证明 functional liveness，不作为盈利证据。
+- 新增只读 natural strict replay。命令强制显式 `asof`，单次读取并 hash JSONL，验证 immutable snapshot/path/reference hash，按 snapshot lineage 连接 candidate、deep research、decision、proposal、plan、allocation、observed order 和 fill；late、missing、tampered 或断链记录 fail closed，不调用 LLM/current adapter/broker，不创建或改写历史订单。
+- 实测截至 `2026-08-26T18:13:07Z` 的 48 小时数据：observed 为 `56 → 44 → 17 → 18 decisions → 8 proposals → 6 allocations → 1 selected → 1 order/fill`；strict unique lineage 为 `32 → 25 → 12 → 12 decisions → 6 proposals → 5 allocations → 1 selected → 1 observed order/fill`。24 份含 cutoff 后 observation 的 snapshot 被排除，admitted `time_violation_count=0`。
+- 新增历史数据完整性审计和 expanding/rolling walk-forward partition contract。当前 snapshots 缺 corporate-action-safe OHLCV 和完整 PIT option chain，因此不能声称 executable equity/option historical PnL；只允许 synthetic option sensitivity。历史 LLM 输出始终标为 diagnostic/comparative evidence。
+- 新增 version manifest，保存 strategy/prompt/schema/config/source hashes、provider、model id、显式 data cutoff 和输入 dataset hashes。聚合报告分开输出 functional、historical 和 forward evidence，并禁止写入 `state/` 或 `logs/`。
+- Dashboard 总览新增面向初学者的“三种证据不要混淆”区域；功能跑通、历史数据可用性和真实 forward paper 结果独立显示。报告生成时现有 `$10,000` sleeve 为 0 个 closed trades、1 个 open position、realized PnL `$0.00`，仍为 `insufficient_forward_evidence`。
+
 ## 2026-08-26 (America/Los_Angeles) - Issue #3 allocator proposal recall
 
 - 冻结读取 `2026-08-24T08:16:12Z` 至 `2026-08-26T08:16:12Z` 的真实 append-only 日志和 58 份不可变 snapshot。observed audit 漏斗为 `56 candidates → 40 ranking inputs → 20 deep research → 22 structured decisions（含 2 次盘前更新）→ 2 proposals → 1 allocation → 0 selected instruments → 0 orders/fills`；根因仍在 cooldown 与研究/提案转换，不在 paper broker。两份 proposal 是盘中 XPEV 与夜间 INTU；XPEV 的 signed direction 不足，INTU 在窗口结束时仍是等待次日执行门的 conditional plan。
