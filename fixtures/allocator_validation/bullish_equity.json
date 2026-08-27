@@ -1,0 +1,55 @@
+{
+  "scenario_id": "bullish_equity",
+  "ticker": "AAPL",
+  "company_name": "Apple Inc.",
+  "expected_instrument": "equity",
+  "times": {
+    "overnight": "2026-07-13T00:00:00+00:00",
+    "premarket_update": "2026-07-13T12:00:00+00:00",
+    "preopen_revalidation": "2026-07-13T13:25:00+00:00",
+    "open_execution": "2026-07-13T13:32:00+00:00",
+    "exit": "2026-07-14T19:50:00+00:00"
+  },
+  "event": {
+    "headline": "Apple raises full-year guidance",
+    "published_at": "2026-07-12T23:30:00+00:00",
+    "event_at": "2026-07-12T23:25:00+00:00",
+    "first_seen_at": "2026-07-12T23:31:00+00:00",
+    "retrieved_at": "2026-07-13T00:00:00+00:00",
+    "source": "company.example",
+    "source_tier": 1,
+    "ticker_relevance": 1.0,
+    "direction": "positive",
+    "novelty": 0.95,
+    "already_priced_in": false,
+    "confidence": 0.9,
+    "url": "https://company.example/investors/guidance",
+    "highlights": ["Full-year revenue guidance increased."]
+  },
+  "probability_buckets": {
+    "return_lt_minus_5_pct": 0.01,
+    "return_minus_5_to_minus_2_pct": 0.01,
+    "return_minus_2_to_minus_0_5_pct": 0.03,
+    "return_minus_0_5_to_plus_0_5_pct": 0.05,
+    "return_plus_0_5_to_plus_2_pct": 0.05,
+    "return_plus_2_to_plus_5_pct": 0.45,
+    "return_gt_plus_5_pct": 0.4
+  },
+  "research_quote": {
+    "bid": 99.99,
+    "ask": 100.01,
+    "last": 100.0,
+    "avg_daily_volume_usd": 500000000
+  },
+  "entry_quote": {
+    "bid": 99.99,
+    "ask": 100.01,
+    "last": 100.0
+  },
+  "exit_quote": {
+    "bid": 102.0,
+    "ask": 102.02,
+    "last": 102.01
+  },
+  "option": null
+}
