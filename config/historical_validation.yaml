@@ -1,0 +1,60 @@
+strategy: ai_instrument_allocator_v1
+schema_version: allocator-historical-validation-v1
+
+functional_replay:
+  scenarios:
+    - bullish_equity
+    - bullish_call
+    - bearish_put
+  write_scope: temporary_root_only
+
+natural_strict_replay:
+  default_window_hours: 48
+  require_explicit_asof: true
+  recorded_llm_outputs_only: true
+  allow_current_data_fallback: false
+  allow_historical_order_creation: false
+  require_explicit_snapshot_cutoff: true
+  allow_exact_linked_decision_cutoff_for_legacy_snapshots: true
+  reject_duplicate_lineage_ids: true
+  require_decision_plan_identity_binding: true
+
+data_completeness:
+  equity:
+    require_point_in_time_bid_ask: true
+    require_corporate_action_safe_ohlcv: true
+    require_complete_ohlcv_coverage_declaration: true
+  options:
+    require_complete_chain_declaration: true
+    require_expiration_and_strike_coverage: true
+    require_coverage_provenance: true
+    require_pagination_complete: true
+    require_request_id_or_dataset_hash: true
+    required_contract_fields:
+      - bid
+      - ask
+      - implied_volatility
+      - delta
+      - gamma
+      - theta
+      - vega
+      - volume
+      - open_interest
+      - updated_at
+
+walk_forward:
+  supported_modes:
+    - expanding
+    - rolling
+  require_matured_labels: true
+  partitions:
+    - development
+    - calibration
+    - final_holdout
+
+claim_policy:
+  historical_llm_replay_is_diagnostic_only: true
+  require_point_in_time_equity_bid_ask: true
+  require_corporate_action_safe_ohlcv: true
+  require_complete_point_in_time_option_chain: true
+  incomplete_options_claim: synthetic_option_sensitivity_only

@@ -577,6 +577,9 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                         "snapshot": snapshot,
                         "ranking": ranking,
                         "evidence_snapshot": evidence_snapshot,
+                        "source_decision_id": record["snapshot_id"],
+                        "decision_time": snapshot["decision_time"],
+                        "data_cutoff_time": snapshot["data_cutoff_time"],
                     },
                     reason="replaced by incremental premarket analysis",
                     now=snapshot["decision_time"],
@@ -690,6 +693,9 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                         "preopen_revalidated_at": effective_time,
                         "snapshot": snapshot,
                         "evidence_snapshot": evidence_snapshot,
+                        "source_decision_id": assessment["snapshot_id"],
+                        "decision_time": snapshot["decision_time"],
+                        "data_cutoff_time": snapshot["data_cutoff_time"],
                         "updated_at": effective_time,
                         "revalidation": {
                             "decision_time": effective_time,
@@ -1138,6 +1144,9 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
                     "snapshot": snapshot,
                     "ranking": rank,
                     "evidence_snapshot": item["evidence_snapshot"],
+                    "source_decision_id": record["snapshot_id"],
+                    "decision_time": snapshot["decision_time"],
+                    "data_cutoff_time": snapshot["data_cutoff_time"],
                 }
             )
             plans.append(plan)

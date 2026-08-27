@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import re
 import sqlite3
 
+import pytest
 import yaml
 
 import scripts.dashboard.paper_dashboard as dashboard
@@ -1310,3 +1312,167 @@ def test_beginner_dashboard_contains_rolling_opportunity_funnel() -> None:
     assert "观察 Watch" in _BEGINNER_PAGE
     assert "旧规则 → 新规则" in _BEGINNER_PAGE
     assert "估计" in _BEGINNER_PAGE
+
+
+def test_dashboard_separates_functional_historical_and_forward_evidence(
+    paper_root: Path,
+) -> None:
+    report_path = paper_root / "reports" / "allocator_validation_latest.json"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    schema_dir = paper_root / "schemas"
+    schema_dir.mkdir(parents=True, exist_ok=True)
+    source_schema = (
+        Path(__file__).resolve().parents[1]
+        / "schemas"
+        / "allocator_historical_validation_report.schema.json"
+    )
+    (schema_dir / source_schema.name).write_bytes(source_schema.read_bytes())
+    report_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "allocator-historical-validation-v1",
+                "strategy": "ai_instrument_allocator_v1",
+                "generated_at": "2026-08-26T20:00:00+00:00",
+                    "functional_liveness": {
+                        "status": "passed",
+                        "summary": {"passed": 3, "scenario_count": 3},
+                        "scenarios": [
+                            {"scenario_id": value}
+                            for value in (
+                                "bullish_equity",
+                                "bullish_call",
+                                "bearish_put",
+                            )
+                        ],
+                        "historical_performance_claimed": False,
+                    "forward_performance_claimed": False,
+                },
+                "historical_performance": {
+                    "evidence_type": "strict_historical_diagnostic",
+                    "historical_performance_available": False,
+                    "strict_funnel": {
+                        "counts": {
+                            "candidates": 12,
+                            "proposals": 2,
+                            "paper_fills": 1,
+                        },
+                        "conversion_rates": {},
+                        "outcome_rates": {},
+                    },
+                    "time_validation": {
+                        "time_violation_count": 0,
+                        "source_violation_count": 0,
+                        "admitted_violation_count": 0,
+                    },
+                    "data_completeness": {
+                        "equity": {},
+                        "options": {"executable_pnl_claim_allowed": False},
+                        "allowed_claims": ["synthetic_option_sensitivity"],
+                    },
+                    "manifest": {
+                        "strategy_version": "test",
+                        "prompt_version": "test",
+                        "schema_version": "allocator-historical-validation-v1",
+                        "config_hashes": {},
+                        "model_id": "test",
+                        "data_cutoff": "2026-08-26T20:00:00+00:00",
+                        "manifest_hash": "test",
+                    },
+                    "llm_replay": {
+                        "mode": "recorded_outputs_only",
+                        "strategy_reexecution_performed": False,
+                        "diagnostic_only": True,
+                        "current_model_profitability_proof": False,
+                    },
+                    "historical_orders_created_by_replay": 0,
+                    "live_broker_write_calls": 0,
+                    "live_order_tools_called": False,
+                },
+                "forward_evidence": {
+                    "evidence_type": "forward_paper_evidence",
+                    "source": "existing isolated paper sleeve",
+                    "profitability_claim": "insufficient_forward_evidence",
+                    "closed_trade_count": 4,
+                    "realized_pnl_usd": -12.5,
+                },
+                "walk_forward_readiness": {
+                    "status": "blocked",
+                    "supported_modes": ["expanding", "rolling"],
+                    "partition_contract_requires_separation": True,
+                    "partition_contract_requires_matured_labels": True,
+                    "development_calibration_holdout_separated": False,
+                    "matured_labels_only": False,
+                    "labeled_dataset_provided": False,
+                    "labeled_record_count": 0,
+                    "horizons": [],
+                    "actual_partitions_run": False,
+                    "leakage_checks_run": False,
+                    "equity_executable_backtest_ready": False,
+                    "option_executable_pnl_ready": False,
+                    "synthetic_option_sensitivity_allowed": True,
+                    "blockers": ["missing_point_in_time_labeled_outcome_dataset"],
+                    "limitations": ["incomplete_historical_option_chain"],
+                    "claim_boundary": "No historical profitability claim is allowed.",
+                },
+                "evidence_boundaries": {
+                    "functional_liveness": "liveness only",
+                    "historical_performance": "diagnostic only",
+                    "forward_evidence": "forward only",
+                },
+                "acceptance": {
+                    "time_violation_count": 0,
+                    "admitted_time_violation_count": 0,
+                    "historical_orders_created": 0,
+                    "live_broker_write_calls": 0,
+                    "functional_source_root_unchanged": True,
+                    "forward_state_logs_unchanged": True,
+                    "forward_protected_file_count": 0,
+                    "forward_protected_scope": (
+                        "all files under allocator state, allocator logs, and immutable snapshots"
+                    ),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    validation = build_dashboard_state(paper_root)["allocator_validation"]
+
+    assert [line["key"] for line in validation["evidence_lines"]] == [
+        "functional_liveness",
+        "historical_performance",
+        "forward_evidence",
+    ]
+    assert validation["evidence_lines"][0]["status"] == "passed"
+    assert validation["evidence_lines"][1]["status"] == "diagnostic_only"
+    assert validation["evidence_lines"][2]["status"] == "insufficient_forward_evidence"
+    assert validation["strict_funnel"]["candidates"] == 12
+    assert validation["option_claim"] == "synthetic_option_sensitivity_only"
+    assert validation["walk_forward_readiness"]["status"] == "blocked"
+
+
+def test_dashboard_never_executes_allocator_policy_replay_on_request(
+    paper_root,
+    monkeypatch,
+) -> None:
+    import scripts.replay.allocator_policy_replay as replay_module
+
+    monkeypatch.setattr(
+        replay_module,
+        "run_allocator_policy_replay",
+        lambda *_args, **_kwargs: pytest.fail("dashboard must not execute replay"),
+    )
+
+    state = build_dashboard_state(paper_root)
+
+    assert "trade_funnel" in state
+
+
+def test_beginner_dashboard_explains_validation_evidence_boundaries() -> None:
+    assert "三种证据不要混淆" in _BEGINNER_PAGE
+    assert "功能能跑通、历史数据表现、真实向前模拟是三件不同的事" in _BEGINNER_PAGE
+    assert "synthetic option sensitivity" in _BEGINNER_PAGE
+    assert "不能把它当成期权历史 PnL" in _BEGINNER_PAGE
+    assert "保守情景估计（非成交 PnL）" in _BEGINNER_PAGE
+    assert "Walk-forward 收益验证尚未开始" in _BEGINNER_PAGE
+    assert "缺少带成熟结果标签的历史样本" in _BEGINNER_PAGE

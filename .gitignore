@@ -24,6 +24,7 @@ dist/
 logs/
 state/
 output/
+reports/*.json
 graphify-out/
 references/TradingAgents/
 *.log

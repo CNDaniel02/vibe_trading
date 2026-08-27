@@ -19,13 +19,15 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from jsonschema import Draft202012Validator, FormatChecker
+from jsonschema.exceptions import SchemaError, ValidationError
+
 from scripts.core.config import load_runtime_config
 from scripts.core.models import parse_ts, utc_now
 from scripts.decision.signed_return_signal import derive_signal_summary
 from scripts.runtime.process_lock import ProcessLock
 from scripts.evaluation.calculate_metrics import calculate_metrics
 from scripts.evaluation.evaluate_news_drift import calculate_news_drift_metrics
-from scripts.replay.allocator_policy_replay import run_allocator_policy_replay
 from scripts.strategies.allocator_policy import normalize_allocator_challenge
 from scripts.strategies.allocator_state import AllocatorStateStore
 
@@ -164,47 +166,147 @@ def _safe_news_drift_metrics(root: Path) -> dict[str, Any]:
         }
 
 
-@lru_cache(maxsize=8)
-def _cached_allocator_policy_replay(
-    root_text: str,
-    signature: tuple[tuple[str, int | None, int | None], ...],
-) -> dict[str, Any]:
-    del signature
-    return run_allocator_policy_replay(Path(root_text), hours=48)
-
-
-def _safe_allocator_policy_replay(
-    root: Path,
-    namespace: str,
-    fallback: dict[str, Any],
-) -> dict[str, Any]:
-    """Recompute only when append-only allocator inputs change; never write state."""
+def _read_allocator_validation_report(root: Path) -> dict[str, Any]:
+    """Load only a precomputed, schema-valid allocator validation report."""
     try:
         resolved = root.resolve()
-        log_dir = resolved / "logs" / "strategy_sleeves" / namespace
-        signature = _file_signature(
-            [
-                log_dir / "cycles.jsonl",
-                log_dir / "decisions.jsonl",
-                log_dir / "allocations.jsonl",
-                log_dir / "paper_fills.jsonl",
-                log_dir / "paper_option_fills.jsonl",
-                resolved / "logs" / "ai_instrument_allocator_snapshots",
-            ]
+        report = _read_json(
+            resolved / "reports" / "allocator_validation_latest.json",
+            {},
         )
-        report = _cached_allocator_policy_replay(str(resolved), signature)
         if not isinstance(report, dict):
-            raise TypeError("allocator policy replay must return an object")
+            raise TypeError("allocator validation report must be an object")
+        schema = _read_json(
+            Path(__file__).resolve().parents[2]
+            / "schemas"
+            / "allocator_historical_validation_report.schema.json",
+            {},
+        )
+        if not isinstance(schema, dict) or not schema:
+            raise ValueError("allocator validation schema is unavailable")
+        Draft202012Validator(
+            schema,
+            format_checker=FormatChecker(),
+        ).validate(report)
         return report
     except (
         OSError,
         json.JSONDecodeError,
+        SchemaError,
+        ValidationError,
         AttributeError,
         TypeError,
         ValueError,
         KeyError,
     ):
-        return fallback
+        return {}
+
+
+def _allocator_policy_replay_from_validation(
+    report: dict[str, Any],
+) -> dict[str, Any]:
+    historical = _as_dict(report.get("historical_performance"))
+    policy = _as_dict(historical.get("issue_3_policy_replay"))
+    observed = _as_dict(historical.get("issue_3_observed_funnel"))
+    if not policy or not observed:
+        return {}
+    return {
+        "window_hours": historical.get("window_hours"),
+        "window_started_at": historical.get("window_started_at"),
+        "asof": historical.get("asof"),
+        "observed_audit_funnel": observed,
+        **policy,
+    }
+
+
+def _allocator_validation_view(
+    report: dict[str, Any],
+    allocator_metrics: dict[str, Any] | None,
+) -> dict[str, Any]:
+    functional = _as_dict(report.get("functional_liveness"))
+    historical = _as_dict(report.get("historical_performance"))
+    forward = _as_dict(report.get("forward_evidence"))
+    time_validation = _as_dict(historical.get("time_validation"))
+    strict_counts = _as_dict(_as_dict(historical.get("strict_funnel")).get("counts"))
+    completeness = _as_dict(historical.get("data_completeness"))
+    walk_forward = _as_dict(report.get("walk_forward_readiness"))
+    options = _as_dict(completeness.get("options"))
+    metrics = _as_dict(allocator_metrics)
+    if not forward:
+        closed = int(metrics.get("closed_trade_count") or 0)
+        forward = {
+            "evidence_type": "forward_paper_evidence",
+            "available": bool(metrics),
+            "closed_trade_count": closed,
+            "realized_pnl_usd": metrics.get("realized_pnl"),
+            "profitability_claim": (
+                "forward_evidence_sufficient"
+                if metrics.get("evidence_sufficient") is True
+                else "insufficient_forward_evidence"
+            ),
+        }
+    functional_status = str(functional.get("status") or "not_run")
+    historical_status = (
+        "performance_ready"
+        if historical.get("historical_performance_available") is True
+        else "diagnostic_only"
+        if historical
+        else "not_generated"
+    )
+    forward_status = str(
+        forward.get("profitability_claim") or "insufficient_forward_evidence"
+    )
+    return {
+        "report_available": bool(report),
+        "generated_at": report.get("generated_at"),
+        "evidence_lines": [
+            {
+                "key": "functional_liveness",
+                "title": "功能闭环",
+                "status": functional_status,
+                "detail": (
+                    f"固定场景通过 {int(_as_dict(functional.get('summary')).get('passed') or 0)} / "
+                    f"{int(_as_dict(functional.get('summary')).get('scenario_count') or 0)}；"
+                    "只证明正式路径能运行，不证明盈利。"
+                ),
+            },
+            {
+                "key": "historical_performance",
+                "title": "严格历史证据",
+                "status": historical_status,
+                "detail": (
+                    f"候选 {int(strict_counts.get('candidates') or 0)}，提案 "
+                    f"{int(strict_counts.get('proposals') or 0)}，成交 "
+                    f"{int(strict_counts.get('paper_fills') or 0)}；因时点证据不合格排除 "
+                    f"{int(time_validation.get('excluded_snapshot_count') or 0)} 份 snapshot，"
+                    "纳入记录的未来数据违规 "
+                    f"{int(time_validation.get('admitted_violation_count') or 0)}。"
+                ),
+            },
+            {
+                "key": "forward_evidence",
+                "title": "真实向前模拟",
+                "status": forward_status,
+                "detail": (
+                    f"已平仓 {int(forward.get('closed_trade_count') or 0)} 笔，"
+                    f"已实现 PnL {forward.get('realized_pnl_usd')}；"
+                    "这是当前模型盈利判断的唯一直接证据。"
+                ),
+            },
+        ],
+        "strict_funnel": strict_counts,
+        "time_validation": time_validation,
+        "data_completeness": completeness,
+        "walk_forward_readiness": walk_forward,
+        "option_claim": (
+            "executable_option_pnl"
+            if options.get("executable_pnl_claim_allowed") is True
+            else "synthetic_option_sensitivity_only"
+        ),
+        "functional": functional,
+        "historical": historical,
+        "forward": forward,
+    }
 
 
 def _read_jsonl(path: Path, limit: int = 400) -> list[dict[str, Any]]:
@@ -1626,10 +1728,10 @@ def build_dashboard_state(root: str | Path) -> dict[str, Any]:
             {},
         )
     )
-    allocator_policy_replay = _safe_allocator_policy_replay(
-        root_path,
-        allocator_namespace,
-        allocator_policy_replay_artifact,
+    allocator_validation_report = _read_allocator_validation_report(root_path)
+    allocator_policy_replay = (
+        _allocator_policy_replay_from_validation(allocator_validation_report)
+        or allocator_policy_replay_artifact
     )
     short_counterfactuals = _read_jsonl(
         allocator_log_dir / "short_equity_counterfactual.jsonl",
@@ -1638,6 +1740,15 @@ def build_dashboard_state(root: str | Path) -> dict[str, Any]:
     account = _as_dict(_read_json(state_dir / "paper_account.json", {}))
     counters = _as_dict(_read_json(state_dir / "daily_counters.json", {}))
     metrics = _safe_metrics(root_path)
+    allocator_metrics = (
+        _safe_metrics(root_path, namespace=allocator_namespace)
+        if allocator_account_exists
+        else None
+    )
+    allocator_validation = _allocator_validation_view(
+        allocator_validation_report,
+        allocator_metrics,
+    )
     beginner_summary = _build_beginner_summary(
         heartbeat=heartbeat,
         account=account,
@@ -1754,6 +1865,7 @@ def build_dashboard_state(root: str | Path) -> dict[str, Any]:
         "metrics": metrics,
         "beginner_summary": beginner_summary,
         "trade_funnel": trade_funnel,
+        "allocator_validation": allocator_validation,
         "last_shadow_decision": last_shadow,
         "latest_catalyst_discovery": catalyst_discovery_records[-1] if catalyst_discovery_records else None,
         "catalyst_decisions": [_safe_catalyst_record(record) for record in catalyst_decision_records[-20:]],
@@ -1803,9 +1915,7 @@ def build_dashboard_state(root: str | Path) -> dict[str, Any]:
             else [],
             "orders": display_allocator_orders,
             "option_orders": display_allocator_option_orders,
-            "metrics": _safe_metrics(root_path, namespace=allocator_namespace)
-            if allocator_account_exists
-            else None,
+            "metrics": allocator_metrics,
             "latest_cycle": allocator_cycles[-1] if allocator_cycles else None,
             "latest_allocation": _safe_allocator_allocation(
                 allocator_allocations[-1]
@@ -2450,6 +2560,25 @@ function strategySummaryRows(state){
   ];
   return rows.map(row=>`<tr><td data-label="策略"><strong>${esc(row.name)}</strong></td><td data-label="状态">${statusBadge(row.mode,row.kind)}</td><td data-label="累计 PnL" class="num ${tone(row.pnl)}">${signedMoney(row.pnl)}</td><td data-label="最近活动" class="muted">${esc(row.activity)}</td></tr>`).join("");
 }
+function validationStatusLabel(status){
+  return ({passed:"已通过",failed:"未通过",not_run:"未运行",performance_ready:"可做收益评估",diagnostic_only:"仅诊断",not_generated:"未生成",forward_evidence_sufficient:"样本已达标",insufficient_forward_evidence:"样本不足"})[status]||status||"未知";
+}
+function validationStatusKind(status){
+  if(["passed","performance_ready","forward_evidence_sufficient"].includes(status))return "good";
+  if(status==="failed")return "bad";
+  return "warn";
+}
+function walkForwardGapLabel(value){
+  return ({missing_point_in_time_labeled_outcome_dataset:"缺少带成熟结果标签的历史样本",incomplete_equity_bid_ask_or_corporate_action_safe_ohlcv:"缺少完整的历史买卖价和公司行为调整 OHLCV",incomplete_historical_option_chain:"缺少当时完整的期权链"})[value]||value;
+}
+function renderValidationEvidence(state){
+  const validation=state.allocator_validation||{},lines=array(validation.evidence_lines);
+  const cards=lines.map(line=>`<div class="definition"><div style="display:flex;justify-content:space-between;gap:10px;align-items:center"><strong>${esc(line.title)}</strong>${statusBadge(validationStatusLabel(line.status),validationStatusKind(line.status))}</div><span>${esc(line.detail)}</span></div>`).join("");
+  const optionCopy=validation.option_claim==="executable_option_pnl"?"历史期权链字段完整，可进入独立的可执行期权回测。":"历史期权链尚不完整：只能看 synthetic option sensitivity（不可执行估算），不能把它当成期权历史 PnL。";
+  const walk=validation.walk_forward_readiness||{},walkBlocked=walk.status==="blocked";
+  const walkCopy=walkBlocked?`Walk-forward 收益验证尚未开始：${array(walk.blockers).map(walkForwardGapLabel).join("；")||"缺少经过时点校验的标签数据"}。`:walk.status==="equity_ready_options_sensitivity_only"?`股票数据可进入 expanding / rolling 分割；期权仍只能做 synthetic sensitivity，完成独立 holdout 后才能报告股票历史表现。`:`Walk-forward 数据已可按 expanding / rolling 分割；仍需完成独立 holdout 后才能报告历史表现。`;
+  return `<section class="section-block"><div class="section-head"><div><h3>三种证据不要混淆</h3><p>功能能跑通、历史数据表现、真实向前模拟是三件不同的事。</p></div><div class="asof">${validation.generated_at?`报告 ${localDateTime(validation.generated_at)}`:"尚未生成验证报告"}</div></div><div class="definition-grid">${cards}</div><div class="clear-state" style="margin-top:12px">${esc(optionCopy)}</div><div class="clear-state" style="margin-top:8px">${esc(walkCopy)}</div></section>`;
+}
 function renderOverview(state){
   const b=state.beginner_summary||{},day=b.day||{},legacy=b.account||{},allocator=state.ai_instrument_allocator||{},allocatorAccount=allocator.account||{},allocatorMetrics=allocator.metrics||{};
   const activity=systemActivity(state),alerts=currentAlerts(state);
@@ -2471,6 +2600,7 @@ function renderOverview(state){
     <section class="section-block"><div class="section-head"><div><h3>最近交易日结果</h3><p>只把已完成买入和卖出的闭环计入当日结果。</p></div><strong class="num ${tone(day.realized_pnl)}">${signedMoney(day.realized_pnl)}</strong></div>
       <div class="table-wrap"><table class="mobile-table"><thead><tr><th>已平仓</th><th>盈利</th><th>亏损</th><th>当前持仓</th><th>评估结论</th></tr></thead><tbody><tr><td data-label="已平仓" class="num">${day.closed_trades||0} 笔</td><td data-label="盈利" class="num good-text">${day.wins||0} 笔</td><td data-label="亏损" class="num bad-text">${day.losses||0} 笔</td><td data-label="当前持仓" class="num">${number(legacy.open_equity_positions)+number(legacy.open_option_positions)} 个</td><td data-label="评估结论">${esc(evidenceConclusion(b.evidence))}</td></tr></tbody></table></div>
     </section>
+    ${renderValidationEvidence(state)}
     <section class="section-block"><div class="section-head"><div><h3>策略状态速览</h3><p>每条策略的账户和交易权限相互区分。</p></div></div><div class="table-wrap"><table class="mobile-table"><thead><tr><th>策略</th><th>当前模式</th><th>累计 PnL</th><th>最近活动</th></tr></thead><tbody>${strategySummaryRows(state)}</tbody></table></div></section>`;
 }
 function localDateTime(value){
@@ -2583,7 +2713,7 @@ function strategyDetailRows(state){
   ];
 }
 function renderOpportunityFunnel(state){
-  const funnel=state.trade_funnel||{},a=funnel.allocator||{},root=funnel.root_cause||{},baselines=funnel.baselines||{},equity=baselines.equity||{},options=baselines.options||{},replay=funnel.replay_comparison||{},oldPolicy=replay.old_policy||{},newPolicy=replay.new_policy||{},observed=replay.observed_audit_funnel||{},comparison=replay.comparison||{},pointInTime=replay.point_in_time||{};
+  const funnel=state.trade_funnel||{},a=funnel.allocator||{},root=funnel.root_cause||{},baselines=funnel.baselines||{},equity=baselines.equity||{},options=baselines.options||{},replay=funnel.replay_comparison||{},oldPolicy=replay.old_policy||{},newPolicy=replay.new_policy||{},observed=replay.observed_audit_funnel||{},comparison=replay.comparison||{},pointInTime=replay.point_in_time||{},legacyCutoff=replay.cutoff_semantics||"legacy diagnostic",strictComparable=replay.comparable_to_strict_funnel===true;
   const steps=[
     {label:"候选被发现",value:a.candidate_reviews,detail:"原始候选；尚未调用深度模型"},
     {label:"进入 AI 排名",value:a.ranking_inputs,detail:"通过 cooldown 后的 ranking input"},
@@ -2596,7 +2726,7 @@ function renderOpportunityFunnel(state){
   const blockers=array(funnel.blockers).slice(0,6).map(item=>`<div class="issue ${item.kind==="bad"?"error":""}"><span class="issue-mark"></span><div><div class="issue-title">${esc(item.label)}</div><div class="issue-copy">${esc(item.explanation)}</div></div><div class="issue-count">${esc(item.count)} 次</div></div>`).join("");
   const proposalExplanation=number(comparison.proposal_delta)===0?"严格回放不会补造缺失的模型判断，也不会把旧版模糊否决猜成新提案，所以可重放子集的 proposal 数不变。":"已有结构化且时间有效的历史结论在新规则下增加了 proposal。";
   const estimatedAvoidable=number(comparison.estimated_avoidable_rank_only_cooldowns);
-  const replayHtml=Object.keys(oldPolicy).length?`<div class="definition-grid"><div class="definition"><strong>旧规则 → 新规则（严格子集）</strong><span>可重放候选 ${esc(oldPolicy.candidates||0)}；进入排名 ${esc(oldPolicy.ranking_input||0)} → ${esc(newPolicy.ranking_input||0)}；Watch ${esc(oldPolicy.watch||0)} → ${esc(newPolicy.watch||0)}；Proposal ${esc(oldPolicy.proposals||0)} → ${esc(newPolicy.proposals||0)}。</span></div><div class="definition"><strong>历史 cooldown 影响估计</strong><span>观察日志显示 ranking input ${esc(observed.ranking_input||0)}；估计有 ${esc(estimatedAvoidable)} 次 rank-only cooldown 可避免。旧日志缺少逐候选关联，不能把该估计写成精确新漏斗。</span></div><div class="definition"><strong>回放证据边界</strong><span>${esc(proposalExplanation)} 排除时间不合格 snapshot ${esc(pointInTime.excluded_snapshot_count||0)} 个；历史订单 ${esc(replay.historical_orders_created||0)}；真实下单工具 ${replay.live_order_tools_called?"曾调用（异常）":"未调用"}。</span></div></div>`:"";
+  const replayHtml=Object.keys(oldPolicy).length?`<div class="definition-grid"><div class="definition"><strong>旧规则 → 新规则（严格子集）</strong><span>可重放候选 ${esc(oldPolicy.candidates||0)}；进入排名 ${esc(oldPolicy.ranking_input||0)} → ${esc(newPolicy.ranking_input||0)}；Watch ${esc(oldPolicy.watch||0)} → ${esc(newPolicy.watch||0)}；Proposal ${esc(oldPolicy.proposals||0)} → ${esc(newPolicy.proposals||0)}。</span></div><div class="definition"><strong>历史 cooldown 影响估计</strong><span>观察日志显示 ranking input ${esc(observed.ranking_input||0)}；估计有 ${esc(estimatedAvoidable)} 次 rank-only cooldown 可避免。旧日志缺少逐候选关联，不能把该估计写成精确新漏斗。</span></div><div class="definition"><strong>回放证据边界</strong><span>${esc(proposalExplanation)} Issue #3 使用 ${esc(legacyCutoff)}，${strictComparable?"已与 strict 口径对齐":"不能与 strict funnel 直接比较"}。排除时间不合格 snapshot ${esc(pointInTime.excluded_snapshot_count||0)} 个；历史订单 ${esc(replay.historical_orders_created||0)}；真实下单工具 ${replay.live_order_tools_called?"曾调用（异常）":"未调用"}。</span></div></div>`:"";
   return `<section class="section-block"><div class="section-head"><div><h3>过去 48 小时观测审计漏斗</h3><p>冻结时间 ${localDateTime(funnel.asof)}；这是实际日志计数，不是严格 point-in-time 回放，候选、观察和提案都不代表订单。</p></div>${statusBadge(root.title||"正在统计",(a.paper_orders||0)>0?"good":"warn")}</div>
     <div class="pipeline opportunity-pipeline">${stepHtml}</div>
     <div class="stat-strip"><div class="stat"><div class="stat-label">硬否决 Hard veto</div><div class="stat-value">${esc(a.hard_veto||0)}</div></div><div class="stat"><div class="stat-label">软顾虑 Soft concern</div><div class="stat-value">${esc(a.soft_concern||0)}</div></div><div class="stat"><div class="stat-label">观察 Watch</div><div class="stat-value">${esc(a.watch||0)}</div></div><div class="stat"><div class="stat-label">交易提案 Proposal</div><div class="stat-value">${esc(a.trade_proposals||0)}</div></div></div>
@@ -2622,7 +2752,7 @@ function renderAiDecisions(state){
   document.getElementById("view-ai").className="";
   document.getElementById("view-ai").innerHTML=`<div class="page-heading"><div><h2>AI 决策</h2><p>模型负责结构化研究；只有确定性 Python 风控可以批准模拟执行。</p></div><div class="asof">私有推理原文不会显示</div></div>
     <section class="section-block"><div class="section-head"><div><h3>决策流水线</h3><p>每一步都使用同一 data cutoff，不允许未来数据。</p></div></div><div class="pipeline"><div class="pipeline-step"><strong>1. 候选</strong><span>技术和事件发现</span></div><div class="pipeline-step"><strong>2. Exa 证据</strong><span>新闻与原始来源</span></div><div class="pipeline-step"><strong>3. DeepSeek</strong><span>结构化方向判断</span></div><div class="pipeline-step"><strong>4. Challenge</strong><span>反证与否决建议</span></div><div class="pipeline-step"><strong>5. Python 风控</strong><span>最终 veto 权</span></div></div></section>
-    <section class="section-block"><div class="section-head"><div><h3>最近一次工具分配</h3><p>$10,000 独立模拟账户与 $2,000 可负担性对照。</p></div>${statusBadge(allocation.status||"暂无分配",allocation.status==="selected"?"good":"warn")}</div><div class="stat-strip"><div class="stat"><div class="stat-label">选中工具</div><div class="stat-value">${esc(selectedLabel)}</div></div><div class="stat"><div class="stat-label">数量</div><div class="stat-value">${esc(selected.quantity??"—")}</div></div><div class="stat"><div class="stat-label">保守情景净收益</div><div class="stat-value ${tone(selected.conservative_net_return_pct)}">${selected.conservative_net_return_pct==null?"—":pct(number(selected.conservative_net_return_pct)*100)}</div></div><div class="stat"><div class="stat-label">概率 EV</div><div class="stat-value">${allocation.probability_ev_available?money(allocation.probability_ev_usd):"未校准，不展示"}</div></div></div></section>
+    <section class="section-block"><div class="section-head"><div><h3>最近一次工具分配</h3><p>$10,000 独立模拟账户与 $2,000 可负担性对照。</p></div>${statusBadge(allocation.status||"暂无分配",allocation.status==="selected"?"good":"warn")}</div><div class="stat-strip"><div class="stat"><div class="stat-label">选中工具</div><div class="stat-value">${esc(selectedLabel)}</div></div><div class="stat"><div class="stat-label">数量</div><div class="stat-value">${esc(selected.quantity??"—")}</div></div><div class="stat"><div class="stat-label">保守情景估计（非成交 PnL）</div><div class="stat-value ${tone(selected.conservative_net_return_pct)}">${selected.conservative_net_return_pct==null?"—":pct(number(selected.conservative_net_return_pct)*100)}</div></div><div class="stat"><div class="stat-label">概率 EV</div><div class="stat-value">${allocation.probability_ev_available?money(allocation.probability_ev_usd):"未校准，不展示"}</div></div></div></section>
     <section class="section-block"><div class="section-head"><div><h3>Allocator 结构化决策</h3><p>最多显示最近 12 条研究结论。</p></div></div><div class="table-wrap"><table class="mobile-table"><thead><tr><th>时间</th><th>股票</th><th>研究阶段</th><th>方向</th><th>期限</th><th>Challenge</th><th>结构化结论</th></tr></thead><tbody>${decisionRows||'<tr><td colspan="7" class="muted">尚无 allocator 决策。</td></tr>'}</tbody></table></div></section>
     <section class="section-block"><div class="section-head"><div><h3>Exa + DeepSeek 催化研究</h3><p>Bull / News、Challenge、Decision 与确定性 Python 风控分栏展示。</p></div></div><div class="table-wrap"><table class="mobile-table"><thead><tr><th>时间</th><th>股票</th><th>Bull / News</th><th>Challenge</th><th>Decision</th><th>Python 风控</th></tr></thead><tbody>${catalystRows||'<tr><td colspan="6" class="muted">尚无新的催化决策。</td></tr>'}</tbody></table></div></section>
     <section class="section-block"><div class="section-head"><div><h3>最近候选排名</h3><p>这是研究入口，不代表已经创建订单。</p></div></div><div class="table-wrap"><table class="mobile-table"><thead><tr><th>股票</th><th>综合分</th><th>入场线</th><th>系统动作</th><th>原因</th></tr></thead><tbody>${candidateRows||'<tr><td colspan="5" class="muted">尚无候选排名。</td></tr>'}</tbody></table></div></section>`;
