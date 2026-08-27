@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -43,6 +44,7 @@ _CONFIG_FILES = (
     "options_execution_costs.yaml",
     "equity_universe.yaml",
     "options_universe.yaml",
+    "historical_validation.yaml",
 )
 _STRATEGY_SOURCE_FILES = (
     "scripts/agents/ai_instrument_allocator_team.py",
@@ -89,6 +91,34 @@ def _canonical_hash(value: Any) -> str:
     return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
 
 
+def verify_immutable_snapshot_file(
+    path: str | Path,
+    *,
+    expected_hash: str | None = None,
+    allowed_root: str | Path | None = None,
+) -> dict[str, Any]:
+    snapshot_path = Path(path).resolve()
+    if allowed_root is not None:
+        root = Path(allowed_root).resolve()
+        if snapshot_path != root and root not in snapshot_path.parents:
+            raise ValueError(f"snapshot path escapes allowed root: {snapshot_path}")
+    value = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"immutable snapshot must be an object: {snapshot_path}")
+    expected = str(value.get("snapshot_hash") or "")
+    unsigned = dict(value)
+    unsigned.pop("snapshot_hash", None)
+    actual = _canonical_hash(unsigned)
+    if (
+        not expected
+        or expected != actual
+        or expected[:12] not in snapshot_path.name
+        or (expected_hash is not None and expected != str(expected_hash))
+    ):
+        raise ValueError(f"snapshot hash mismatch: {snapshot_path}")
+    return value
+
+
 def _field_path(parent: str, child: str) -> str:
     return f"{parent}.{child}" if parent else child
 
@@ -112,6 +142,8 @@ def _observation_times(
 
 def validate_point_in_time_snapshot(
     snapshot: dict[str, Any],
+    *,
+    replay_asof: str | None = None,
 ) -> dict[str, Any]:
     """Validate that every observation was visible by the frozen cutoff."""
     raw_cutoff = snapshot.get("data_cutoff_time") or snapshot.get("decision_time")
@@ -145,6 +177,14 @@ def validate_point_in_time_snapshot(
         }
 
     violations: list[dict[str, Any]] = []
+    if replay_asof is not None and cutoff > parse_ts(replay_asof):
+        violations.append(
+            {
+                "field": "data_cutoff_time",
+                "observed_at": cutoff.isoformat(),
+                "reason": "decision_cutoff_after_replay_asof",
+            }
+        )
     for field, raw_observed in _observation_times(snapshot):
         try:
             observed = parse_ts(str(raw_observed))
@@ -180,6 +220,8 @@ def build_validation_manifest(
     model_id: str,
     dataset_paths: Iterable[str | Path] = (),
     source_revision: str | None = None,
+    provider_id: str = "not_recorded",
+    precomputed_dataset_hashes: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     root = Path(project_root).resolve()
     cutoff = parse_ts(data_cutoff).isoformat()
@@ -213,35 +255,51 @@ def build_validation_manifest(
         str(Path(path).resolve()): _sha256_file(Path(path).resolve())
         for path in dataset_paths
     }
+    datasets.update(
+        {
+            str(Path(path).resolve()): str(digest)
+            for path, digest in (precomputed_dataset_hashes or {}).items()
+        }
+    )
+    prompt_version = str(profile.get("prompt_version") or "not_recorded")
+    source_version = source_revision or "not_recorded"
+    manifest_payload = {
+        "source_revision": source_version,
+        "strategy": strategy_digest,
+        "prompt_version": prompt_version,
+        "prompts": prompt_hashes,
+        "schema_version": VALIDATION_SCHEMA_VERSION,
+        "schemas": schema_hashes,
+        "configs": config_hashes,
+        "provider_id": provider_id,
+        "model_id": model_id,
+        "data_cutoff": cutoff,
+        "datasets": datasets,
+    }
     return {
         "strategy": _STRATEGY,
         "strategy_version": f"{_STRATEGY}@sha256:{strategy_digest}",
-        "source_revision": source_revision or "not_recorded",
-        "prompt_version": str(profile.get("prompt_version") or "not_recorded"),
+        "source_revision": source_version,
+        "prompt_version": prompt_version,
         "prompt_hashes": prompt_hashes,
         "schema_version": VALIDATION_SCHEMA_VERSION,
         "schema_hashes": schema_hashes,
         "config_hashes": config_hashes,
         "strategy_source_hashes": strategy_source_hashes,
+        "provider_id": provider_id,
         "model_id": model_id,
         "data_cutoff": cutoff,
         "dataset_hashes": datasets,
-        "manifest_hash": _canonical_hash(
-            {
-                "strategy": strategy_digest,
-                "prompts": prompt_hashes,
-                "schemas": schema_hashes,
-                "configs": config_hashes,
-                "model_id": model_id,
-                "data_cutoff": cutoff,
-                "datasets": datasets,
-            }
-        ),
+        "manifest_hash": _canonical_hash(manifest_payload),
     }
 
 
 def _missing_value(value: Any) -> bool:
     return value is None or value == ""
+
+
+def _invalid_number(value: Any) -> bool:
+    return isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
 
 
 def assess_market_data_completeness(
@@ -256,6 +314,15 @@ def assess_market_data_completeness(
         for field in _EQUITY_FIELDS:
             if _missing_value(row.get(field)):
                 equity_missing[field] += 1
+        for field in ("bid", "ask"):
+            if not _missing_value(row.get(field)) and _invalid_number(row.get(field)):
+                equity_missing[f"{field}.finite"] += 1
+        if (
+            not _invalid_number(row.get("bid"))
+            and not _invalid_number(row.get("ask"))
+            and (row["bid"] < 0 or row["ask"] <= 0 or row["bid"] > row["ask"])
+        ):
+            equity_missing["bid_ask.valid"] += 1
         ohlcv = row.get("ohlcv")
         if not isinstance(ohlcv, dict):
             equity_missing["ohlcv"] += 1
@@ -273,6 +340,8 @@ def assess_market_data_completeness(
         for field in _OPTION_CHAIN_FIELDS:
             if _missing_value(chain.get(field)):
                 option_missing[field] += 1
+        if chain.get("chain_complete") is not True:
+            option_missing["chain_complete=true"] += 1
         contracts = chain.get("contracts")
         if not isinstance(contracts, list) or not contracts:
             option_missing["contracts[]"] += 1
@@ -284,6 +353,32 @@ def assess_market_data_completeness(
             for field in _OPTION_CONTRACT_FIELDS:
                 if _missing_value(contract.get(field)):
                     option_missing[f"contracts[].{field}"] += 1
+            for field in (
+                "strike_price",
+                "bid",
+                "ask",
+                "implied_volatility",
+                "delta",
+                "gamma",
+                "theta",
+                "vega",
+                "volume",
+                "open_interest",
+            ):
+                if not _missing_value(contract.get(field)) and _invalid_number(
+                    contract.get(field)
+                ):
+                    option_missing[f"contracts[].{field}.finite"] += 1
+            if (
+                not _invalid_number(contract.get("bid"))
+                and not _invalid_number(contract.get("ask"))
+                and (
+                    contract["bid"] < 0
+                    or contract["ask"] <= 0
+                    or contract["bid"] > contract["ask"]
+                )
+            ):
+                option_missing["contracts[].bid_ask.valid"] += 1
 
     equity_ready = not equity_missing
     options_ready = not option_missing

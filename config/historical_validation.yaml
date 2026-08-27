@@ -1,0 +1,33 @@
+strategy: ai_instrument_allocator_v1
+schema_version: allocator-historical-validation-v1
+
+functional_replay:
+  scenarios:
+    - bullish_equity
+    - bullish_call
+    - bearish_put
+  write_scope: temporary_root_only
+
+natural_strict_replay:
+  default_window_hours: 48
+  require_explicit_asof: true
+  recorded_llm_outputs_only: true
+  allow_current_data_fallback: false
+  allow_historical_order_creation: false
+
+walk_forward:
+  supported_modes:
+    - expanding
+    - rolling
+  require_matured_labels: true
+  partitions:
+    - development
+    - calibration
+    - final_holdout
+
+claim_policy:
+  historical_llm_replay_is_diagnostic_only: true
+  require_point_in_time_equity_bid_ask: true
+  require_corporate_action_safe_ohlcv: true
+  require_complete_point_in_time_option_chain: true
+  incomplete_options_claim: synthetic_option_sensitivity_only

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -170,6 +171,7 @@ def test_market_data_completeness_blocks_executable_option_pnl_when_chain_is_inc
             {
                 "underlying": "AAPL",
                 "asof": "2026-07-13T15:00:00+00:00",
+                "chain_complete": True,
                 "contracts": [option],
             }
         ],
@@ -204,6 +206,82 @@ def test_market_data_completeness_requires_corporate_action_safe_ohlcv() -> None
         "ohlcv.corporate_action_safe=true": 1
     }
     assert "executable_option_pnl" not in result["allowed_claims"]
+
+
+def test_snapshot_verification_rejects_path_escape_and_reference_hash_mismatch(
+    tmp_path: Path,
+) -> None:
+    from scripts.replay.allocator_validation_contracts import (
+        verify_immutable_snapshot_file,
+    )
+
+    allowed = tmp_path / "snapshots"
+    allowed.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    payload = {"decision_time": "2026-07-13T15:00:00+00:00"}
+    rendered = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    digest = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+    path = outside / f"snapshot-{digest[:12]}.json"
+    path.write_text(
+        json.dumps({**payload, "snapshot_hash": digest}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="escapes allowed root"):
+        verify_immutable_snapshot_file(path, allowed_root=allowed)
+    with pytest.raises(ValueError, match="hash mismatch"):
+        verify_immutable_snapshot_file(path, expected_hash="0" * 64)
+
+
+def test_manifest_hash_covers_source_revision_and_provider(tmp_path: Path) -> None:
+    from scripts.replay.allocator_validation_contracts import build_validation_manifest
+
+    project_root = Path(__file__).resolve().parents[1]
+    dataset = tmp_path / "snapshot.json"
+    dataset.write_text('{"snapshot_id":"fixed"}\n', encoding="utf-8")
+    first = build_validation_manifest(
+        project_root,
+        data_cutoff="2026-07-13T15:00:00+00:00",
+        model_id="model-a",
+        provider_id="provider-a",
+        dataset_paths=[dataset],
+        source_revision="revision-a",
+    )
+    second = build_validation_manifest(
+        project_root,
+        data_cutoff="2026-07-13T15:00:00+00:00",
+        model_id="model-a",
+        provider_id="provider-b",
+        dataset_paths=[dataset],
+        source_revision="revision-b",
+    )
+
+    assert first["manifest_hash"] != second["manifest_hash"]
+    assert first["provider_id"] == "provider-a"
+
+
+def test_point_in_time_validation_rejects_cutoff_after_replay_asof() -> None:
+    from scripts.replay.allocator_validation_contracts import (
+        validate_point_in_time_snapshot,
+    )
+
+    result = validate_point_in_time_snapshot(
+        {
+            "decision_time": "2026-07-13T15:00:01+00:00",
+            "data_cutoff_time": "2026-07-13T15:00:01+00:00",
+        },
+        replay_asof="2026-07-13T15:00:00+00:00",
+    )
+
+    assert result["valid"] is False
+    assert result["violations"] == [
+        {
+            "field": "data_cutoff_time",
+            "observed_at": "2026-07-13T15:00:01+00:00",
+            "reason": "decision_cutoff_after_replay_asof",
+        }
+    ]
 
 
 @pytest.mark.parametrize("mode", ["expanding", "rolling"])
@@ -310,3 +388,346 @@ def test_funnel_reports_stage_conversions_and_branch_rates() -> None:
     assert result["outcome_rates"]["watch"] == 0.25
     assert result["outcome_rates"]["no_trade"] == 0.375
     assert result["outcome_rates"]["proposal"] == 0.375
+
+
+def _write_jsonl(path: Path, records: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(json.dumps(item, sort_keys=True) + "\n" for item in records),
+        encoding="utf-8",
+    )
+
+
+def _historical_snapshot(
+    root: Path,
+    *,
+    ticker: str,
+    decision_time: str,
+    quote_asof: str | None = None,
+    include_quote: bool = True,
+) -> dict[str, str]:
+    quote = {
+        "symbol": ticker,
+        "bid": 100.0,
+        "ask": 100.02,
+        "last": 100.01,
+        "asof": quote_asof or decision_time,
+    }
+    market_context = {
+        "ohlcv": {
+            "timestamp": decision_time,
+            "open": 99.0,
+            "high": 100.1,
+            "low": 98.9,
+            "close": 100.0,
+            "volume": 1_000_000,
+            "corporate_action_safe": True,
+        }
+    }
+    if include_quote:
+        market_context["quote"] = quote
+    envelope = {
+        "snapshot_type": f"allocator-intraday-{ticker}",
+        "decision_time": decision_time,
+        "retrieved_at": decision_time,
+        "payload": {
+            "candidate": {
+                "ticker": ticker,
+                "market_context": market_context,
+            },
+            "events": [],
+            "source_metadata": [],
+            "agent_snapshot": {
+                "snapshot_id": f"agent-{ticker}",
+                "decision_time": decision_time,
+                "data_cutoff_time": decision_time,
+                "ticker": ticker,
+                "market_data": {"quote": quote} if include_quote else {},
+                "technical_signals": {},
+                "available_news": [],
+                "source_metadata": [],
+            },
+        },
+    }
+    serialized = json.dumps(envelope, separators=(",", ":"), sort_keys=True)
+    snapshot_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    envelope["snapshot_hash"] = snapshot_hash
+    path = (
+        root
+        / "logs"
+        / "ai_instrument_allocator_snapshots"
+        / f"{ticker}-{snapshot_hash[:12]}.json"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(envelope, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return {"path": str(path), "snapshot_hash": snapshot_hash}
+
+
+def _all_file_hashes(root: Path) -> dict[str, str]:
+    return {
+        str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(item for item in root.rglob("*") if item.is_file())
+    }
+
+
+def test_natural_strict_replay_reports_funnel_without_creating_historical_orders(
+    paper_root: Path,
+) -> None:
+    from scripts.replay.allocator_historical_replay import (
+        run_natural_strict_replay,
+    )
+
+    refs = {
+        "AAPL": _historical_snapshot(
+            paper_root,
+            ticker="AAPL",
+            decision_time="2026-07-13T15:00:00+00:00",
+        ),
+        "MSFT": _historical_snapshot(
+            paper_root,
+            ticker="MSFT",
+            decision_time="2026-07-13T15:10:00+00:00",
+        ),
+        "NVDA": _historical_snapshot(
+            paper_root,
+            ticker="NVDA",
+            decision_time="2026-07-13T15:20:00+00:00",
+        ),
+    }
+    log_dir = (
+        paper_root
+        / "logs"
+        / "strategy_sleeves"
+        / "ai_instrument_allocator_v1"
+    )
+    decisions = [
+        {
+            "decision_time": "2026-07-13T15:00:00+00:00",
+            "ticker": "AAPL",
+            "evidence_snapshot": refs["AAPL"],
+            "challenge": {"hard_veto_reasons": [], "soft_concerns": []},
+            "signal": {"action": "watch", "watch_reason": "Wait for confirmation."},
+        },
+        {
+            "decision_time": "2026-07-13T15:10:00+00:00",
+            "ticker": "MSFT",
+            "evidence_snapshot": refs["MSFT"],
+            "challenge": {"hard_veto_reasons": [], "soft_concerns": []},
+            "signal": {"action": "no_trade", "no_trade_reason": "Evidence is ambiguous."},
+        },
+        {
+            "decision_time": "2026-07-13T15:20:00+00:00",
+            "ticker": "NVDA",
+            "evidence_snapshot": refs["NVDA"],
+            "challenge": {"hard_veto_reasons": [], "soft_concerns": []},
+            "signal": {"action": "propose_trade"},
+        },
+    ]
+    _write_jsonl(log_dir / "decisions.jsonl", decisions)
+    candidate_records = [
+        {
+            "ticker": ticker,
+            "evidence_snapshot": reference,
+            "ranking_entered": True,
+            "deep_research": True,
+            "decision_outcome": (
+                "active_plan"
+                if ticker == "NVDA"
+                else "watch"
+                if ticker == "AAPL"
+                else "deep_research_no_trade"
+            ),
+        }
+        for ticker, reference in refs.items()
+    ]
+    _write_jsonl(
+        log_dir / "cycles.jsonl",
+        [
+            {
+                "ts": "2026-07-13T15:21:00+00:00",
+                "funnel": {"candidate_records": candidate_records},
+                "plans": [
+                    {
+                        "plan_id": "plan-nvda",
+                        "ticker": "NVDA",
+                        "evidence_snapshot": refs["NVDA"],
+                    }
+                ],
+                "watches": [{"ticker": "AAPL"}],
+                "executions": [
+                    {
+                        "allocation": {"plan_id": "plan-nvda"},
+                        "order": {"order_id": "paper-order-nvda", "status": "filled"},
+                    }
+                ],
+                "paper_orders_created": 1,
+                "live_order_tools_called": False,
+            }
+        ],
+    )
+    _write_jsonl(
+        log_dir / "allocations.jsonl",
+        [
+            {
+                "decision_time": "2026-07-13T15:20:00+00:00",
+                "data_cutoff_time": "2026-07-13T15:20:00+00:00",
+                "plan_id": "plan-nvda",
+                "allocation_id": "allocation-nvda",
+                "status": "selected",
+                "selected_instrument": {
+                    "instrument_type": "equity",
+                    "ticker": "NVDA",
+                },
+            }
+        ],
+    )
+    _write_jsonl(
+        log_dir / "paper_fills.jsonl",
+        [
+            {
+                "ts": "2026-07-13T15:20:30+00:00",
+                "fill": {
+                    "order_id": "paper-order-nvda",
+                    "symbol": "NVDA",
+                    "side": "buy",
+                    "filled_at": "2026-07-13T15:20:30+00:00",
+                },
+            }
+        ],
+    )
+    before = _all_file_hashes(paper_root)
+
+    report = run_natural_strict_replay(
+        paper_root,
+        hours=48,
+        asof="2026-07-13T15:21:00+00:00",
+        source_revision="test-revision",
+    )
+
+    assert _all_file_hashes(paper_root) == before
+    assert report["strict_funnel"]["counts"] == {
+        "candidates": 3,
+        "ranking_input": 3,
+        "deep_research": 3,
+        "structured_decisions": 3,
+        "watch": 1,
+        "no_trade": 1,
+        "proposals": 1,
+        "allocations": 1,
+        "selected_instruments": 1,
+        "paper_orders": 1,
+        "paper_fills": 1,
+    }
+    assert report["strict_funnel"]["conversion_rates"]["order_to_fill"] == 1.0
+    assert report["rejection_reasons"]["model_no_trade: Evidence is ambiguous."] == 1
+    assert report["time_validation"] == {
+        "source_violation_count": 0,
+        "admitted_violation_count": 0,
+        "excluded_snapshot_count": 0,
+        "by_field": {},
+        "examples": [],
+    }
+    assert report["issue_3_observed_funnel"]["paper_orders"] == 1
+    assert report["historical_orders_created_by_replay"] == 0
+    assert report["recorded_historical_orders_observed"] == 1
+    assert report["model_calls"] == 0
+    assert report["live_broker_write_calls"] == 0
+    assert report["live_order_tools_called"] is False
+    assert report["llm_replay"] == {
+        "mode": "recorded_outputs_only",
+        "diagnostic_only": True,
+        "current_model_profitability_proof": False,
+        "model_calls": 0,
+    }
+    assert report["manifest"]["source_revision"] == "test-revision"
+    assert report["data_completeness"]["equity"]["executable_backtest_ready"] is True
+    assert report["data_completeness"]["options"]["executable_pnl_claim_allowed"] is False
+
+
+def test_natural_strict_replay_excludes_late_and_missing_market_data(
+    paper_root: Path,
+) -> None:
+    from scripts.replay.allocator_historical_replay import (
+        run_natural_strict_replay,
+    )
+
+    late = _historical_snapshot(
+        paper_root,
+        ticker="LATE",
+        decision_time="2026-07-13T15:00:00+00:00",
+        quote_asof="2026-07-13T15:00:01+00:00",
+    )
+    missing = _historical_snapshot(
+        paper_root,
+        ticker="MISS",
+        decision_time="2026-07-13T15:10:00+00:00",
+        include_quote=False,
+    )
+    log_dir = (
+        paper_root
+        / "logs"
+        / "strategy_sleeves"
+        / "ai_instrument_allocator_v1"
+    )
+    _write_jsonl(
+        log_dir / "decisions.jsonl",
+        [
+            {
+                "decision_time": "2026-07-13T15:00:00+00:00",
+                "ticker": "LATE",
+                "evidence_snapshot": late,
+                "signal": {"action": "propose_trade"},
+            },
+            {
+                "decision_time": "2026-07-13T15:10:00+00:00",
+                "ticker": "MISS",
+                "evidence_snapshot": missing,
+                "signal": {"action": "propose_trade"},
+            },
+        ],
+    )
+    _write_jsonl(
+        log_dir / "cycles.jsonl",
+        [
+            {
+                "ts": "2026-07-13T15:11:00+00:00",
+                "funnel": {
+                    "candidate_records": [
+                        {
+                            "ticker": "LATE",
+                            "evidence_snapshot": late,
+                            "ranking_entered": True,
+                            "deep_research": True,
+                        },
+                        {
+                            "ticker": "MISS",
+                            "evidence_snapshot": missing,
+                            "ranking_entered": True,
+                            "deep_research": True,
+                        },
+                    ]
+                },
+                "plans": [],
+                "executions": [],
+                "paper_orders_created": 0,
+            }
+        ],
+    )
+
+    report = run_natural_strict_replay(
+        paper_root,
+        hours=48,
+        asof="2026-07-13T15:11:00+00:00",
+    )
+
+    assert report["strict_funnel"]["counts"]["candidates"] == 0
+    assert report["strict_funnel"]["counts"]["proposals"] == 0
+    assert report["time_validation"]["source_violation_count"] == 1
+    assert report["time_validation"]["admitted_violation_count"] == 0
+    assert report["time_validation"]["excluded_snapshot_count"] == 2
+    assert report["rejection_reasons"][
+        "point_in_time: observation_after_decision_cutoff"
+    ] == 1
+    assert report["rejection_reasons"]["missing_historical_quote"] == 1
+    assert report["historical_orders_created_by_replay"] == 0
+    assert report["live_broker_write_calls"] == 0
