@@ -73,7 +73,9 @@ class EvidenceSnapshotStore:
         envelope = {
             "snapshot_type": snapshot_type,
             "decision_time": decision_time,
-            "retrieved_at": utc_now(),
+            "data_cutoff_time": decision_time,
+            "retrieved_at": decision_time,
+            "snapshot_written_at": utc_now(),
             "payload": payload,
         }
         serialized = json.dumps(envelope, separators=(",", ":"), sort_keys=True)

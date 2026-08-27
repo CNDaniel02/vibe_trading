@@ -87,10 +87,16 @@ read-only scans and technical top 8 + Exa evidence
 
 The allocator also has an independent historical validation plane. Golden
 fixtures use the production allocator, paper broker, fill WAL, mandate, exit,
-and PnL paths inside temporary roots. Natural strict replay reads frozen
+and PnL paths inside temporary roots, with an active live-order deny/spy hook.
+Natural strict replay reads frozen
 point-in-time evidence only, records input hashes, excludes post-cutoff data,
-and never calls a model or broker. Functional liveness, historical diagnostic
-evidence, and forward paper performance are reported separately. See
+and never calls a model or broker. It validates recorded historical outputs and
+does not claim to have rerun the current model on history. Missing cutoffs,
+observation timestamps, explicit decision-to-plan lineage, complete OHLCV
+coverage, or provenance-backed complete option-chain coverage fail closed.
+Functional liveness, historical diagnostic
+evidence, walk-forward data readiness, and forward paper performance are
+reported separately. See
 [`references/allocator_historical_validation.md`](references/allocator_historical_validation.md).
 
 `llm_news_drift_v1` is a faster, price-blind experiment:

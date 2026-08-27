@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import subprocess
 from typing import Any, Iterable
 
 import yaml
@@ -16,12 +17,18 @@ VALIDATION_SCHEMA_VERSION = "allocator-historical-validation-v1"
 _STRATEGY = "ai_instrument_allocator_v1"
 _OBSERVATION_TIME_FIELDS = {
     "asof",
+    "calculated_at",
     "event_at",
+    "event_time",
+    "event_timestamp",
     "first_seen_at",
     "nav_calculated_at",
+    "observed_at",
     "published_at",
     "quote_seen_at",
+    "quotes_observed_at",
     "retrieved_at",
+    "timestamp",
     "updated_at",
 }
 _PROMPT_FILES = (
@@ -33,6 +40,7 @@ _PROMPT_FILES = (
 _SCHEMA_FILES = (
     "ai_allocator_signal.schema.json",
     "ai_allocator_challenge.schema.json",
+    "allocator_historical_validation_report.schema.json",
 )
 _CONFIG_FILES = (
     "strategy_profiles.yaml",
@@ -51,6 +59,7 @@ _STRATEGY_SOURCE_FILES = (
     "scripts/decision/instrument_allocator.py",
     "scripts/decision/signed_return_signal.py",
     "scripts/discovery/ai_instrument_allocator_pipeline.py",
+    "scripts/discovery/evidence_store.py",
     "scripts/exit/position_mandates.py",
     "scripts/options/fill_model.py",
     "scripts/options/paper_broker.py",
@@ -58,6 +67,10 @@ _STRATEGY_SOURCE_FILES = (
     "scripts/simulation/fill_model.py",
     "scripts/simulation/fill_transaction.py",
     "scripts/simulation/paper_broker.py",
+    "scripts/replay/allocator_functional_replay.py",
+    "scripts/replay/allocator_historical_replay.py",
+    "scripts/replay/allocator_validation_contracts.py",
+    "scripts/replay/allocator_validation_report.py",
 )
 _EQUITY_FIELDS = ("ticker", "asof", "bid", "ask")
 _OHLCV_FIELDS = ("timestamp", "open", "high", "low", "close", "volume")
@@ -84,6 +97,36 @@ _OPTION_CONTRACT_FIELDS = (
 
 def _sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def detect_source_revision(project_root: str | Path) -> str:
+    """Bind a manifest to HEAD and make worktree dirtiness explicit."""
+    root = Path(project_root).resolve()
+    try:
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "not_recorded"
+    revision = head.stdout.strip() or "not_recorded"
+    dirty = status.stdout.strip()
+    if dirty:
+        digest = hashlib.sha256(dirty.encode("utf-8")).hexdigest()[:16]
+        return f"{revision}+dirty:{digest}"
+    return revision
 
 
 def _canonical_hash(value: Any) -> str:
@@ -144,9 +187,12 @@ def validate_point_in_time_snapshot(
     snapshot: dict[str, Any],
     *,
     replay_asof: str | None = None,
+    allow_decision_time_cutoff: bool = False,
 ) -> dict[str, Any]:
     """Validate that every observation was visible by the frozen cutoff."""
-    raw_cutoff = snapshot.get("data_cutoff_time") or snapshot.get("decision_time")
+    raw_cutoff = snapshot.get("data_cutoff_time")
+    if raw_cutoff is None and allow_decision_time_cutoff:
+        raw_cutoff = snapshot.get("decision_time")
     if raw_cutoff is None:
         return {
             "valid": False,
@@ -262,7 +308,7 @@ def build_validation_manifest(
         }
     )
     prompt_version = str(profile.get("prompt_version") or "not_recorded")
-    source_version = source_revision or "not_recorded"
+    source_version = source_revision or detect_source_revision(root)
     manifest_payload = {
         "source_revision": source_version,
         "strategy": strategy_digest,
@@ -302,6 +348,16 @@ def _invalid_number(value: Any) -> bool:
     return isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
 
 
+def _invalid_timestamp(value: Any) -> bool:
+    if _missing_value(value):
+        return True
+    try:
+        parse_ts(str(value))
+    except (TypeError, ValueError):
+        return True
+    return False
+
+
 def assess_market_data_completeness(
     *,
     equity_rows: list[dict[str, Any]],
@@ -323,6 +379,8 @@ def assess_market_data_completeness(
             and (row["bid"] < 0 or row["ask"] <= 0 or row["bid"] > row["ask"])
         ):
             equity_missing["bid_ask.valid"] += 1
+        if _invalid_timestamp(row.get("asof")):
+            equity_missing["asof.valid_timestamp"] += 1
         ohlcv = row.get("ohlcv")
         if not isinstance(ohlcv, dict):
             equity_missing["ohlcv"] += 1
@@ -330,8 +388,28 @@ def assess_market_data_completeness(
         for field in _OHLCV_FIELDS:
             if _missing_value(ohlcv.get(field)):
                 equity_missing[f"ohlcv.{field}"] += 1
+        if _invalid_timestamp(ohlcv.get("timestamp")):
+            equity_missing["ohlcv.timestamp.valid"] += 1
+        for field in ("open", "high", "low", "close", "volume"):
+            if not _missing_value(ohlcv.get(field)) and _invalid_number(
+                ohlcv.get(field)
+            ):
+                equity_missing[f"ohlcv.{field}.finite"] += 1
+        prices = [ohlcv.get(field) for field in ("open", "high", "low", "close")]
+        if all(not _invalid_number(value) for value in prices):
+            open_price, high, low, close = (float(value) for value in prices)
+            if (
+                low <= 0
+                or high < max(open_price, close, low)
+                or low > min(open_price, close, high)
+            ):
+                equity_missing["ohlcv.price_relationships.valid"] += 1
+        if not _invalid_number(ohlcv.get("volume")) and float(ohlcv["volume"]) < 0:
+            equity_missing["ohlcv.volume.nonnegative"] += 1
         if ohlcv.get("corporate_action_safe") is not True:
             equity_missing["ohlcv.corporate_action_safe=true"] += 1
+        if ohlcv.get("coverage_complete") is not True:
+            equity_missing["ohlcv.coverage_complete=true"] += 1
 
     option_missing: Counter[str] = Counter()
     if not option_chain_snapshots:
@@ -342,10 +420,77 @@ def assess_market_data_completeness(
                 option_missing[field] += 1
         if chain.get("chain_complete") is not True:
             option_missing["chain_complete=true"] += 1
+        chain_asof = None
+        if _invalid_timestamp(chain.get("asof")):
+            option_missing["asof.valid_timestamp"] += 1
+        else:
+            chain_asof = parse_ts(str(chain["asof"]))
+        coverage = chain.get("chain_completeness")
+        if not isinstance(coverage, dict):
+            option_missing["chain_completeness"] += 1
+        else:
+            expected_count = coverage.get("expected_contract_count")
+            received_count = coverage.get("received_contract_count")
+            if (
+                not isinstance(expected_count, int)
+                or isinstance(expected_count, bool)
+                or not isinstance(received_count, int)
+                or isinstance(received_count, bool)
+                or expected_count <= 0
+                or received_count != expected_count
+            ):
+                option_missing["chain_completeness.contract_count_match"] += 1
+            if coverage.get("expirations_complete") is not True:
+                option_missing["chain_completeness.expirations_complete=true"] += 1
+            if coverage.get("strikes_complete") is not True:
+                option_missing["chain_completeness.strikes_complete=true"] += 1
+        provenance = chain.get("coverage_provenance")
+        if not isinstance(provenance, dict):
+            option_missing["coverage_provenance"] += 1
+        else:
+            if not str(provenance.get("source") or "").strip():
+                option_missing["coverage_provenance.source"] += 1
+            if not (
+                str(provenance.get("request_id") or "").strip()
+                or str(provenance.get("dataset_hash") or "").strip()
+            ):
+                option_missing[
+                    "coverage_provenance.request_id_or_dataset_hash"
+                ] += 1
+            if provenance.get("pagination_complete") is not True:
+                option_missing[
+                    "coverage_provenance.pagination_complete=true"
+                ] += 1
+            if _invalid_timestamp(provenance.get("captured_at")):
+                option_missing["coverage_provenance.captured_at.valid"] += 1
+            query = provenance.get("query")
+            if not isinstance(query, dict):
+                option_missing["coverage_provenance.query"] += 1
+            else:
+                if str(query.get("underlying") or "").upper() != str(
+                    chain.get("underlying") or ""
+                ).upper():
+                    option_missing[
+                        "coverage_provenance.query.underlying_matches_chain"
+                    ] += 1
+                for field in (
+                    "expiration_start",
+                    "expiration_end",
+                    "strike_min",
+                    "strike_max",
+                ):
+                    if _missing_value(query.get(field)):
+                        option_missing[f"coverage_provenance.query.{field}"] += 1
         contracts = chain.get("contracts")
         if not isinstance(contracts, list) or not contracts:
             option_missing["contracts[]"] += 1
             continue
+        if isinstance(coverage, dict) and coverage.get(
+            "received_contract_count"
+        ) != len(contracts):
+            option_missing[
+                "chain_completeness.received_count_matches_contracts"
+            ] += 1
         for contract in contracts:
             if not isinstance(contract, dict):
                 option_missing["contracts[].object"] += 1
@@ -369,6 +514,42 @@ def assess_market_data_completeness(
                     contract.get(field)
                 ):
                     option_missing[f"contracts[].{field}.finite"] += 1
+            for field in ("updated_at",):
+                if _invalid_timestamp(contract.get(field)):
+                    option_missing[f"contracts[].{field}.valid"] += 1
+            try:
+                expiration = parse_ts(f"{contract.get('expiration_date')}T00:00:00+00:00")
+            except (TypeError, ValueError):
+                option_missing["contracts[].expiration_date.valid"] += 1
+            else:
+                if chain_asof is not None and expiration.date() < chain_asof.date():
+                    option_missing["contracts[].expiration_not_expired"] += 1
+            if chain_asof is not None and not _invalid_timestamp(contract.get("updated_at")):
+                if parse_ts(str(contract["updated_at"])) > chain_asof:
+                    option_missing["contracts[].updated_at<=chain.asof"] += 1
+            if str(contract.get("underlying") or "").upper() != str(
+                chain.get("underlying") or ""
+            ).upper():
+                option_missing["contracts[].underlying_matches_chain"] += 1
+            if contract.get("option_type") not in {"call", "put"}:
+                option_missing["contracts[].option_type.valid"] += 1
+            for field in ("strike_price", "ask"):
+                if not _invalid_number(contract.get(field)) and float(contract[field]) <= 0:
+                    option_missing[f"contracts[].{field}.positive"] += 1
+            for field in (
+                "bid",
+                "implied_volatility",
+                "gamma",
+                "vega",
+                "volume",
+                "open_interest",
+            ):
+                if not _invalid_number(contract.get(field)) and float(contract[field]) < 0:
+                    option_missing[f"contracts[].{field}.nonnegative"] += 1
+            if not _invalid_number(contract.get("delta")) and not -1 <= float(
+                contract["delta"]
+            ) <= 1:
+                option_missing["contracts[].delta.range"] += 1
             if (
                 not _invalid_number(contract.get("bid"))
                 and not _invalid_number(contract.get("ask"))
@@ -399,6 +580,8 @@ def assess_market_data_completeness(
             "executable_backtest_ready": options_ready,
             "executable_pnl_claim_allowed": options_ready,
             "synthetic_sensitivity_allowed": True,
+            "coverage_provenance_required": True,
+            "coverage_provenance_structurally_valid": options_ready,
             "missing_fields": dict(sorted(option_missing.items())),
         },
         "allowed_claims": allowed_claims,
@@ -426,6 +609,12 @@ def build_walk_forward_partitions(
     holdout_cutoff = parse_ts(holdout_end)
     if not development_cutoff < calibration_cutoff < holdout_cutoff:
         raise ValueError("walk-forward boundaries must be strictly increasing")
+
+    record_ids = [str(record.get("record_id") or "") for record in records]
+    if any(not record_id for record_id in record_ids):
+        raise ValueError("walk-forward records require non-empty record_id")
+    if len(record_ids) != len(set(record_ids)):
+        raise ValueError("walk-forward record_id values must be unique")
 
     same_horizon = sorted(
         (record for record in records if record.get("horizon") == horizon),
@@ -526,6 +715,68 @@ def build_walk_forward_partitions(
             "future_or_unmatured_training_count": future_or_unmatured,
             "holdout_used_for_training_count": holdout_used,
         },
+    }
+
+
+def assess_walk_forward_readiness(
+    data_completeness: dict[str, Any],
+    *,
+    labeled_records: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Describe what can be tested without turning diagnostics into PnL claims."""
+    records = labeled_records or []
+    equity = data_completeness.get("equity")
+    options = data_completeness.get("options")
+    equity = equity if isinstance(equity, dict) else {}
+    options = options if isinstance(options, dict) else {}
+    blockers: list[str] = []
+    limitations: list[str] = []
+    if not records:
+        blockers.append("missing_point_in_time_labeled_outcome_dataset")
+    if equity.get("executable_backtest_ready") is not True:
+        blockers.append("incomplete_equity_bid_ask_or_corporate_action_safe_ohlcv")
+    if options.get("executable_backtest_ready") is not True:
+        limitations.append("incomplete_historical_option_chain")
+
+    horizons = sorted(
+        {
+            str(record.get("horizon"))
+            for record in records
+            if record.get("horizon")
+        }
+    )
+    status = (
+        "blocked"
+        if blockers
+        else "ready_for_partitioning"
+        if not limitations
+        else "equity_ready_options_sensitivity_only"
+    )
+    return {
+        "status": status,
+        "supported_modes": ["expanding", "rolling"],
+        "partition_contract_requires_separation": True,
+        "partition_contract_requires_matured_labels": True,
+        "development_calibration_holdout_separated": False,
+        "matured_labels_only": False,
+        "labeled_dataset_provided": bool(records),
+        "labeled_record_count": len(records),
+        "horizons": horizons,
+        "actual_partitions_run": False,
+        "leakage_checks_run": False,
+        "equity_executable_backtest_ready": bool(
+            equity.get("executable_backtest_ready") is True and records
+        ),
+        "option_executable_pnl_ready": bool(
+            options.get("executable_backtest_ready") is True and records
+        ),
+        "synthetic_option_sensitivity_allowed": True,
+        "blockers": blockers,
+        "limitations": limitations,
+        "claim_boundary": (
+            "No historical profitability claim is allowed until labeled records are "
+            "partitioned and out-of-sample holdout evaluation is complete."
+        ),
     }
 
 

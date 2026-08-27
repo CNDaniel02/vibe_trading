@@ -258,6 +258,10 @@ def test_evidence_snapshot_is_immutable_and_deduplicated(paper_root):
     saved = store.write_snapshot(snapshot_type="test", decision_time=NOW, payload={"events": normalized})
     path = Path(saved["path"])
     assert path.exists()
+    envelope = json.loads(path.read_text(encoding="utf-8"))
+    assert envelope["data_cutoff_time"] == NOW
+    assert envelope["retrieved_at"] == NOW
+    assert envelope["snapshot_written_at"]
     try:
         store.write_snapshot(snapshot_type="test", decision_time=NOW, payload={"events": normalized})
     except FileExistsError:

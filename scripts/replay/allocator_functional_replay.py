@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 from pathlib import Path
 import shutil
 from tempfile import TemporaryDirectory
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
+from unittest.mock import patch
 
+from mcp import ClientSession
+
+from scripts.broker.robinhood_readonly_adapter import (
+    LiveOrderToolBlocked,
+    RobinhoodReadonlyAdapter,
+)
 from scripts.core.config import assert_paper_mode, load_runtime_config
 from scripts.core.models import Quote
 from scripts.discovery.ai_instrument_allocator_pipeline import (
@@ -19,14 +27,77 @@ from scripts.llm.mock_provider import MockProvider
 from scripts.llm.schemas import validate_schema
 from scripts.llm.usage_tracker import UsageTracker
 from scripts.options.models import OptionContract, OptionQuote
+from scripts.options.paper_broker import OptionPaperBroker
 from scripts.replay.allocator_validation_contracts import (
     build_validation_manifest,
+    detect_source_revision,
     validate_point_in_time_snapshot,
 )
+from scripts.simulation.paper_broker import PaperBroker
 
 
 _NAMESPACE = "ai_instrument_allocator_v1"
 _SCENARIO_IDS = ("bullish_equity", "bullish_call", "bearish_put")
+_LIVE_ORDER_TOOL_NAMES = frozenset(
+    {
+        "cancel_equity_order",
+        "cancel_option_order",
+        "place_equity_order",
+        "place_option_order",
+        "review_equity_order",
+        "review_option_order",
+    }
+)
+
+
+@contextmanager
+def _deny_live_broker_writes() -> Iterator[list[dict[str, str]]]:
+    """Install a deny hook at both supported live-order boundaries."""
+    attempts: list[dict[str, str]] = []
+    original_call_tool = ClientSession.call_tool
+
+    async def guarded_call_tool(
+        session: ClientSession,
+        name: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        normalized = str(name)
+        if normalized in _LIVE_ORDER_TOOL_NAMES:
+            attempts.append({"boundary": "mcp", "tool": normalized})
+            raise LiveOrderToolBlocked(
+                f"golden replay blocked live broker tool: {normalized}"
+            )
+        return await original_call_tool(session, name, *args, **kwargs)
+
+    def blocked_adapter_call(method_name: str) -> Any:
+        def blocked(_adapter: RobinhoodReadonlyAdapter, *_args: Any, **_kwargs: Any) -> None:
+            attempts.append({"boundary": "readonly_adapter", "tool": method_name})
+            raise LiveOrderToolBlocked(
+                f"golden replay blocked live broker adapter method: {method_name}"
+            )
+
+        return blocked
+
+    with (
+        patch.object(ClientSession, "call_tool", guarded_call_tool),
+        patch.object(
+            RobinhoodReadonlyAdapter,
+            "review_equity_order",
+            blocked_adapter_call("review_equity_order"),
+        ),
+        patch.object(
+            RobinhoodReadonlyAdapter,
+            "place_equity_order",
+            blocked_adapter_call("place_equity_order"),
+        ),
+        patch.object(
+            RobinhoodReadonlyAdapter,
+            "place_option_order",
+            blocked_adapter_call("place_option_order"),
+        ),
+    ):
+        yield attempts
 
 
 class _FixtureProvider(MockProvider):
@@ -308,7 +379,10 @@ def _run_scenario(
     source_before = _protected_hashes(project_root)
     temporary_path = ""
     result: dict[str, Any]
-    with TemporaryDirectory(prefix=f"allocator-golden-{fixture['scenario_id']}-") as raw:
+    with (
+        TemporaryDirectory(prefix=f"allocator-golden-{fixture['scenario_id']}-") as raw,
+        _deny_live_broker_writes() as live_write_attempts,
+    ):
         temporary_root = Path(raw).resolve()
         temporary_path = str(temporary_root)
         shutil.copytree(project_root / "config", temporary_root / "config")
@@ -327,6 +401,10 @@ def _run_scenario(
             discovery_adapter=discovery,
             news_adapter=news,
             option_data=option_data,
+        )
+        paper_broker_boundary_verified = (
+            type(pipeline.broker) is PaperBroker
+            and type(pipeline.option_broker) is OptionPaperBroker
         )
         times = fixture["times"]
         time_checks = _fixture_time_checks(fixture)
@@ -391,12 +469,75 @@ def _run_scenario(
             record.get("status") == "committed"
             for record in wal.get("transactions", {}).values()
         )
+        wal_transactions = {
+            str(transaction_id): record
+            for transaction_id, record in wal.get("transactions", {}).items()
+            if isinstance(record, dict)
+        }
+        entry_order_id = str(execution.get("order", {}).get("order_id") or "")
+        exit_order_id = str(exit_order.get("order_id") or "")
+        expected_order_ids = {entry_order_id, exit_order_id} - {""}
+        wal_order_ids = {
+            str(record.get("order_id") or "")
+            for record in wal_transactions.values()
+        } - {""}
+        wal_identity_valid = bool(expected_order_ids) and (
+            wal_order_ids == expected_order_ids
+            and len(wal_transactions) == len(expected_order_ids)
+            and all(
+                record.get("status") == "committed"
+                and record.get("transaction_id") == transaction_id
+                for transaction_id, record in wal_transactions.items()
+            )
+        )
         lifecycle = _read_json(
             state_dir / "trade_lifecycle.json",
             {"open": {}, "closed": []},
         )
         metrics = calculate_metrics(temporary_root, namespace=_NAMESPACE)
         closed = list(lifecycle.get("closed", []))
+        allocation = execution.get("allocation", {})
+        considered = (
+            allocation.get("considered", [])
+            if isinstance(allocation.get("considered"), list)
+            else []
+        )
+        selected_candidate = next(
+            (
+                item
+                for item in considered
+                if isinstance(item, dict)
+                and item.get("instrument_type") == instrument
+                and (
+                    str(item.get("ticker") or "").upper()
+                    == fixture["ticker"]
+                    if instrument == "equity"
+                    else str(item.get("option_id") or "")
+                    == str(selected.get("option_id") or "")
+                )
+            ),
+            None,
+        )
+        risk_evidence = {
+            "allocator_selected": allocation.get("status") == "selected",
+            "selected_candidate_eligible": bool(
+                selected_candidate and selected_candidate.get("eligible") is True
+            ),
+            "positive_deterministic_risk": bool(
+                selected_candidate
+                and float(
+                    selected_candidate.get("deterministic_risk_usd")
+                    or selected_candidate.get("risk_usd")
+                    or 0
+                )
+                > 0
+            ),
+            "broker_risk_gate_passed": bool(
+                execution.get("status") == "filled"
+                and not execution.get("reason")
+                and not execution.get("order", {}).get("reject_reason")
+            ),
+        }
         trace = {
             "proposal": bool(
                 overnight.get("plans")
@@ -409,12 +550,11 @@ def _run_scenario(
                 and active[0].get("preopen_revalidated_at")
                 == times["preopen_revalidation"]
             ),
-            "allocation_selected": execution.get("allocation", {}).get("status")
-            == "selected",
-            "deterministic_risk_approved": execution.get("status") == "filled",
+            "allocation_selected": allocation.get("status") == "selected",
+            "deterministic_risk_approved": all(risk_evidence.values()),
             "paper_order_created": bool(execution.get("order")),
             "entry_filled": execution.get("order", {}).get("status") == "filled",
-            "fill_wal_committed": committed == 2,
+            "fill_wal_committed": committed == 2 and wal_identity_valid,
             "mandate_open": bool(
                 mandate_before_exit and mandate_before_exit.get("status") == "open"
             ),
@@ -428,6 +568,8 @@ def _run_scenario(
                 and closed[0].get("status") == "closed"
                 and closed[0].get("realized_pnl") is not None
             ),
+            "paper_broker_boundary": paper_broker_boundary_verified,
+            "live_write_guard_clean": not live_write_attempts,
         }
         write_paths = [
             str(path.relative_to(temporary_root))
@@ -449,6 +591,10 @@ def _run_scenario(
             "entry_order_status": execution.get("order", {}).get("status"),
             "exit_order_status": exit_order.get("status"),
             "wal_committed_transactions": committed,
+            "wal_order_ids": sorted(wal_order_ids),
+            "expected_wal_order_ids": sorted(expected_order_ids),
+            "wal_identity_valid": wal_identity_valid,
+            "deterministic_risk_evidence": risk_evidence,
             "closed_trade_count": len(closed),
             "realized_pnl_usd": float(metrics["realized_pnl"]),
             "pnl_attribution": closed,
@@ -463,9 +609,18 @@ def _run_scenario(
                 data_cutoff=times["exit"],
                 model_id=provider.model,
                 dataset_paths=[fixture_path],
+                source_revision=detect_source_revision(project_root),
             ),
-            "live_broker_write_calls": 0,
+            "live_broker_write_calls": len(live_write_attempts),
+            "live_write_guard": {
+                "installed": True,
+                "blocked_tool_names": sorted(_LIVE_ORDER_TOOL_NAMES),
+                "attempts": list(live_write_attempts),
+                "paper_broker_boundary_verified": paper_broker_boundary_verified,
+            },
             "live_order_tools_called": bool(
+                live_write_attempts
+                or
                 opened.get("live_order_tools_called", False)
                 or exited.get("live_order_tools_called", False)
             ),

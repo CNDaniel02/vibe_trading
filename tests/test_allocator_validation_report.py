@@ -9,14 +9,35 @@ import pytest
 def _natural_report() -> dict:
     return {
         "evidence_type": "strict_historical_diagnostic",
-        "strict_funnel": {"counts": {"candidates": 2, "paper_orders": 0}},
-        "manifest": {"manifest_hash": "fixed"},
+        "strict_funnel": {
+            "counts": {"candidates": 2, "paper_orders": 0},
+            "conversion_rates": {},
+            "outcome_rates": {},
+        },
+        "manifest": {
+            "strategy_version": "test",
+            "prompt_version": "test",
+            "schema_version": "allocator-historical-validation-v1",
+            "config_hashes": {},
+            "model_id": "test",
+            "data_cutoff": "2026-07-13T15:00:00+00:00",
+            "manifest_hash": "fixed",
+        },
         "time_validation": {
             "time_violation_count": 0,
+            "source_violation_count": 0,
             "admitted_violation_count": 0,
+        },
+        "data_completeness": {"equity": {}, "options": {}, "allowed_claims": []},
+        "llm_replay": {
+            "mode": "recorded_outputs_only",
+            "strategy_reexecution_performed": False,
+            "diagnostic_only": True,
+            "current_model_profitability_proof": False,
         },
         "historical_orders_created_by_replay": 0,
         "live_broker_write_calls": 0,
+        "live_order_tools_called": False,
         "historical_performance_available": False,
     }
 
@@ -82,6 +103,11 @@ def test_validation_report_keeps_functional_historical_and_forward_evidence_sepa
         "historical_orders_created": 0,
         "live_broker_write_calls": 0,
         "functional_source_root_unchanged": True,
+        "forward_state_logs_unchanged": True,
+        "forward_protected_file_count": 0,
+        "forward_protected_scope": (
+            "all files under allocator state, allocator logs, and immutable snapshots"
+        ),
     }
 
 
@@ -102,6 +128,31 @@ def test_validation_report_output_cannot_write_forward_state_or_logs(
         protected_root=tmp_path,
     )
     assert json.loads(output.read_text(encoding="utf-8")) == report
+
+
+def test_forward_protection_hashes_every_allocator_artifact_type(
+    tmp_path: Path,
+) -> None:
+    from scripts.replay.allocator_validation_report import (
+        _protected_forward_hashes,
+    )
+
+    state = (
+        tmp_path
+        / "state"
+        / "strategy_sleeves"
+        / "ai_instrument_allocator_v1"
+    )
+    state.mkdir(parents=True)
+    (state / "ledger.sqlite").write_bytes(b"fixed-ledger")
+    (state / "worker.lock").write_bytes(b"fixed-lock")
+
+    hashes = _protected_forward_hashes(tmp_path)
+
+    assert sorted(hashes) == [
+        "state\\strategy_sleeves\\ai_instrument_allocator_v1\\ledger.sqlite",
+        "state\\strategy_sleeves\\ai_instrument_allocator_v1\\worker.lock",
+    ]
 
 
 def test_validation_report_can_skip_functional_replay(

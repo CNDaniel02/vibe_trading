@@ -3,7 +3,7 @@
   "$id": "https://auto-trading-skill.local/schemas/allocator_historical_validation_report.schema.json",
   "title": "Allocator historical validation report",
   "type": "object",
-  "additionalProperties": true,
+  "additionalProperties": false,
   "required": [
     "schema_version",
     "strategy",
@@ -11,6 +11,7 @@
     "functional_liveness",
     "historical_performance",
     "forward_evidence",
+    "walk_forward_readiness",
     "evidence_boundaries",
     "acceptance"
   ],
@@ -20,28 +21,175 @@
     "generated_at": {"type": "string", "format": "date-time"},
     "functional_liveness": {
       "type": "object",
-      "required": ["status", "historical_performance_claimed", "forward_performance_claimed"]
+      "required": ["status", "historical_performance_claimed", "forward_performance_claimed"],
+      "properties": {
+        "status": {"enum": ["passed", "failed", "not_run"]},
+        "historical_performance_claimed": {"const": false},
+        "forward_performance_claimed": {"const": false}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"enum": ["passed", "failed"]}}},
+          "then": {"required": ["summary", "scenarios"]}
+        }
+      ]
     },
     "historical_performance": {
       "type": "object",
-      "required": ["evidence_type", "historical_performance_available", "strict_funnel", "manifest"]
+      "required": [
+        "evidence_type",
+        "historical_performance_available",
+        "strict_funnel",
+        "time_validation",
+        "data_completeness",
+        "manifest",
+        "llm_replay",
+        "historical_orders_created_by_replay",
+        "live_broker_write_calls",
+        "live_order_tools_called"
+      ],
+      "properties": {
+        "evidence_type": {"const": "strict_historical_diagnostic"},
+        "historical_performance_available": {"type": "boolean"},
+        "strict_funnel": {
+          "type": "object",
+          "required": ["counts", "conversion_rates", "outcome_rates"],
+          "properties": {
+            "counts": {"type": "object"},
+            "conversion_rates": {"type": "object"},
+            "outcome_rates": {"type": "object"}
+          }
+        },
+        "time_validation": {
+          "type": "object",
+          "required": ["time_violation_count", "source_violation_count", "admitted_violation_count"],
+          "properties": {
+            "time_violation_count": {"type": "integer", "minimum": 0},
+            "source_violation_count": {"type": "integer", "minimum": 0},
+            "admitted_violation_count": {"type": "integer", "minimum": 0}
+          }
+        },
+        "data_completeness": {
+          "type": "object",
+          "required": ["equity", "options", "allowed_claims"]
+        },
+        "manifest": {
+          "type": "object",
+          "required": [
+            "strategy_version",
+            "prompt_version",
+            "schema_version",
+            "config_hashes",
+            "model_id",
+            "data_cutoff",
+            "manifest_hash"
+          ]
+        },
+        "llm_replay": {
+          "type": "object",
+          "required": ["mode", "strategy_reexecution_performed", "diagnostic_only", "current_model_profitability_proof"],
+          "properties": {
+            "mode": {"const": "recorded_outputs_only"},
+            "strategy_reexecution_performed": {"const": false},
+            "diagnostic_only": {"const": true},
+            "current_model_profitability_proof": {"const": false}
+          }
+        },
+        "historical_orders_created_by_replay": {"const": 0},
+        "live_broker_write_calls": {"const": 0},
+        "live_order_tools_called": {"const": false}
+      }
     },
     "forward_evidence": {
       "type": "object",
-      "required": ["evidence_type", "source", "profitability_claim"]
+      "required": ["evidence_type", "source", "profitability_claim"],
+      "properties": {
+        "evidence_type": {"const": "forward_paper_evidence"},
+        "source": {"type": "string"},
+        "profitability_claim": {"type": "string"}
+      }
+    },
+    "walk_forward_readiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "supported_modes",
+        "partition_contract_requires_separation",
+        "partition_contract_requires_matured_labels",
+        "development_calibration_holdout_separated",
+        "matured_labels_only",
+        "labeled_dataset_provided",
+        "labeled_record_count",
+        "horizons",
+        "actual_partitions_run",
+        "leakage_checks_run",
+        "equity_executable_backtest_ready",
+        "option_executable_pnl_ready",
+        "synthetic_option_sensitivity_allowed",
+        "blockers",
+        "limitations",
+        "claim_boundary"
+      ],
+      "properties": {
+        "status": {"enum": ["blocked", "ready_for_partitioning", "equity_ready_options_sensitivity_only"]},
+        "supported_modes": {
+          "type": "array",
+          "items": {"enum": ["expanding", "rolling"]},
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true
+        },
+        "partition_contract_requires_separation": {"const": true},
+        "partition_contract_requires_matured_labels": {"const": true},
+        "development_calibration_holdout_separated": {"type": "boolean"},
+        "matured_labels_only": {"type": "boolean"},
+        "labeled_dataset_provided": {"type": "boolean"},
+        "labeled_record_count": {"type": "integer", "minimum": 0},
+        "horizons": {"type": "array", "items": {"type": "string"}},
+        "actual_partitions_run": {"type": "boolean"},
+        "leakage_checks_run": {"type": "boolean"},
+        "equity_executable_backtest_ready": {"type": "boolean"},
+        "option_executable_pnl_ready": {"type": "boolean"},
+        "synthetic_option_sensitivity_allowed": {"const": true},
+        "blockers": {"type": "array", "items": {"type": "string"}},
+        "limitations": {"type": "array", "items": {"type": "string"}},
+        "claim_boundary": {"type": "string", "minLength": 1}
+      }
     },
     "evidence_boundaries": {
       "type": "object",
-      "required": ["functional_liveness", "historical_performance", "forward_evidence"]
+      "additionalProperties": false,
+      "required": ["functional_liveness", "historical_performance", "forward_evidence"],
+      "properties": {
+        "functional_liveness": {"type": "string"},
+        "historical_performance": {"type": "string"},
+        "forward_evidence": {"type": "string"}
+      }
     },
     "acceptance": {
       "type": "object",
+      "additionalProperties": false,
       "required": [
         "time_violation_count",
         "admitted_time_violation_count",
         "historical_orders_created",
-        "live_broker_write_calls"
-      ]
+        "live_broker_write_calls",
+        "functional_source_root_unchanged",
+        "forward_state_logs_unchanged",
+        "forward_protected_file_count",
+        "forward_protected_scope"
+      ],
+      "properties": {
+        "time_violation_count": {"type": "integer", "minimum": 0},
+        "admitted_time_violation_count": {"type": "integer", "minimum": 0},
+        "historical_orders_created": {"type": "integer", "minimum": 0},
+        "live_broker_write_calls": {"type": "integer", "minimum": 0},
+        "functional_source_root_unchanged": {"type": ["boolean", "null"]},
+        "forward_state_logs_unchanged": {"type": "boolean"},
+        "forward_protected_file_count": {"type": "integer", "minimum": 0},
+        "forward_protected_scope": {"type": "string", "minLength": 1}
+      }
     }
   }
 }

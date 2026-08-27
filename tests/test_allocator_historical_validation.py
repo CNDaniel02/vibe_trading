@@ -21,6 +21,7 @@ def _complete_equity_row() -> dict:
             "close": 100.0,
             "volume": 1_000_000,
             "corporate_action_safe": True,
+            "coverage_complete": True,
         },
     }
 
@@ -43,6 +44,35 @@ def _complete_option_contract() -> dict:
         "volume": 2000,
         "open_interest": 10_000,
         "updated_at": "2026-07-13T15:00:00+00:00",
+    }
+
+
+def _complete_option_chain(*, contracts: list[dict] | None = None) -> dict:
+    values = contracts or [_complete_option_contract()]
+    return {
+        "underlying": "AAPL",
+        "asof": "2026-07-13T15:00:00+00:00",
+        "chain_complete": True,
+        "chain_completeness": {
+            "expected_contract_count": len(values),
+            "received_contract_count": len(values),
+            "expirations_complete": True,
+            "strikes_complete": True,
+        },
+        "coverage_provenance": {
+            "source": "fixed_point_in_time_fixture",
+            "request_id": "fixture-chain-request-1",
+            "captured_at": "2026-07-13T15:00:00+00:00",
+            "pagination_complete": True,
+            "query": {
+                "underlying": "AAPL",
+                "expiration_start": "2026-08-21",
+                "expiration_end": "2026-08-21",
+                "strike_min": 100.0,
+                "strike_max": 100.0,
+            },
+        },
+        "contracts": values,
     }
 
 
@@ -111,6 +141,33 @@ def test_point_in_time_validation_accepts_observations_at_or_before_cutoff() -> 
     }
 
 
+def test_point_in_time_validation_requires_explicit_cutoff_and_checks_generic_times() -> None:
+    from scripts.replay.allocator_validation_contracts import (
+        validate_point_in_time_snapshot,
+    )
+
+    missing = validate_point_in_time_snapshot(
+        {"decision_time": "2026-07-13T15:00:00+00:00"}
+    )
+    late = validate_point_in_time_snapshot(
+        {
+            "decision_time": "2026-07-13T15:00:00+00:00",
+            "data_cutoff_time": "2026-07-13T15:00:00+00:00",
+            "observation": {
+                "timestamp": "2026-07-13T15:00:01+00:00",
+                "observed_at": "2026-07-13T15:00:02+00:00",
+            },
+        }
+    )
+
+    assert missing["violations"][0]["reason"] == "missing_cutoff"
+    assert late["valid"] is False
+    assert {item["field"] for item in late["violations"]} == {
+        "observation.timestamp",
+        "observation.observed_at",
+    }
+
+
 def test_validation_manifest_freezes_strategy_prompts_schemas_configs_and_data(
     tmp_path: Path,
 ) -> None:
@@ -167,20 +224,14 @@ def test_market_data_completeness_blocks_executable_option_pnl_when_chain_is_inc
     option.pop("vega")
     result = assess_market_data_completeness(
         equity_rows=[_complete_equity_row()],
-        option_chain_snapshots=[
-            {
-                "underlying": "AAPL",
-                "asof": "2026-07-13T15:00:00+00:00",
-                "chain_complete": True,
-                "contracts": [option],
-            }
-        ],
+        option_chain_snapshots=[_complete_option_chain(contracts=[option])],
     )
 
     assert result["equity"]["executable_backtest_ready"] is True
     assert result["options"]["executable_backtest_ready"] is False
     assert result["options"]["executable_pnl_claim_allowed"] is False
     assert result["options"]["synthetic_sensitivity_allowed"] is True
+    assert result["options"]["coverage_provenance_required"] is True
     assert result["options"]["missing_fields"] == {"contracts[].vega": 1}
     assert result["allowed_claims"] == [
         "equity_backtest",
@@ -206,6 +257,51 @@ def test_market_data_completeness_requires_corporate_action_safe_ohlcv() -> None
         "ohlcv.corporate_action_safe=true": 1
     }
     assert "executable_option_pnl" not in result["allowed_claims"]
+
+
+def test_option_chain_requires_provenance_and_complete_pagination() -> None:
+    from scripts.replay.allocator_validation_contracts import (
+        assess_market_data_completeness,
+    )
+
+    chain = _complete_option_chain()
+    chain["coverage_provenance"]["pagination_complete"] = False
+
+    result = assess_market_data_completeness(
+        equity_rows=[_complete_equity_row()],
+        option_chain_snapshots=[chain],
+    )
+
+    assert result["options"]["executable_pnl_claim_allowed"] is False
+    assert result["options"]["missing_fields"] == {
+        "coverage_provenance.pagination_complete=true": 1
+    }
+    assert "executable_option_pnl" not in result["allowed_claims"]
+
+
+def test_market_data_completeness_rejects_nonfinite_ohlcv_and_unproven_chain_coverage() -> None:
+    from scripts.replay.allocator_validation_contracts import (
+        assess_market_data_completeness,
+    )
+
+    equity = _complete_equity_row()
+    equity["ohlcv"]["close"] = float("nan")
+    result = assess_market_data_completeness(
+        equity_rows=[equity],
+        option_chain_snapshots=[
+            {
+                "underlying": "AAPL",
+                "asof": "2026-07-13T15:00:00+00:00",
+                "chain_complete": True,
+                "contracts": [_complete_option_contract()],
+            }
+        ],
+    )
+
+    assert result["equity"]["executable_backtest_ready"] is False
+    assert result["equity"]["missing_fields"]["ohlcv.close.finite"] == 1
+    assert result["options"]["executable_backtest_ready"] is False
+    assert result["options"]["missing_fields"]["chain_completeness"] == 1
 
 
 def test_snapshot_verification_rejects_path_escape_and_reference_hash_mismatch(
@@ -259,6 +355,12 @@ def test_manifest_hash_covers_source_revision_and_provider(tmp_path: Path) -> No
 
     assert first["manifest_hash"] != second["manifest_hash"]
     assert first["provider_id"] == "provider-a"
+    assert "scripts/replay/allocator_historical_replay.py" in first[
+        "strategy_source_hashes"
+    ]
+    assert "allocator_historical_validation_report.schema.json" in first[
+        "schema_hashes"
+    ]
 
 
 def test_point_in_time_validation_rejects_cutoff_after_replay_asof() -> None:
@@ -364,6 +466,54 @@ def test_walk_forward_partitions_are_horizon_separated_maturity_safe_and_disjoin
     }
 
 
+def test_walk_forward_rejects_duplicate_record_identity_and_reports_readiness() -> None:
+    from scripts.replay.allocator_validation_contracts import (
+        assess_market_data_completeness,
+        assess_walk_forward_readiness,
+        build_walk_forward_partitions,
+    )
+
+    duplicate = {
+        "record_id": "same",
+        "horizon": "next_close",
+        "decision_time": "2026-07-01T15:00:00+00:00",
+        "label_matured_at": "2026-07-02T20:00:00+00:00",
+    }
+    with pytest.raises(ValueError, match="must be unique"):
+        build_walk_forward_partitions(
+            [duplicate, dict(duplicate)],
+            horizon="next_close",
+            development_end="2026-07-06T23:59:59+00:00",
+            calibration_end="2026-07-09T23:59:59+00:00",
+            holdout_end="2026-07-14T23:59:59+00:00",
+            mode="expanding",
+        )
+
+    completeness = assess_market_data_completeness(
+        equity_rows=[_complete_equity_row()],
+        option_chain_snapshots=[],
+    )
+    readiness = assess_walk_forward_readiness(completeness)
+    assert readiness["status"] == "blocked"
+    assert readiness["supported_modes"] == ["expanding", "rolling"]
+    assert readiness["partition_contract_requires_separation"] is True
+    assert readiness["partition_contract_requires_matured_labels"] is True
+    assert readiness["development_calibration_holdout_separated"] is False
+    assert readiness["matured_labels_only"] is False
+    assert readiness["equity_executable_backtest_ready"] is False
+    assert readiness["option_executable_pnl_ready"] is False
+    assert "missing_point_in_time_labeled_outcome_dataset" in readiness["blockers"]
+    assert readiness["limitations"] == ["incomplete_historical_option_chain"]
+
+    equity_only = assess_walk_forward_readiness(
+        completeness,
+        labeled_records=[duplicate],
+    )
+    assert equity_only["status"] == "equity_ready_options_sensitivity_only"
+    assert equity_only["equity_executable_backtest_ready"] is True
+    assert equity_only["option_executable_pnl_ready"] is False
+
+
 def test_funnel_reports_stage_conversions_and_branch_rates() -> None:
     from scripts.replay.allocator_validation_contracts import funnel_with_conversion
 
@@ -422,6 +572,7 @@ def _historical_snapshot(
             "close": 100.0,
             "volume": 1_000_000,
             "corporate_action_safe": True,
+            "coverage_complete": True,
         }
     }
     if include_quote:
@@ -429,6 +580,7 @@ def _historical_snapshot(
     envelope = {
         "snapshot_type": f"allocator-intraday-{ticker}",
         "decision_time": decision_time,
+        "data_cutoff_time": decision_time,
         "retrieved_at": decision_time,
         "payload": {
             "candidate": {
@@ -463,6 +615,24 @@ def _historical_snapshot(
     return {"path": str(path), "snapshot_hash": snapshot_hash}
 
 
+def _remove_snapshot_cutoff(reference: dict[str, str]) -> dict[str, str]:
+    old_path = Path(reference["path"])
+    envelope = json.loads(old_path.read_text(encoding="utf-8"))
+    envelope.pop("snapshot_hash")
+    envelope.pop("data_cutoff_time", None)
+    serialized = json.dumps(envelope, separators=(",", ":"), sort_keys=True)
+    snapshot_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    prefix = old_path.stem.rsplit("-", 1)[0]
+    path = old_path.with_name(f"{prefix}-{snapshot_hash[:12]}.json")
+    path.write_text(
+        json.dumps({**envelope, "snapshot_hash": snapshot_hash}, indent=2, sort_keys=True)
+        + "\n",
+        encoding="utf-8",
+    )
+    old_path.unlink()
+    return {"path": str(path), "snapshot_hash": snapshot_hash}
+
+
 def _all_file_hashes(root: Path) -> dict[str, str]:
     return {
         str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
@@ -487,12 +657,17 @@ def test_strict_jsonl_capture_hashes_exact_bytes_and_counts_malformed_rows(
 
 
 @pytest.mark.parametrize(
-    ("execution_allocation_id", "expected_orders"),
-    [("allocation-nvda", 1), ("wrong-allocation", 0)],
+    ("execution_allocation_id", "plan_source_decision_id", "expected_orders"),
+    [
+        ("allocation-nvda", "agent-NVDA", 1),
+        ("wrong-allocation", "agent-NVDA", 0),
+        ("allocation-nvda", "agent-AAPL", 0),
+    ],
 )
 def test_natural_strict_replay_reports_funnel_without_creating_historical_orders(
     paper_root: Path,
     execution_allocation_id: str,
+    plan_source_decision_id: str,
     expected_orders: int,
 ) -> None:
     from scripts.replay.allocator_historical_replay import (
@@ -524,21 +699,27 @@ def test_natural_strict_replay_reports_funnel_without_creating_historical_orders
     )
     decisions = [
         {
+            "snapshot_id": "agent-AAPL",
             "decision_time": "2026-07-13T15:00:00+00:00",
+            "data_cutoff_time": "2026-07-13T15:00:00+00:00",
             "ticker": "AAPL",
             "evidence_snapshot": refs["AAPL"],
             "challenge": {"hard_veto_reasons": [], "soft_concerns": []},
             "signal": {"action": "watch", "watch_reason": "Wait for confirmation."},
         },
         {
+            "snapshot_id": "agent-MSFT",
             "decision_time": "2026-07-13T15:10:00+00:00",
+            "data_cutoff_time": "2026-07-13T15:10:00+00:00",
             "ticker": "MSFT",
             "evidence_snapshot": refs["MSFT"],
             "challenge": {"hard_veto_reasons": [], "soft_concerns": []},
             "signal": {"action": "no_trade", "no_trade_reason": "Evidence is ambiguous."},
         },
         {
+            "snapshot_id": "agent-NVDA",
             "decision_time": "2026-07-13T15:20:00+00:00",
+            "data_cutoff_time": "2026-07-13T15:20:00+00:00",
             "ticker": "NVDA",
             "evidence_snapshot": refs["NVDA"],
             "challenge": {"hard_veto_reasons": [], "soft_concerns": []},
@@ -572,6 +753,10 @@ def test_natural_strict_replay_reports_funnel_without_creating_historical_orders
                     {
                         "plan_id": "plan-nvda",
                         "ticker": "NVDA",
+                        "source_decision_id": plan_source_decision_id,
+                        "created_at": "2026-07-13T15:20:00+00:00",
+                        "decision_time": "2026-07-13T15:20:00+00:00",
+                        "data_cutoff_time": "2026-07-13T15:20:00+00:00",
                         "evidence_snapshot": refs["NVDA"],
                     }
                 ],
@@ -662,12 +847,18 @@ def test_natural_strict_replay_reports_funnel_without_creating_historical_orders
     assert report["time_validation"] == {
         "time_violation_count": 0,
         "source_violation_count": 0,
+        "source_snapshot_violation_count": 0,
         "admitted_violation_count": 0,
         "excluded_snapshot_count": 0,
         "by_field": {},
         "examples": [],
+        "cutoff_sources": {"snapshot": 3},
     }
     assert report["issue_3_observed_funnel"]["paper_orders"] == 1
+    assert report["issue_3_policy_replay"]["comparable_to_strict_funnel"] is False
+    assert report["issue_3_policy_replay"]["cutoff_semantics"] == (
+        "legacy_issue_3_decision_time_diagnostic"
+    )
     assert report["historical_orders_created_by_replay"] == 0
     assert report["recorded_historical_orders_observed"] == 1
     assert report["model_calls"] == 0
@@ -675,6 +866,7 @@ def test_natural_strict_replay_reports_funnel_without_creating_historical_orders
     assert report["live_order_tools_called"] is False
     assert report["llm_replay"] == {
         "mode": "recorded_outputs_only",
+        "strategy_reexecution_performed": False,
         "diagnostic_only": True,
         "current_model_profitability_proof": False,
         "model_calls": 0,
@@ -689,6 +881,110 @@ def test_natural_strict_replay_requires_explicit_asof(paper_root: Path) -> None:
 
     with pytest.raises(ValueError, match="requires an explicit asof cutoff"):
         run_natural_strict_replay(paper_root)
+
+
+def test_natural_strict_replay_admits_legacy_snapshot_only_with_exact_linked_cutoff(
+    paper_root: Path,
+) -> None:
+    from scripts.replay.allocator_historical_replay import run_natural_strict_replay
+
+    linked = _remove_snapshot_cutoff(
+        _historical_snapshot(
+            paper_root,
+            ticker="LINK",
+            decision_time="2026-07-13T15:00:00+00:00",
+        )
+    )
+    unlinked = _remove_snapshot_cutoff(
+        _historical_snapshot(
+            paper_root,
+            ticker="MISS",
+            decision_time="2026-07-13T15:05:00+00:00",
+        )
+    )
+    log_dir = (
+        paper_root / "logs" / "strategy_sleeves" / "ai_instrument_allocator_v1"
+    )
+    _write_jsonl(
+        log_dir / "decisions.jsonl",
+        [
+            {
+                "decision_time": "2026-07-13T15:00:00+00:00",
+                "data_cutoff_time": "2026-07-13T15:00:00+00:00",
+                "ticker": "LINK",
+                "evidence_snapshot": linked,
+                "signal": {"action": "no_trade", "no_trade_reason": "fixture"},
+            }
+        ],
+    )
+    _write_jsonl(
+        log_dir / "cycles.jsonl",
+        [
+            {
+                "ts": "2026-07-13T15:06:00+00:00",
+                "funnel": {
+                    "candidate_records": [
+                        {
+                            "ticker": ticker,
+                            "evidence_snapshot": reference,
+                            "ranking_entered": True,
+                            "deep_research": True,
+                        }
+                        for ticker, reference in (("LINK", linked), ("MISS", unlinked))
+                    ]
+                },
+                "plans": [],
+                "executions": [],
+            }
+        ],
+    )
+
+    report = run_natural_strict_replay(
+        paper_root,
+        hours=48,
+        asof="2026-07-13T15:06:00+00:00",
+    )
+
+    assert report["strict_funnel"]["counts"]["candidates"] == 1
+    assert report["time_validation"]["cutoff_sources"] == {
+        "linked_decision": 1,
+        "missing": 1,
+    }
+    assert report["rejection_reasons"]["point_in_time: missing_cutoff"] == 1
+
+
+def test_natural_strict_replay_reports_malformed_snapshot_without_crashing(
+    paper_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.replay.allocator_historical_replay as replay_module
+
+    snapshot_root = paper_root / "logs" / "ai_instrument_allocator_snapshots"
+    snapshot_root.mkdir(parents=True, exist_ok=True)
+    unsigned = {"snapshot_type": "missing-decision", "payload": {"ticker": "BAD"}}
+    digest = hashlib.sha256(
+        json.dumps(unsigned, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    (snapshot_root / f"bad-{digest[:12]}.json").write_text(
+        json.dumps({**unsigned, "snapshot_hash": digest}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        replay_module,
+        "run_allocator_policy_replay",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad legacy replay")),
+    )
+
+    report = replay_module.run_natural_strict_replay(
+        paper_root,
+        asof="2026-07-13T15:06:00+00:00",
+    )
+
+    assert report["snapshot_integrity"]["checked"] == 1
+    assert report["snapshot_integrity"]["invalid_hashes"] == 0
+    assert report["snapshot_integrity"]["invalid_envelopes"] == 1
+    assert report["issue_3_policy_replay"]["error"] == "ValueError: bad legacy replay"
+    assert report["historical_orders_created_by_replay"] == 0
 
 
 def test_natural_strict_replay_excludes_late_and_missing_market_data(
@@ -769,7 +1065,9 @@ def test_natural_strict_replay_excludes_late_and_missing_market_data(
 
     assert report["strict_funnel"]["counts"]["candidates"] == 0
     assert report["strict_funnel"]["counts"]["proposals"] == 0
-    assert report["time_validation"]["source_violation_count"] == 1
+    assert report["time_validation"]["source_violation_count"] == 2
+    assert report["time_validation"]["source_snapshot_violation_count"] == 1
+    assert report["time_validation"]["cutoff_sources"] == {"snapshot": 2}
     assert report["time_validation"]["admitted_violation_count"] == 0
     assert report["time_validation"]["excluded_snapshot_count"] == 2
     assert report["rejection_reasons"][

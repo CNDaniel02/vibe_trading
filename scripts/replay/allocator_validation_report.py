@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
-import subprocess
 from typing import Any
 
 from jsonschema import Draft202012Validator, FormatChecker
@@ -12,25 +12,33 @@ from jsonschema import Draft202012Validator, FormatChecker
 from scripts.evaluation.calculate_metrics import calculate_metrics
 from scripts.replay.allocator_functional_replay import run_golden_path_replay
 from scripts.replay.allocator_historical_replay import run_natural_strict_replay
-from scripts.replay.allocator_validation_contracts import VALIDATION_SCHEMA_VERSION
+from scripts.replay.allocator_validation_contracts import (
+    VALIDATION_SCHEMA_VERSION,
+    assess_walk_forward_readiness,
+    detect_source_revision,
+)
 
 
 _STRATEGY = "ai_instrument_allocator_v1"
 
 
-def _source_revision(project_root: Path) -> str:
-    try:
-        completed = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=project_root,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return "not_recorded"
-    return completed.stdout.strip() or "not_recorded"
+def _protected_forward_hashes(root: Path) -> dict[str, str]:
+    directories = (
+        root / "state" / "strategy_sleeves" / _STRATEGY,
+        root / "logs" / "strategy_sleeves" / _STRATEGY,
+        root / "logs" / "ai_instrument_allocator_snapshots",
+    )
+    hashes: dict[str, str] = {}
+    for directory in directories:
+        if not directory.exists():
+            continue
+        for path in sorted(item for item in directory.rglob("*") if item.is_file()):
+            key = str(path.relative_to(root))
+            try:
+                hashes[key] = hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError:
+                hashes[key] = "unreadable_during_capture"
+    return hashes
 
 
 def _forward_evidence(data_root: Path) -> dict[str, Any]:
@@ -74,7 +82,8 @@ def build_allocator_validation_report(
 ) -> dict[str, Any]:
     source_root = Path(project_root).resolve()
     observed_root = Path(data_root or project_root).resolve()
-    revision = _source_revision(source_root)
+    protected_before = _protected_forward_hashes(observed_root)
+    revision = detect_source_revision(source_root)
     natural = run_natural_strict_replay(
         observed_root,
         project_root=source_root,
@@ -100,6 +109,7 @@ def build_allocator_validation_report(
             "forward_performance_claimed": False,
         }
 
+    protected_after = _protected_forward_hashes(observed_root)
     report = {
         "schema_version": VALIDATION_SCHEMA_VERSION,
         "strategy": _STRATEGY,
@@ -107,6 +117,9 @@ def build_allocator_validation_report(
         "functional_liveness": functional,
         "historical_performance": natural,
         "forward_evidence": _forward_evidence(observed_root),
+        "walk_forward_readiness": assess_walk_forward_readiness(
+            natural.get("data_completeness", {})
+        ),
         "evidence_boundaries": {
             "functional_liveness": (
                 "Fixed fixtures prove production-path liveness only."
@@ -139,6 +152,11 @@ def build_allocator_validation_report(
             )
             if include_functional
             else None,
+            "forward_state_logs_unchanged": protected_after == protected_before,
+            "forward_protected_file_count": len(protected_before),
+            "forward_protected_scope": (
+                "all files under allocator state, allocator logs, and immutable snapshots"
+            ),
         },
     }
     schema = json.loads(

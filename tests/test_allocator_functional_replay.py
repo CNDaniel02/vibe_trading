@@ -56,13 +56,22 @@ def test_golden_path_uses_formal_allocator_broker_wal_mandate_exit_and_pnl(
         "exit_filled": True,
         "mandate_closed": True,
         "pnl_attributed": True,
+        "paper_broker_boundary": True,
+        "live_write_guard_clean": True,
     }
     assert scenario["entry_order_status"] == "filled"
     assert scenario["exit_order_status"] == "filled"
     assert scenario["wal_committed_transactions"] == 2
+    assert scenario["wal_identity_valid"] is True
+    assert scenario["wal_order_ids"] == scenario["expected_wal_order_ids"]
+    assert all(scenario["deterministic_risk_evidence"].values())
     assert scenario["closed_trade_count"] == 1
     assert scenario["realized_pnl_usd"] > 0
+    assert scenario["manifest"]["source_revision"] != "not_recorded"
     assert scenario["live_broker_write_calls"] == 0
+    assert scenario["live_write_guard"]["installed"] is True
+    assert scenario["live_write_guard"]["attempts"] == []
+    assert scenario["live_write_guard"]["paper_broker_boundary_verified"] is True
     assert scenario["live_order_tools_called"] is False
     assert scenario["write_scope"] == "temporary_root_only"
     assert scenario["temporary_root_exists_after"] is False
@@ -89,3 +98,44 @@ def test_golden_path_does_not_modify_forward_allocator_state_or_logs() -> None:
         "live_broker_write_calls": 0,
     }
     assert all(item["source_root_unchanged"] for item in report["scenarios"])
+
+
+def test_golden_path_never_constructs_network_market_data_adapters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.discovery.ai_gated_pipeline as pipeline_module
+    from scripts.replay.allocator_functional_replay import run_golden_path_replay
+
+    def blocked(*_args, **_kwargs):
+        pytest.fail("golden replay attempted to construct a network adapter")
+
+    monkeypatch.setattr(pipeline_module, "RobinhoodDiscoveryAdapter", blocked)
+    monkeypatch.setattr(pipeline_module, "ExaNewsAdapter", blocked)
+    monkeypatch.setattr(pipeline_module, "RobinhoodOptionMarketDataAdapter", blocked)
+
+    report = run_golden_path_replay(
+        Path(__file__).resolve().parents[1],
+        scenario_ids=["bearish_put"],
+    )
+
+    assert report["summary"]["passed"] == 1
+    assert report["summary"]["live_broker_write_calls"] == 0
+
+
+def test_golden_live_write_guard_counts_and_blocks_adapter_attempt() -> None:
+    from scripts.broker.robinhood_readonly_adapter import (
+        LiveOrderToolBlocked,
+        RobinhoodReadonlyAdapter,
+    )
+    from scripts.replay.allocator_functional_replay import (
+        _deny_live_broker_writes,
+    )
+
+    attempts: list[dict[str, str]] = []
+    with pytest.raises(LiveOrderToolBlocked):
+        with _deny_live_broker_writes() as attempts:
+            RobinhoodReadonlyAdapter().place_equity_order(symbol="SPY")
+
+    assert attempts == [
+        {"boundary": "readonly_adapter", "tool": "place_equity_order"}
+    ]
