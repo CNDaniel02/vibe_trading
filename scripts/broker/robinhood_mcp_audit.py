@@ -11,6 +11,8 @@ import argparse
 import asyncio
 import json
 import logging
+import math
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -25,13 +27,43 @@ import win32crypt
 from mcp import ClientSession
 from mcp.client.auth import OAuthClientProvider
 from mcp.client.streamable_http import streamable_http_client
-from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
+from mcp.shared.auth import (
+    OAuthClientInformationFull,
+    OAuthClientMetadata,
+    OAuthMetadata,
+    OAuthToken,
+)
 from pydantic import AnyUrl
 
 from scripts.core.config import PROJECT_ROOT, load_runtime_config
+from scripts.core.file_lock import InterProcessFileLock
 
 
 ROBINHOOD_TRADING_MCP_URL = "https://agent.robinhood.com/mcp/trading"
+TOKEN_REFRESH_SKEW_SECONDS = 60
+
+
+def _validated_robinhood_oauth_metadata(
+    metadata: OAuthMetadata,
+) -> OAuthMetadata:
+    for field in (
+        "issuer",
+        "authorization_endpoint",
+        "token_endpoint",
+        "registration_endpoint",
+    ):
+        value = getattr(metadata, field)
+        if value is None:
+            continue
+        parsed = urlparse(str(value))
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme != "https" or not (
+            host == "robinhood.com" or host.endswith(".robinhood.com")
+        ):
+            raise ValueError(
+                f"Robinhood OAuth {field} must use a Robinhood HTTPS endpoint"
+            )
+    return metadata
 
 # Captured from the current authenticated MCP runtime. The audit treats absent
 # names as a failure and surfaces additions for manual review rather than
@@ -142,13 +174,53 @@ class CredentialStore:
 
     async def get_tokens(self) -> OAuthToken | None:
         with self._lock:
-            raw = self._read().get("tokens")
-        return OAuthToken.model_validate(raw) if raw else None
+            envelope = self._read()
+            raw = envelope.get("tokens")
+            legacy_modified_at = self.path.stat().st_mtime if self.path.exists() else None
+        if not raw:
+            return None
+        tokens = OAuthToken.model_validate(raw)
+        if tokens.expires_in is None:
+            return tokens
+        expires_at = envelope.get("token_expires_at_epoch")
+        if expires_at is None:
+            saved_at = envelope.get("token_saved_at_epoch", legacy_modified_at)
+            if saved_at is not None:
+                expires_at = float(saved_at) + int(tokens.expires_in)
+                with self._lock:
+                    latest = self._read()
+                    if latest.get("token_expires_at_epoch") is None:
+                        latest["token_saved_at_epoch"] = float(saved_at)
+                        latest["token_expires_at_epoch"] = expires_at
+                        self._write(latest)
+        if expires_at is None:
+            return tokens
+        remaining = max(
+            0,
+            math.ceil(float(expires_at) - time.time())
+            - TOKEN_REFRESH_SKEW_SECONDS,
+        )
+        return tokens.model_copy(update={"expires_in": remaining})
 
     async def set_tokens(self, tokens: OAuthToken) -> None:
         with self._lock:
             envelope = self._read()
+            existing_raw = envelope.get("tokens")
+            if not tokens.refresh_token and existing_raw:
+                existing = OAuthToken.model_validate(existing_raw)
+                if existing.refresh_token:
+                    tokens = tokens.model_copy(
+                        update={"refresh_token": existing.refresh_token}
+                    )
+            saved_at = time.time()
             envelope["tokens"] = tokens.model_dump(mode="json")
+            envelope["token_saved_at_epoch"] = saved_at
+            if tokens.expires_in is None:
+                envelope.pop("token_expires_at_epoch", None)
+            else:
+                envelope["token_expires_at_epoch"] = saved_at + int(
+                    tokens.expires_in
+                )
             self._write(envelope)
 
     async def get_client_info(self) -> OAuthClientInformationFull | None:
@@ -160,6 +232,17 @@ class CredentialStore:
         with self._lock:
             envelope = self._read()
             envelope["client_info"] = client_info.model_dump(mode="json")
+            self._write(envelope)
+
+    async def get_oauth_metadata(self) -> OAuthMetadata | None:
+        with self._lock:
+            raw = self._read().get("oauth_metadata")
+        return OAuthMetadata.model_validate(raw) if raw else None
+
+    async def set_oauth_metadata(self, metadata: OAuthMetadata) -> None:
+        with self._lock:
+            envelope = self._read()
+            envelope["oauth_metadata"] = metadata.model_dump(mode="json")
             self._write(envelope)
 
     def archive_existing(self) -> Path | None:
@@ -196,6 +279,69 @@ class CapabilityAudit:
         }
 
 
+class PersistentOAuthClientProvider(OAuthClientProvider):
+    """Restore persisted token expiry and retain non-rotated refresh tokens."""
+
+    def __init__(
+        self,
+        *args: Any,
+        bootstrap_oauth_metadata: OAuthMetadata,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.bootstrap_oauth_metadata = bootstrap_oauth_metadata
+
+    async def _persist_oauth_metadata(self) -> None:
+        metadata = self.context.oauth_metadata
+        storage = self.context.storage
+        if metadata is not None and isinstance(storage, CredentialStore):
+            await storage.set_oauth_metadata(
+                _validated_robinhood_oauth_metadata(metadata)
+            )
+
+    async def _initialize(self) -> None:
+        await super()._initialize()
+        storage = self.context.storage
+        persisted_metadata = (
+            await storage.get_oauth_metadata()
+            if isinstance(storage, CredentialStore)
+            else None
+        )
+        self.context.oauth_metadata = _validated_robinhood_oauth_metadata(
+            persisted_metadata or self.bootstrap_oauth_metadata
+        )
+        if persisted_metadata is None and isinstance(storage, CredentialStore):
+            await storage.set_oauth_metadata(self.bootstrap_oauth_metadata)
+        if self.context.current_tokens is not None:
+            self.context.update_token_expiry(self.context.current_tokens)
+
+    async def _handle_token_response(self, response: httpx.Response) -> None:
+        await super()._handle_token_response(response)
+        await self._persist_oauth_metadata()
+
+    async def _handle_refresh_response(self, response: httpx.Response) -> bool:
+        prior_refresh_token = (
+            self.context.current_tokens.refresh_token
+            if self.context.current_tokens is not None
+            else None
+        )
+        refreshed = await super()._handle_refresh_response(response)
+        if (
+            refreshed
+            and prior_refresh_token
+            and self.context.current_tokens is not None
+            and not self.context.current_tokens.refresh_token
+        ):
+            tokens = self.context.current_tokens.model_copy(
+                update={"refresh_token": prior_refresh_token}
+            )
+            self.context.current_tokens = tokens
+            await self.context.storage.set_tokens(tokens)
+        if refreshed:
+            await self._persist_oauth_metadata()
+        return refreshed
+
+
 class RobinhoodMcpCapabilityClient:
     """Create an OAuth session and audit only the server's declared tools."""
 
@@ -214,6 +360,35 @@ class RobinhoodMcpCapabilityClient:
         self.client_name = str(config.get("client_name", "auto-trading-skill read-only capability audit"))
         self.interactive_oauth = interactive_oauth
         self.request_timeout_seconds = float(config.get("request_timeout_seconds", 20))
+        self.oauth_metadata = self._validated_oauth_metadata(
+            dict(config.get("oauth_metadata", {}))
+        )
+
+    def _validated_oauth_metadata(self, raw: dict[str, Any]) -> OAuthMetadata:
+        metadata = OAuthMetadata(
+            issuer=raw.get("issuer", self.endpoint),
+            authorization_endpoint=raw.get(
+                "authorization_endpoint", "https://robinhood.com/oauth"
+            ),
+            token_endpoint=raw.get(
+                "token_endpoint", "https://api.robinhood.com/oauth2/token/"
+            ),
+            registration_endpoint=raw.get(
+                "registration_endpoint",
+                "https://agent.robinhood.com/oauth/trading/register",
+            ),
+            scopes_supported=raw.get("scopes_supported", ["internal"]),
+            grant_types_supported=raw.get(
+                "grant_types_supported", ["authorization_code", "refresh_token"]
+            ),
+            token_endpoint_auth_methods_supported=raw.get(
+                "token_endpoint_auth_methods_supported", ["none"]
+            ),
+            code_challenge_methods_supported=raw.get(
+                "code_challenge_methods_supported", ["S256"]
+            ),
+        )
+        return _validated_robinhood_oauth_metadata(metadata)
 
     async def _show_authorization_url(self, authorization_url: str) -> None:
         if not self.interactive_oauth:
@@ -241,7 +416,7 @@ class RobinhoodMcpCapabilityClient:
         return code, params.get("state", [None])[0]
 
     def _oauth(self) -> OAuthClientProvider:
-        return OAuthClientProvider(
+        return PersistentOAuthClientProvider(
             server_url=self.endpoint,
             client_metadata=OAuthClientMetadata(
                 client_name=self.client_name,
@@ -253,6 +428,7 @@ class RobinhoodMcpCapabilityClient:
             storage=self.store,
             redirect_handler=self._show_authorization_url,
             callback_handler=self._read_callback,
+            bootstrap_oauth_metadata=self.oauth_metadata,
         )
 
     def _session_deadline_seconds(self) -> float | None:
@@ -261,13 +437,42 @@ class RobinhoodMcpCapabilityClient:
         # for the user must not consume the paper runtime's hard deadline.
         return None if self.interactive_oauth else self.request_timeout_seconds
 
+    async def _acquire_refresh_lock_if_needed(
+        self,
+    ) -> InterProcessFileLock | None:
+        tokens = await self.store.get_tokens()
+        if (
+            tokens is None
+            or not tokens.refresh_token
+            or tokens.expires_in is None
+            or tokens.expires_in > 0
+        ):
+            return None
+        lock = InterProcessFileLock(
+            self.store.path.with_suffix(self.store.path.suffix + ".refresh.lock"),
+            timeout_seconds=max(30.0, self.request_timeout_seconds + 5.0),
+        )
+        if not lock.acquire():
+            raise TimeoutError("timed out waiting for Robinhood OAuth refresh lock")
+        refreshed_by_peer = await self.store.get_tokens()
+        if (
+            refreshed_by_peer is not None
+            and refreshed_by_peer.expires_in is not None
+            and refreshed_by_peer.expires_in > 0
+        ):
+            lock.release()
+            return None
+        return lock
+
     @asynccontextmanager
     async def session(self) -> AsyncIterator[ClientSession]:
         oauth_logger = logging.getLogger("mcp.client.auth.oauth2")
         previous_disabled = oauth_logger.disabled
+        refresh_lock: InterProcessFileLock | None = None
         if not self.interactive_oauth:
             oauth_logger.disabled = True
         try:
+            refresh_lock = await self._acquire_refresh_lock_if_needed()
             async with asyncio.timeout(self._session_deadline_seconds()):
                 oauth = self._oauth()
                 async with httpx.AsyncClient(
@@ -285,8 +490,13 @@ class RobinhoodMcpCapabilityClient:
                     ) as (read_stream, write_stream, _):
                         async with ClientSession(read_stream, write_stream) as session:
                             await session.initialize()
+                            if refresh_lock is not None:
+                                refresh_lock.release()
+                                refresh_lock = None
                             yield session
         finally:
+            if refresh_lock is not None:
+                refresh_lock.release()
             oauth_logger.disabled = previous_disabled
 
     async def probe(self) -> dict[str, Any]:

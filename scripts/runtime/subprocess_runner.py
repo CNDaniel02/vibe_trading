@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from scripts.adapters.errors import redact_external_error_text
 from scripts.core.audit import append_jsonl
 from scripts.core.models import utc_now
 
@@ -184,7 +185,8 @@ class SubprocessJobRunner:
     @staticmethod
     def _safe_error(text: str) -> str:
         lines = [line.strip() for line in text.splitlines() if line.strip()]
-        return (lines[-1] if lines else "child process failed")[:500]
+        message = lines[-1] if lines else "child process failed"
+        return redact_external_error_text(message)[:500]
 
     @staticmethod
     def _terminate_process_tree(process: subprocess.Popen[str]) -> None:

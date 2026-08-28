@@ -3392,6 +3392,199 @@ def test_allocator_equity_monitor_uses_mandate_trading_horizon_not_calendar_stop
     assert exited["exits"][0]["reason"] == "position mandate planned exit reached"
 
 
+def test_allocator_equity_monitor_uses_readonly_fallback_when_robinhood_is_unavailable(
+    paper_root: Path,
+) -> None:
+    from scripts.adapters.errors import AdapterDataError
+    from scripts.core.models import Position, Quote
+    from scripts.discovery.ai_instrument_allocator_pipeline import (
+        AiInstrumentAllocatorPipeline,
+    )
+
+    class FailedRobinhood(_AllocatorExecutionDiscovery):
+        def fetch_current_quote(self, *_args, **_kwargs):
+            raise AdapterDataError("Robinhood OAuth authorization is required")
+
+    class ReadonlyFallback:
+        calls = 0
+
+        @staticmethod
+        def readiness():
+            return {"ready": True}
+
+        def fetch_quotes(self, symbols, **_kwargs):
+            self.calls += 1
+            return {
+                symbol: Quote(
+                    symbol,
+                    101.0,
+                    101.01,
+                    101.005,
+                    NEXT_CLOSE_EXIT,
+                    source="alpaca:fixture",
+                    avg_daily_volume_usd=500_000_000,
+                )
+                for symbol in symbols
+            }
+
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    fallback = ReadonlyFallback()
+    pipeline = AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=FailedRobinhood(NEXT_CLOSE_EXIT),
+        news_adapter=_NoNews(),
+        option_data=_AllocatorNoOptions(),
+        equity_quote_fallback=fallback,
+    )
+    pipeline.broker.store.save_positions(
+        {
+            "AAPL": Position(
+                "AAPL",
+                1.0,
+                100.0,
+                "2026-07-13T15:00:00+00:00",
+                "2026-07-13T15:00:00+00:00",
+            )
+        }
+    )
+    pipeline.mandates.store.write_json(
+        "position_mandates.json",
+        {
+            "equity:AAPL": _open_allocator_mandate(
+                "equity:AAPL",
+                horizon="next_close",
+                max_holding_trading_days=1,
+                opened_at="2026-07-13T15:00:00+00:00",
+                planned_exit_at=NEXT_CLOSE_EXIT,
+            )
+        },
+    )
+
+    result = pipeline.monitor_only(NEXT_CLOSE_EXIT)
+
+    assert fallback.calls == 1
+    assert pipeline.broker.store.positions() == {}
+    assert result["exits"][0]["reason"] == "position mandate planned exit reached"
+    assert result["portfolio"]["marked_nav_usd"] is not None
+    assert result["quote_errors"] == {}
+
+
+def test_allocator_entry_fails_closed_when_primary_and_fallback_have_no_quote(
+    paper_root: Path,
+) -> None:
+    from scripts.adapters.errors import AdapterDataError
+    from scripts.discovery.ai_instrument_allocator_pipeline import (
+        AiInstrumentAllocatorPipeline,
+    )
+
+    class FailedRobinhood(_AllocatorExecutionDiscovery):
+        def fetch_current_quote(self, *_args, **_kwargs):
+            raise AdapterDataError("Robinhood OAuth authorization is required")
+
+    class MissingFallback:
+        @staticmethod
+        def readiness():
+            return {"ready": True}
+
+        @staticmethod
+        def fetch_quotes(_symbols, **_kwargs):
+            return {}
+
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    pipeline = AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=FailedRobinhood(REGULAR_NOW),
+        news_adapter=_NoNews(),
+        option_data=_AllocatorNoOptions(),
+        equity_quote_fallback=MissingFallback(),
+    )
+
+    result = pipeline._execute_plan(
+        {
+            "plan_id": "missing-fallback-quote-plan",
+            "strategy": "ai_instrument_allocator_v1",
+            "ticker": "AAPL",
+            "stage": "intraday",
+            "signal": _anchored_signal(),
+            "snapshot": {"snapshot_id": "missing-fallback-quote-snapshot"},
+        },
+        REGULAR_NOW,
+        stage="intraday",
+    )
+
+    assert result["status"] == "no_trade"
+    assert result["order"] is None
+    assert result["reason"].startswith("fresh executable data failed closed:")
+    assert pipeline.broker.store.orders() == {}
+    assert pipeline.option_broker.store.orders() == {}
+
+
+def test_allocator_option_data_failure_stays_fail_closed_with_equity_quote_fallback(
+    paper_root: Path,
+) -> None:
+    from scripts.adapters.errors import AdapterDataError
+    from scripts.discovery.ai_instrument_allocator_pipeline import (
+        AiInstrumentAllocatorPipeline,
+    )
+
+    class FailedRobinhood(_AllocatorExecutionDiscovery):
+        def fetch_current_quote(self, *_args, **_kwargs):
+            raise AdapterDataError("Robinhood OAuth authorization is required")
+
+    class EquityFallback:
+        @staticmethod
+        def readiness():
+            return {"ready": True}
+
+        @staticmethod
+        def fetch_quotes(symbols, **_kwargs):
+            return {symbol: _underlying_quote() for symbol in symbols}
+
+    class FailedOptionData(_AllocatorNoOptions):
+        def fetch_contract_candidates(self, **_kwargs):
+            raise AdapterDataError("Robinhood option data unavailable")
+
+    config = load_runtime_config(paper_root)
+    tracker = UsageTracker()
+    pipeline = AiInstrumentAllocatorPipeline(
+        paper_root,
+        config,
+        MockProvider(tracker),
+        tracker,
+        discovery_adapter=FailedRobinhood(REGULAR_NOW),
+        news_adapter=_NoNews(),
+        option_data=FailedOptionData(),
+        equity_quote_fallback=EquityFallback(),
+    )
+
+    result = pipeline._execute_plan(
+        {
+            "plan_id": "failed-option-data-plan",
+            "strategy": "ai_instrument_allocator_v1",
+            "ticker": "AAPL",
+            "stage": "intraday",
+            "signal": _anchored_signal(),
+            "snapshot": {"snapshot_id": "failed-option-data-snapshot"},
+        },
+        REGULAR_NOW,
+        stage="intraday",
+    )
+
+    assert result["status"] == "no_trade"
+    assert result["order"] is None
+    assert "Robinhood option data unavailable" in result["reason"]
+    assert pipeline.broker.store.orders() == {}
+    assert pipeline.option_broker.store.orders() == {}
+
+
 def test_allocator_equity_monitor_uses_persisted_stop_after_config_change(
     paper_root: Path,
     monkeypatch: pytest.MonkeyPatch,

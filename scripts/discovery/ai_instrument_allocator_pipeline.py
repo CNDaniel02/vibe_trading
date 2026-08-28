@@ -173,7 +173,7 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
         for symbol in equity_symbols:
             position = positions.get(symbol)
             try:
-                quotes[symbol] = self.discovery.fetch_current_quote(
+                quotes[symbol] = self._fetch_current_equity_quote(
                     symbol,
                     average_daily_volume_usd=(
                         position.average_price * 1_000_000
@@ -1236,7 +1236,7 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
         if stage == "intraday" and not signal.get("entry_now", False):
             return {"status": "no_trade", "reason": "model did not authorize entry", "order": None}
         try:
-            quote = self.discovery.fetch_current_quote(
+            quote = self._fetch_current_equity_quote(
                 ticker,
                 average_daily_volume_usd=None,
             )
@@ -1628,7 +1628,7 @@ class AiInstrumentAllocatorPipeline(AiGatedPaperPipeline):
         marks = dict(equity_quotes or {})
         if equity_quotes is None:
             for symbol, position in equity_positions.items():
-                marks[symbol] = self.discovery.fetch_current_quote(
+                marks[symbol] = self._fetch_current_equity_quote(
                     symbol,
                     average_daily_volume_usd=position.average_price * 1_000_000,
                 )

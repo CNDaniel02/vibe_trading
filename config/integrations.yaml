@@ -62,6 +62,15 @@ robinhood_mcp:
   redirect_uri: http://127.0.0.1:8765/callback
   client_name: auto-trading-skill read-only capability audit
   expected_tool_count: 50
+  oauth_metadata:
+    issuer: https://agent.robinhood.com/mcp/trading
+    authorization_endpoint: https://robinhood.com/oauth
+    token_endpoint: https://api.robinhood.com/oauth2/token/
+    registration_endpoint: https://agent.robinhood.com/oauth/trading/register
+    scopes_supported: [internal]
+    grant_types_supported: [authorization_code, refresh_token]
+    token_endpoint_auth_methods_supported: [none]
+    code_challenge_methods_supported: [S256]
 
 runtime:
   forward_cycle_seconds: 300

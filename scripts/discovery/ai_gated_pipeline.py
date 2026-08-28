@@ -44,6 +44,7 @@ class AiGatedPaperPipeline:
         discovery_adapter: RobinhoodDiscoveryAdapter | None = None,
         news_adapter: ExaNewsAdapter | None = None,
         option_data: RobinhoodOptionMarketDataAdapter | None = None,
+        equity_quote_fallback: Any | None = None,
     ) -> None:
         self.root = Path(root)
         self.config = config
@@ -65,6 +66,7 @@ class AiGatedPaperPipeline:
             config,
             self.root,
         )
+        self.equity_quote_fallback = equity_quote_fallback
         self.team = AiGatedInvestmentTeam(config, provider, tracker)
         self.tracker = tracker
         self.evidence = EvidenceSnapshotStore(self.root)
@@ -88,6 +90,44 @@ class AiGatedPaperPipeline:
             initial_cash=initial_cash,
         )
         self.clock = UsEquityMarketClock()
+
+    def _fetch_current_equity_quote(
+        self,
+        symbol: str,
+        *,
+        average_daily_volume_usd: float | None,
+        asset_class: str = "us_equity",
+    ) -> Quote:
+        try:
+            return self.discovery.fetch_current_quote(
+                symbol,
+                average_daily_volume_usd=average_daily_volume_usd,
+                asset_class=asset_class,
+            )
+        except Exception as primary_error:
+            fallback = self.equity_quote_fallback
+            if fallback is None or not fallback.readiness().get("ready", False):
+                raise
+            quote = fallback.fetch_quotes(
+                [symbol],
+                liquidity_usd={symbol: average_daily_volume_usd},
+                asset_classes={symbol: asset_class},
+            ).get(symbol)
+            if quote is None:
+                raise primary_error
+            append_jsonl(
+                self.root,
+                f"strategy_sleeves/{self.namespace}/audit.jsonl",
+                {
+                    "event": "readonly_equity_quote_fallback_used",
+                    "symbol": symbol,
+                    "primary_error_type": type(primary_error).__name__,
+                    "fallback_source": quote.source,
+                    "quote_asof": quote.asof,
+                    "live_order_tools_called": False,
+                },
+            )
+            return quote
 
     def run(self, now: str | None = None) -> dict[str, Any]:
         decision_time = now or utc_now()
@@ -410,7 +450,7 @@ class AiGatedPaperPipeline:
         quote_errors: dict[str, str] = {}
         for symbol, position in positions.items():
             try:
-                quotes[symbol] = self.discovery.fetch_current_quote(
+                quotes[symbol] = self._fetch_current_equity_quote(
                     symbol,
                     average_daily_volume_usd=position.average_price * 1_000_000,
                 )
@@ -905,7 +945,7 @@ class AiGatedPaperPipeline:
             }
         observed = Quote(**item["market_context"]["quote"])
         try:
-            quote = self.discovery.fetch_current_quote(
+            quote = self._fetch_current_equity_quote(
                 ticker,
                 average_daily_volume_usd=observed.avg_daily_volume_usd,
                 asset_class=observed.asset_class,

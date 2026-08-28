@@ -113,6 +113,13 @@ class ForwardPaperService:
             if self.fallback_quote_provider
             else None
         )
+        ai_equity_quote_fallback = (
+            self.quote_adapter
+            if self.quote_provider == "alpaca"
+            else self.fallback_quote_adapter
+            if self.fallback_quote_provider == "alpaca"
+            else None
+        )
         self.news_adapter = ExaNewsAdapter(forward.get("exa", {}))
         self.swarm = VibeResearchSwarmAdapter(self.root, integrations.get("vibe", {}))
         self.clock = UsEquityMarketClock()
@@ -136,6 +143,7 @@ class ForwardPaperService:
             tracker,
             news_adapter=self.news_adapter,
             option_data=self.option_data,
+            equity_quote_fallback=ai_equity_quote_fallback,
         )
         self.ai_instrument_allocator_pipeline = AiInstrumentAllocatorPipeline(
             self.root,
@@ -144,6 +152,7 @@ class ForwardPaperService:
             tracker,
             news_adapter=self.news_adapter,
             option_data=self.option_data,
+            equity_quote_fallback=ai_equity_quote_fallback,
         )
         self.catalyst_signals = CatalystSignalStore(self.root)
         self.outcome_labeler = CandidateOutcomeLabeler(
@@ -1576,7 +1585,11 @@ def serve(root: str | Path) -> None:
             ["--allocator-stage", stage],
             "allocator_worker_timeout_seconds",
             600,
-            resources={"allocator_account", "evidence_store"},
+            resources=(
+                {"allocator_account"}
+                if stage == "open_execution"
+                else {"allocator_account", "evidence_store"}
+            ),
         )
 
     def run_allocator_monitor() -> None:

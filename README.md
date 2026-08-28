@@ -158,13 +158,23 @@ interactively:
 .\.venv\Scripts\python.exe -m scripts.broker.robinhood_mcp_audit --reset-credentials
 ```
 
-The OAuth token and client registration are stored only in a current-user DPAPI-encrypted file under `state/`. The audit verifies the complete 50-tool manifest. Runtime calls use an explicit read-only allowlist for quotes, historicals, fundamentals, financials, technical indicators, earnings, saved scans, instrument search, and option market data. Scanner creation/update and all order tools remain unavailable.
+Do not reset credentials on a schedule. Access tokens can be short lived (the
+August 2026 session lasted about 7.7 days), but the client now restores the
+persisted expiry and uses the stored refresh token automatically. Run
+`--reset-credentials` only when refresh is rejected, revoked, or unavailable.
+Concurrent workers share a cross-process refresh lock and refresh 60 seconds
+early, so a rotating refresh token is never raced by multiple jobs.
+
+The OAuth token, authorization-server metadata, and client registration are stored only in a current-user DPAPI-encrypted file under `state/`. Persisted metadata is revalidated against the Robinhood HTTPS host allowlist before it can receive a refresh token. Refresh responses that do not rotate the refresh token retain the previous encrypted value, and persisted child-process errors redact OAuth secrets. The audit verifies the pinned 50-tool baseline and reports newly advertised tools without trusting them. Runtime calls use an explicit read-only allowlist for quotes, historicals, fundamentals, financials, technical indicators, earnings, saved scans, instrument search, and option market data. Scanner creation/update, crypto, option exercise, and all order tools remain unavailable.
 
 Alpaca is enabled as a standby market-data source when `ALPACA_API_KEY_ID` and
 `ALPACA_API_SECRET_KEY` are present. Robinhood MCP remains the primary quote
 provider. A bounded Robinhood failure automatically falls back to Alpaca IEX
 when `forward_data.fallback_quote_provider: alpaca`; the effective provider and
-each data-collection stage are written to append-only runtime logs.
+each data-collection stage are written to append-only runtime logs. The same
+read-only equity fallback protects AI-gated and allocator equity monitoring,
+valuation, and exits. Option chains and option positions remain Robinhood-only
+and fail closed rather than substituting an equity quote.
 
 ## Commands
 
