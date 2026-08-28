@@ -781,11 +781,17 @@ def test_forward_service_handles_keyboard_interrupt_and_releases_lock(paper_root
 
         def start(self):
             self.running = True
+            allocator_open = next(
+                callback
+                for callback, _args, kwargs in self.jobs
+                if kwargs.get("id") == "allocator-open-execution"
+            )
             eod = next(
                 callback
                 for callback, _args, kwargs in self.jobs
                 if kwargs.get("id") == "eod-guard"
             )
+            allocator_open()
             eod()
             raise KeyboardInterrupt
 
@@ -838,12 +844,17 @@ def test_forward_service_handles_keyboard_interrupt_and_releases_lock(paper_root
     assert events == [
         "forward_service_started",
         "supervised_worker_result",
+        "supervised_worker_result",
         "forward_service_stop_requested",
         "forward_service_stopped",
     ]
     assert FakeScheduler.instance is not None and not FakeScheduler.instance.running
     assert FakeLock.instance is not None and FakeLock.instance.released
     assert worker_calls == [
+        (
+            "allocator_open_execution",
+            {"allocator_account"},
+        ),
         (
             "eod_guard",
             {"main_account", "ai_account", "allocator_account"},

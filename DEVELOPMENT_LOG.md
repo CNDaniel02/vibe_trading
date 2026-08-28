@@ -1,5 +1,15 @@
 # Development Log
 
+## 2026-08-28 (America/Los_Angeles) - Robinhood OAuth 自动刷新与 allocator 行情恢复
+
+- 审计连续运行约 47 小时的 point-in-time runtime records。supervisor、dashboard、heartbeat 和 process lock 均保持存活；从 `2026-08-27 09:46:44` 到 `2026-08-28 12:59:55` 本地时间，584 个 `news_drift` job 因同一 Robinhood OAuth 错误失败。主股票 forward 周期通过 Alpaca IEX fallback 继续完成，但 Robinhood-only scanner、新闻、期权和完整 AI research 处于 degraded 状态。
+- 根因不是“每周必须人工认证”，而是持久化 access token 的观测寿命约为 7.72 天，而上游 MCP Python SDK `OAuthClientProvider` 重启加载 token 后没有恢复 expiry clock，401 后错误进入完整浏览器授权。DPAPI credential store 现在保存绝对 expiry、加载时计算剩余寿命，并在到期前 60 秒进入 refresh window；provider 初始化后恢复 expiry 并自动 refresh。多个 worker 通过跨进程 refresh lock 串行续期并在获得锁后重读凭据，避免 rotating refresh token 被并发覆盖。refresh response 未返回新 refresh token 时继续保留旧加密 token，避免下一次续期能力丢失。API key、token 和 client secret 均未写入日志或 Git。
+- allocator 原先没有股票行情 fallback，导致 MSFT 在 Robinhood 认证失效后无法 mark 或执行计划退出。本次将配置好的 Alpaca read-only adapter 接入旧 AI-gated 和 allocator 的股票 entry revalidation、monitor、valuation 与 exit，并追加 `readonly_equity_quote_fallback_used` 审计事件。期权链和期权仓位不使用现货替代，仍 fail closed。
+- 修复 09:32 allocator `open_execution` 与已停止新增仓的旧 `ai_gated_technical_v1` 同时争用 `evidence_store` 的调度冲突。open execution 不调用 LLM/证据写入，现在只声明 `allocator_account`；overnight、premarket、pre-open 和 intraday research 仍同时锁定 evidence store。
+- 历史 `$2,000` 账本、独立 `$10,000` allocator 账本、订单、成交、PnL、日志和 forward snapshot 均未迁移或改写。所有 fallback 只读，审计字段继续确认 `live_order_tools_called=false`。
+- 独立 final review 发现并修复两个 P2：DPAPI 中的 persisted metadata 与运行时发现 metadata 在接收 refresh token 前都重新执行 Robinhood HTTPS host allowlist；child stderr 写入 `runtime_jobs.jsonl` 前与 adapter error 共用 OAuth secret redaction。新增 protocol response、双 worker refresh、恶意 metadata、subprocess stderr、entry fallback 缺失报价和 option-data fail-closed 回归。
+- 现场非交互 probe 自动续期成功：refresh token 保留，当前 token endpoint 为 `api.robinhood.com`，Robinhood `get_equity_quotes` 返回 MSFT 可用 bid/ask；随后 healthcheck 为 `operational_status=ok`、`runtime_healthy=true`、`ready_for_full_forward_evaluation=true`。服务端当前公布 67 个工具，原 50 个 baseline 全部存在；17 个新增 crypto、option exercise、SEC/news 工具保持未授权，不进入 runtime allowlist。全量 pytest 为 `430 passed`，`compileall` 与 `git diff --check` 通过；仅有 4 条既有上游 `exchange_calendars` deprecation warning。
+
 ## 2026-08-26 (America/Los_Angeles) - Allocator 独立历史验证体系
 
 - 新增三个彼此隔离的证据层。`bullish_equity`、`bullish_call`、`bearish_put` golden fixtures 使用正式 allocator、instrument comparison、deterministic risk、股票/期权 paper broker、fill WAL、position mandate、monitor、exit 和 PnL attribution，但全部写入自动删除的临时 root；MCP `call_tool` 与只读 broker adapter 上安装独立 live-order deny/spy，且核验 concrete broker 均为 paper class，3/3 场景通过、可观察真实 broker write attempts 为 0。这只证明 functional liveness，不作为盈利证据。

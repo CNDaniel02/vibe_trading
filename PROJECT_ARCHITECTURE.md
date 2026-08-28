@@ -213,13 +213,15 @@ flowchart LR
 
 `scripts/runtime/healthcheck.py` 分开报告三个层次：`runtime_healthy` 表示进程、状态和 heartbeat 可信；`forward_ready` 表示核心股票 forward 数据可用；`full_forward_evaluation_ready` 表示所有已启用的股票、期权、catalyst、AI-gated 和 news-drift 线路都可用。只靠备用报价维持股票线时会显示 `operational_status=degraded`，不能再把部分运行误读成全系统正常。
 
+Robinhood MCP 的 access token 不要求按周人工重登。DPAPI credential store 保存绝对过期时间，进程重启后会恢复剩余寿命，并在到期前 60 秒通过跨进程 refresh lock 续期；第二个 worker 获得锁后必须重读新 token，不能重复 refresh。持久化和新发现的 authorization-server metadata 在接收 refresh token 前都必须通过 Robinhood HTTPS host allowlist，runtime stderr 在写入 JSONL 前统一脱敏。只有 refresh 被服务端拒绝、撤销或缺失时才进入交互式重新授权。股票主线、旧 AI-gated 仓位管理和 allocator 股票估值/退出可在 Robinhood 只读请求失败时使用配置好的 Alpaca IEX fallback，并记录来源和原始错误；期权链、期权仓位估值和期权退出仍只接受 Robinhood 的合约级数据，失败时保持 fail-closed。
+
 ## 7. 主股票 Forward Pipeline
 
 一次 `run_once` 按以下顺序进行：
 
 1. 用 NYSE calendar 判断当前是否为 regular session。非正常时段只记录 skip，不交易。
 2. 从 `default_watchlist` 读取股票池，从 `options_watchlist` 读取期权标的池，取并集收集行情，避免两条线互相限制候选。
-3. 通过 Vibe 获取 point-in-time 日线历史，用 Robinhood MCP 获取 bid/ask。Robinhood 失败时可使用配置好的 Alpaca IEX fallback。
+3. 通过 Vibe 获取 point-in-time 日线历史，用 Robinhood MCP 获取 bid/ask。Robinhood 失败时可使用配置好的 Alpaca IEX fallback；相同 fallback 也用于 allocator 的股票持仓估值和退出，期权数据不回退。
 4. 获取 session volume，并建立包含 SPY benchmark、历史收益、成交量、价差、事件时间和持仓状态的 snapshot。
 5. 先处理上周期 open orders、成熟的 outcome label、股票退出、期权 open orders 和期权退出。
 6. 临近收盘 10 分钟时进入 exit-only，不再创建新 entry。
