@@ -192,7 +192,7 @@ def test_interactive_oauth_wait_does_not_consume_runtime_deadline(
     )
 
     async def open_session(client):
-        async with client.session():
+        async with client._session():
             return True
 
     assert asyncio.run(open_session(interactive)) is True

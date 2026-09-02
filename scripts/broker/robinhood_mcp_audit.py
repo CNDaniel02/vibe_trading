@@ -9,16 +9,18 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import math
 import time
-from contextlib import asynccontextmanager
+from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Iterator, TypeVar
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
@@ -41,6 +43,9 @@ from scripts.core.file_lock import InterProcessFileLock
 
 ROBINHOOD_TRADING_MCP_URL = "https://agent.robinhood.com/mcp/trading"
 TOKEN_REFRESH_SKEW_SECONDS = 60
+AUTH_RECONNECT_COOLDOWN_SECONDS = 300
+MAX_AUTH_RECONNECT_LOCK_TIMEOUT_SECONDS = 5.0
+T = TypeVar("T")
 
 
 def _validated_robinhood_oauth_metadata(
@@ -139,6 +144,20 @@ READ_ONLY_DATA_TOOLS = frozenset(
     }
 )
 
+READ_ONLY_MCP_TOOLS = READ_ONLY_DATA_TOOLS | frozenset(
+    {
+        "get_option_chains",
+        "get_option_instruments",
+        "get_option_quotes",
+    }
+)
+
+
+def _access_token_fingerprint(access_token: str | None) -> str | None:
+    if not access_token:
+        return None
+    return hashlib.sha256(access_token.encode("utf-8")).hexdigest()
+
 
 class CredentialStore:
     """Persist OAuth material in a current-user DPAPI encrypted local file.
@@ -151,6 +170,23 @@ class CredentialStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self._lock = RLock()
+
+    def _envelope_lock(self) -> InterProcessFileLock:
+        return InterProcessFileLock(
+            self.path.with_suffix(self.path.suffix + ".envelope.lock"),
+            timeout_seconds=MAX_AUTH_RECONNECT_LOCK_TIMEOUT_SECONDS,
+        )
+
+    @contextmanager
+    def _locked_envelope(self) -> Iterator[dict[str, Any]]:
+        with self._lock:
+            lock = self._envelope_lock()
+            if not lock.acquire():
+                raise TimeoutError("timed out waiting for Robinhood OAuth credential envelope lock")
+            try:
+                yield self._read()
+            finally:
+                lock.release()
 
     def _read(self) -> dict[str, Any]:
         if not self.path.exists():
@@ -181,18 +217,31 @@ class CredentialStore:
             return None
         tokens = OAuthToken.model_validate(raw)
         if tokens.expires_in is None:
-            return tokens
+            return tokens.model_copy(update={"expires_in": 0})
         expires_at = envelope.get("token_expires_at_epoch")
         if expires_at is None:
             saved_at = envelope.get("token_saved_at_epoch", legacy_modified_at)
             if saved_at is not None:
                 expires_at = float(saved_at) + int(tokens.expires_in)
-                with self._lock:
-                    latest = self._read()
-                    if latest.get("token_expires_at_epoch") is None:
-                        latest["token_saved_at_epoch"] = float(saved_at)
-                        latest["token_expires_at_epoch"] = expires_at
-                        self._write(latest)
+                # Persist the legacy absolute expiry before another metadata
+                # update changes the DPAPI file mtime used as the fallback.
+                with self._locked_envelope() as latest:
+                    latest_raw = latest.get("tokens")
+                    if latest_raw:
+                        latest_tokens = OAuthToken.model_validate(latest_raw)
+                        latest_expires_at = latest.get("token_expires_at_epoch")
+                        if latest_expires_at is None:
+                            latest_saved_at = latest.get(
+                                "token_saved_at_epoch", saved_at
+                            )
+                            latest_expires_at = float(latest_saved_at) + int(
+                                latest_tokens.expires_in or 0
+                            )
+                            latest["token_saved_at_epoch"] = float(latest_saved_at)
+                            latest["token_expires_at_epoch"] = latest_expires_at
+                            self._write(latest)
+                        tokens = latest_tokens
+                        expires_at = latest_expires_at
         if expires_at is None:
             return tokens
         remaining = max(
@@ -203,8 +252,7 @@ class CredentialStore:
         return tokens.model_copy(update={"expires_in": remaining})
 
     async def set_tokens(self, tokens: OAuthToken) -> None:
-        with self._lock:
-            envelope = self._read()
+        with self._locked_envelope() as envelope:
             existing_raw = envelope.get("tokens")
             if not tokens.refresh_token and existing_raw:
                 existing = OAuthToken.model_validate(existing_raw)
@@ -223,14 +271,60 @@ class CredentialStore:
                 )
             self._write(envelope)
 
+    async def mark_access_token_expired(self, expected_access_token: str) -> bool:
+        """Force a one-time refresh without discarding the saved refresh token."""
+        with self._locked_envelope() as envelope:
+            raw = envelope.get("tokens")
+            if not raw:
+                return False
+            tokens = OAuthToken.model_validate(raw)
+            if tokens.access_token != expected_access_token or not tokens.refresh_token:
+                return False
+            envelope["token_expires_at_epoch"] = time.time()
+            self._write(envelope)
+        return True
+
+    async def auth_reconnect_cooldown_remaining(self) -> int:
+        with self._lock:
+            envelope = self._read()
+            blocked_until = envelope.get("auth_reconnect_blocked_until_epoch")
+            try:
+                remaining = math.ceil(float(blocked_until) - time.time())
+            except (TypeError, ValueError):
+                return 0
+            if remaining > 0:
+                return remaining
+            # An expired marker is harmless. Do not rewrite the shared token
+            # envelope merely to remove it because another worker may be
+            # persisting a rotated refresh token at the same time.
+        return 0
+
+    async def auth_reconnect_blocked_access_token_fingerprint(self) -> str | None:
+        with self._lock:
+            value = self._read().get("auth_reconnect_blocked_access_token_sha256")
+        return str(value) if isinstance(value, str) and value else None
+
+    async def set_auth_reconnect_cooldown(
+        self,
+        seconds: float,
+        *,
+        access_token_fingerprint: str | None = None,
+    ) -> None:
+        with self._locked_envelope() as envelope:
+            envelope["auth_reconnect_blocked_until_epoch"] = time.time() + max(1.0, seconds)
+            if access_token_fingerprint:
+                envelope["auth_reconnect_blocked_access_token_sha256"] = access_token_fingerprint
+            else:
+                envelope.pop("auth_reconnect_blocked_access_token_sha256", None)
+            self._write(envelope)
+
     async def get_client_info(self) -> OAuthClientInformationFull | None:
         with self._lock:
             raw = self._read().get("client_info")
         return OAuthClientInformationFull.model_validate(raw) if raw else None
 
     async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
-        with self._lock:
-            envelope = self._read()
+        with self._locked_envelope() as envelope:
             envelope["client_info"] = client_info.model_dump(mode="json")
             self._write(envelope)
 
@@ -240,14 +334,13 @@ class CredentialStore:
         return OAuthMetadata.model_validate(raw) if raw else None
 
     async def set_oauth_metadata(self, metadata: OAuthMetadata) -> None:
-        with self._lock:
-            envelope = self._read()
+        with self._locked_envelope() as envelope:
             envelope["oauth_metadata"] = metadata.model_dump(mode="json")
             self._write(envelope)
 
     def archive_existing(self) -> Path | None:
         """Keep an unreadable credential blob out of the active OAuth path."""
-        with self._lock:
+        with self._locked_envelope():
             if not self.path.exists():
                 return None
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -342,6 +435,35 @@ class PersistentOAuthClientProvider(OAuthClientProvider):
         return refreshed
 
 
+class ReadOnlyMcpSession:
+    """Expose only safe MCP session operations to the paper runtime."""
+
+    __slots__ = ("__list_tools", "__send_ping", "__call_tool")
+
+    def __init__(self, session: ClientSession) -> None:
+        self.__list_tools = lambda: session.list_tools()
+        self.__send_ping = lambda: session.send_ping()
+        self.__call_tool = (
+            lambda tool_name, arguments: session.call_tool(
+                tool_name,
+                arguments=arguments,
+            )
+        )
+
+    async def list_tools(self) -> Any:
+        return await self.__list_tools()
+
+    async def send_ping(self) -> Any:
+        return await self.__send_ping()
+
+    async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
+        if tool_name not in READ_ONLY_MCP_TOOLS:
+            raise RuntimeError(
+                f"Robinhood tool is outside the read-only data allowlist: {tool_name}"
+            )
+        return await self.__call_tool(tool_name, arguments)
+
+
 class RobinhoodMcpCapabilityClient:
     """Create an OAuth session and audit only the server's declared tools."""
 
@@ -360,6 +482,13 @@ class RobinhoodMcpCapabilityClient:
         self.client_name = str(config.get("client_name", "auto-trading-skill read-only capability audit"))
         self.interactive_oauth = interactive_oauth
         self.request_timeout_seconds = float(config.get("request_timeout_seconds", 20))
+        self.auth_reconnect_cooldown_seconds = float(
+            config.get("auth_reconnect_cooldown_seconds", AUTH_RECONNECT_COOLDOWN_SECONDS)
+        )
+        self.auth_reconnect_lock_timeout_seconds = min(
+            MAX_AUTH_RECONNECT_LOCK_TIMEOUT_SECONDS,
+            max(0.1, self.request_timeout_seconds),
+        )
         self.oauth_metadata = self._validated_oauth_metadata(
             dict(config.get("oauth_metadata", {}))
         )
@@ -437,6 +566,52 @@ class RobinhoodMcpCapabilityClient:
         # for the user must not consume the paper runtime's hard deadline.
         return None if self.interactive_oauth else self.request_timeout_seconds
 
+    def _refresh_lock(self) -> InterProcessFileLock:
+        return InterProcessFileLock(
+            self.store.path.with_suffix(self.store.path.suffix + ".refresh.lock"),
+            timeout_seconds=self.auth_reconnect_lock_timeout_seconds,
+        )
+
+    async def _acquire_lock(self, lock: InterProcessFileLock) -> bool:
+        acquisition = asyncio.create_task(asyncio.to_thread(lock.acquire))
+        try:
+            return await asyncio.shield(acquisition)
+        except asyncio.CancelledError:
+            def release_if_acquired(future: asyncio.Future[bool]) -> None:
+                try:
+                    if future.result():
+                        lock.release()
+                except BaseException:
+                    return
+
+            acquisition.add_done_callback(release_if_acquired)
+            raise
+
+    async def _has_valid_access_token(
+        self,
+        *,
+        different_from_fingerprint: str | None = None,
+    ) -> bool:
+        tokens = await self.store.get_tokens()
+        if (
+            tokens is None
+            or tokens.expires_in is None
+            or tokens.expires_in <= 0
+        ):
+            return False
+        if different_from_fingerprint is None:
+            return True
+        return _access_token_fingerprint(tokens.access_token) != different_from_fingerprint
+
+    def _readonly_operation_timeout_seconds(self) -> float | None:
+        if self.interactive_oauth:
+            return None
+        return (
+            self.request_timeout_seconds * 2
+            + self.auth_reconnect_lock_timeout_seconds * 2
+            + 1.0
+        )
+
     async def _acquire_refresh_lock_if_needed(
         self,
     ) -> InterProcessFileLock | None:
@@ -448,11 +623,10 @@ class RobinhoodMcpCapabilityClient:
             or tokens.expires_in > 0
         ):
             return None
-        lock = InterProcessFileLock(
-            self.store.path.with_suffix(self.store.path.suffix + ".refresh.lock"),
-            timeout_seconds=max(30.0, self.request_timeout_seconds + 5.0),
-        )
-        if not lock.acquire():
+        lock = self._refresh_lock()
+        if not await self._acquire_lock(lock):
+            if await self._has_valid_access_token():
+                return None
             raise TimeoutError("timed out waiting for Robinhood OAuth refresh lock")
         refreshed_by_peer = await self.store.get_tokens()
         if (
@@ -464,16 +638,142 @@ class RobinhoodMcpCapabilityClient:
             return None
         return lock
 
+    @classmethod
+    def _is_recoverable_auth_failure(cls, exc: BaseException) -> bool:
+        if isinstance(exc, BaseExceptionGroup):
+            return any(
+                cls._is_recoverable_auth_failure(child)
+                for child in exc.exceptions
+            )
+        response = getattr(exc, "response", None)
+        if getattr(response, "status_code", None) == 401:
+            return True
+        message = str(exc).lower()
+        return any(
+            marker in message
+            for marker in (
+                "401 unauthorized",
+                "status code 401",
+                "robinhood oauth authorization is required",
+                "interactive robinhood oauth is disabled",
+            )
+        )
+
+    @classmethod
+    def _contains_cancellation(cls, exc: BaseException) -> bool:
+        if isinstance(exc, asyncio.CancelledError):
+            return True
+        if isinstance(exc, BaseExceptionGroup):
+            return any(cls._contains_cancellation(child) for child in exc.exceptions)
+        return False
+
+    async def _force_refresh_after_auth_failure(
+        self,
+        rejected_access_token_fingerprint: str | None = None,
+    ) -> bool:
+        """Expire the rejected access token so the next session uses refresh_token."""
+        if self.interactive_oauth:
+            return False
+        if rejected_access_token_fingerprint and await self._has_valid_access_token(
+            different_from_fingerprint=rejected_access_token_fingerprint
+        ):
+            return True
+        tokens = await self.store.get_tokens()
+        if tokens is None or not tokens.refresh_token:
+            return False
+        lock = self._refresh_lock()
+        if not await self._acquire_lock(lock):
+            return await self._has_valid_access_token(
+                different_from_fingerprint=rejected_access_token_fingerprint
+            )
+        try:
+            latest = await self.store.get_tokens()
+            if latest is None or not latest.refresh_token:
+                return False
+            if (
+                rejected_access_token_fingerprint
+                and _access_token_fingerprint(latest.access_token)
+                != rejected_access_token_fingerprint
+                and latest.expires_in is not None
+                and latest.expires_in > 0
+            ):
+                return True
+            return await self.store.mark_access_token_expired(latest.access_token)
+        finally:
+            lock.release()
+
+    async def _run_readonly_operation(
+        self,
+        operation: Callable[[ReadOnlyMcpSession], Awaitable[T]],
+    ) -> T:
+        """Retry one read-only operation after a rejected but refreshable token."""
+        async with asyncio.timeout(self._readonly_operation_timeout_seconds()):
+            if not self.interactive_oauth:
+                remaining = await self.store.auth_reconnect_cooldown_remaining()
+                if remaining > 0:
+                    blocked_fingerprint = (
+                        await self.store.auth_reconnect_blocked_access_token_fingerprint()
+                    )
+                    if not (
+                        blocked_fingerprint
+                        and await self._has_valid_access_token(
+                            different_from_fingerprint=blocked_fingerprint
+                        )
+                    ):
+                        raise RuntimeError(
+                            "Robinhood OAuth reconnect is temporarily blocked after a failed refresh; "
+                            f"retry in {remaining} seconds or reauthorize credentials interactively"
+                        )
+
+            forced_refresh = False
+            for _attempt in range(2):
+                tokens = await self.store.get_tokens()
+                rejected_access_token_fingerprint = _access_token_fingerprint(
+                    tokens.access_token if tokens is not None else None
+                )
+                try:
+                    async with self._session() as session:
+                        result = await operation(session)
+                except BaseException as exc:
+                    if self._contains_cancellation(exc):
+                        raise
+                    if self.interactive_oauth or not self._is_recoverable_auth_failure(exc):
+                        raise
+                    if not forced_refresh and await self._force_refresh_after_auth_failure(
+                        rejected_access_token_fingerprint
+                    ):
+                        forced_refresh = True
+                        continue
+                    await self.store.set_auth_reconnect_cooldown(
+                        self.auth_reconnect_cooldown_seconds,
+                        access_token_fingerprint=rejected_access_token_fingerprint,
+                    )
+                    raise RuntimeError(
+                        "Robinhood OAuth reconnect failed after one controlled refresh; "
+                        "run python -m scripts.broker.robinhood_mcp_audit --reset-credentials interactively"
+                    ) from exc
+                return result
+            raise RuntimeError("Robinhood OAuth reconnect retry loop exhausted")
+
+    async def _call_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
+        if tool_name not in READ_ONLY_MCP_TOOLS:
+            raise RuntimeError(
+                f"Robinhood tool is outside the read-only data allowlist: {tool_name}"
+            )
+        return await self._run_readonly_operation(
+            lambda session: session.call_tool(tool_name, arguments=arguments)
+        )
+
     @asynccontextmanager
-    async def session(self) -> AsyncIterator[ClientSession]:
+    async def _session(self) -> AsyncIterator[ReadOnlyMcpSession]:
         oauth_logger = logging.getLogger("mcp.client.auth.oauth2")
         previous_disabled = oauth_logger.disabled
         refresh_lock: InterProcessFileLock | None = None
         if not self.interactive_oauth:
             oauth_logger.disabled = True
         try:
-            refresh_lock = await self._acquire_refresh_lock_if_needed()
             async with asyncio.timeout(self._session_deadline_seconds()):
+                refresh_lock = await self._acquire_refresh_lock_if_needed()
                 oauth = self._oauth()
                 async with httpx.AsyncClient(
                     auth=oauth,
@@ -493,7 +793,7 @@ class RobinhoodMcpCapabilityClient:
                             if refresh_lock is not None:
                                 refresh_lock.release()
                                 refresh_lock = None
-                            yield session
+                            yield ReadOnlyMcpSession(session)
         finally:
             if refresh_lock is not None:
                 refresh_lock.release()
@@ -501,8 +801,9 @@ class RobinhoodMcpCapabilityClient:
 
     async def probe(self) -> dict[str, Any]:
         """Validate the persisted OAuth session without invoking a broker tool."""
-        async with self.session() as session:
-            result = await session.list_tools()
+        result = await self._run_readonly_operation(
+            lambda session: session.list_tools()
+        )
         names = {tool.name for tool in result.tools}
         return {
             "authenticated": True,
@@ -512,9 +813,11 @@ class RobinhoodMcpCapabilityClient:
         }
 
     async def audit(self) -> CapabilityAudit:
-        async with self.session() as session:
+        async def ping_and_list_tools(session: ReadOnlyMcpSession) -> Any:
             await session.send_ping()
-            result = await session.list_tools()
+            return await session.list_tools()
+
+        result = await self._run_readonly_operation(ping_and_list_tools)
         # Do not report a successful OAuth audit unless the persisted material
         # can be read back after the MCP connection has closed.
         if await self.store.get_client_info() is None or await self.store.get_tokens() is None:
@@ -541,8 +844,7 @@ class RobinhoodMcpCapabilityClient:
             return {"data": {"results": []}}
         if len(normalized) > 20:
             raise ValueError("Robinhood get_equity_quotes accepts at most 20 symbols per call")
-        async with self.session() as session:
-            result = await session.call_tool("get_equity_quotes", arguments={"symbols": normalized})
+        result = await self._call_tool("get_equity_quotes", {"symbols": normalized})
         payload = result.structuredContent
         if not isinstance(payload, dict):
             raise RuntimeError("Robinhood get_equity_quotes returned no structured payload")
@@ -567,8 +869,7 @@ class RobinhoodMcpCapabilityClient:
             "bounds": "regular",
             "adjustment_type": "split",
         }
-        async with self.session() as session:
-            result = await session.call_tool("get_equity_historicals", arguments=arguments)
+        result = await self._call_tool("get_equity_historicals", arguments)
         return self._structured_payload(result.structuredContent, "get_equity_historicals")
 
     async def get_scans(self) -> dict[str, Any]:
@@ -651,8 +952,7 @@ class RobinhoodMcpCapabilityClient:
         symbol = underlying_symbol.strip().upper()
         if not symbol:
             raise ValueError("underlying_symbol is required")
-        async with self.session() as session:
-            result = await session.call_tool("get_option_chains", arguments={"underlying_symbol": symbol})
+        result = await self._call_tool("get_option_chains", {"underlying_symbol": symbol})
         return self._structured_payload(result.structuredContent, "get_option_chains")
 
     async def get_option_instruments(
@@ -674,8 +974,7 @@ class RobinhoodMcpCapabilityClient:
         }
         if cursor:
             arguments["cursor"] = cursor
-        async with self.session() as session:
-            result = await session.call_tool("get_option_instruments", arguments=arguments)
+        result = await self._call_tool("get_option_instruments", arguments)
         return self._structured_payload(result.structuredContent, "get_option_instruments")
 
     async def get_option_quotes(self, option_ids: list[str]) -> dict[str, Any]:
@@ -684,15 +983,15 @@ class RobinhoodMcpCapabilityClient:
             return {"data": {"results": []}}
         if len(normalized) > 20:
             raise ValueError("Robinhood option quote batches are limited to 20 contracts")
-        async with self.session() as session:
-            result = await session.call_tool("get_option_quotes", arguments={"instrument_ids": normalized})
+        result = await self._call_tool("get_option_quotes", {"instrument_ids": normalized})
         return self._structured_payload(result.structuredContent, "get_option_quotes")
 
     async def get_earnings_calendar(self, start_date: str, days: int = 7) -> dict[str, Any]:
         if days == 0 or not -31 <= days <= 31:
             raise ValueError("earnings calendar days must be between -31 and 31 and non-zero")
-        async with self.session() as session:
-            result = await session.call_tool("get_earnings_calendar", arguments={"start_date": start_date, "days": days})
+        result = await self._call_tool(
+            "get_earnings_calendar", {"start_date": start_date, "days": days}
+        )
         return self._structured_payload(result.structuredContent, "get_earnings_calendar")
 
     async def get_high_market_cap_earnings_calendar(self, start_date: str, days: int = 7) -> dict[str, Any]:
@@ -706,8 +1005,7 @@ class RobinhoodMcpCapabilityClient:
     async def _call_readonly(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if tool_name not in READ_ONLY_DATA_TOOLS:
             raise RuntimeError(f"Robinhood tool is outside the read-only data allowlist: {tool_name}")
-        async with self.session() as session:
-            result = await session.call_tool(tool_name, arguments=arguments)
+        result = await self._call_tool(tool_name, arguments)
         return self._structured_payload(result.structuredContent, tool_name)
 
     @staticmethod

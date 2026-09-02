@@ -1,5 +1,13 @@
 # Development Log
 
+## 2026-09-02 (America/Los_Angeles) - Robinhood MCP 非交互认证恢复与开盘首 bar 保护
+
+- 读取运行中的 forward service、heartbeat、Dashboard、72 小时 append-only runtime records 和 Robinhood read-only probe。服务保持健康：`2,532` 个 job 完成、`0` 个 failed、`0` 个 timed out；Robinhood MCP 已认证并公布 67 个工具，`get_equity_quotes` 和一个历史行情只读请求均成功。审计期间没有 `live_order_tools_called=true`，且没有发现 OAuth 401、refresh 或 token 泄露记录。当前 credential store 的 access token 仍有约 6.6 天有效期，refresh token 已持久化在当前 Windows 用户的 DPAPI 文件中。
+- 补齐服务端提前拒绝仍显示有效的 access token 时的恢复路径。每个 allowlisted 只读 MCP operation 在遇到可识别的 401 后，最多一次把被拒 access token 标为过期、通过跨进程 refresh lock 重新建立 session，并重试原 operation 一次；只含认证异常的 AnyIO `ExceptionGroup` 也会递归识别。包含 `CancelledError` 的 `BaseExceptionGroup` 保持原样传播，绝不吞掉 scheduler shutdown/cancellation。client 不再公开 raw session；内部 session 只产生没有公开 raw `ClientSession` attribute 的 allowlisted `list_tools`、`send_ping`、行情 `call_tool` 门面，不能经由 runtime 调用订单、撤单或 review 工具。缺失 `expires_in` 的任何旧凭据均 fail-safe 地视为到期，以便 SDK 刷新或非交互地失败关闭，而不是永久信任。
+- 如果 refresh token 被撤销、过期或第二次认证仍失败，runtime 会写入 DPAPI 加密 envelope 中的 5 分钟 reconnect cooldown 并 fail closed；冷却期间不发起 MCP session 或浏览器 OAuth。cooldown 绑定被拒 token 的 SHA-256 指纹，只有其他 worker 已持久化不同且未过期的新 token 时才可立即绕过，避免健康 peer 被误阻断，也避免同一被拒 token 反复重试。异步等待 refresh lock 的 task 若被取消，会在后台 acquisition 结束后自动释放刚取得的 lock，避免同一仍存活进程遗留永久锁。OAuth authorization-code 流程本身不能在没有用户浏览器批准的情况下合法重建被撤销的 refresh token，因此只有该终态才需运行交互式 `--reset-credentials`，不是按周例行操作。
+- 修复每日开盘约两分钟时的 `session_volume` 假失败：Robinhood 5-minute bars 尚未完成前，forward cycle 现在记录 `awaiting_first_completed_5minute_bar` 的结构化 skip，保留空 session volume 和原来的风险门；五分钟后仍按原有逻辑取数，真实 provider 异常继续记录为 fail-closed。历史账户、订单、成交、PnL、状态和日志均未迁移或改写。
+- 将 MCP SDK 依赖固定为已验证的 `mcp==1.28.1`，因为项目有受控的 OAuth provider override，避免浮动主版本导致 private SDK lifecycle 漂移。全部 DPAPI envelope 的 read-modify-write 使用独立跨进程 envelope lock，避免 cooldown、metadata 或 token 写入覆盖 rotating refresh token；refresh lock 等待移出 event loop、上限为 5 秒且具备 cancellation cleanup，整个非交互 read-only operation 也有统一 deadline。过期 cooldown 只读地自然失效。全量 pytest 为 `445 passed`，只有 4 条既有 `exchange_calendars` deprecation warning；`compileall`、`pip check`、`git diff --check` 和现场的 read-only tool probe 均已通过。
+
 ## 2026-08-28 (America/Los_Angeles) - Robinhood OAuth 自动刷新与 allocator 行情恢复
 
 - 审计连续运行约 47 小时的 point-in-time runtime records。supervisor、dashboard、heartbeat 和 process lock 均保持存活；从 `2026-08-27 09:46:44` 到 `2026-08-28 12:59:55` 本地时间，584 个 `news_drift` job 因同一 Robinhood OAuth 错误失败。主股票 forward 周期通过 Alpaca IEX fallback 继续完成，但 Robinhood-only scanner、新闻、期权和完整 AI research 处于 degraded 状态。
