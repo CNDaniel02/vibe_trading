@@ -192,7 +192,7 @@ def test_interactive_oauth_wait_does_not_consume_runtime_deadline(
     )
 
     async def open_session(client):
-        async with client.session():
+        async with client._session():
             return True
 
     assert asyncio.run(open_session(interactive)) is True
@@ -756,6 +756,58 @@ def test_forward_cycle_falls_back_to_alpaca_and_records_stages(
     ]
     assert any(item["stage"] == "primary_quotes" and item["status"] == "failed" for item in stages)
     assert any(item["stage"] == "fallback_quotes" and item["status"] == "completed" for item in stages)
+
+
+def test_forward_skips_session_volume_until_first_five_minute_bar(
+    paper_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class OpeningQuoteAdapter:
+        session_volume_calls = 0
+
+        @staticmethod
+        def fetch_quotes(symbols: list[str], **_kwargs: object) -> dict[str, Quote]:
+            return {
+                symbol: Quote(
+                    symbol,
+                    100.00,
+                    100.02,
+                    100.01,
+                    "2026-07-13T13:31:55Z",
+                    source="fixture:opening-quote",
+                    avg_daily_volume_usd=100_000_000,
+                    asset_class="us_etf" if symbol == "SPY" else "us_equity",
+                    previous_close=99.50,
+                )
+                for symbol in symbols
+            }
+
+        @classmethod
+        def fetch_session_volumes(cls, *_args: object) -> dict[str, float]:
+            cls.session_volume_calls += 1
+            pytest.fail("session volume must not be requested before a 5-minute bar can close")
+
+    service = ForwardPaperService(paper_root)
+    service.config["universe"]["default_watchlist"] = ["AAPL"]
+    service.vibe = _SyntheticVibe()  # type: ignore[assignment]
+    service.quote_adapter = OpeningQuoteAdapter()  # type: ignore[assignment]
+    service.news_adapter = _SyntheticNews()  # type: ignore[assignment]
+    monkeypatch.setattr(service.option_data, "upcoming_earnings", lambda *_args, **_kwargs: {})
+
+    result = service.run_once("2026-07-13T13:32:00Z")
+
+    assert result["event"] == "forward_cycle_complete"
+    assert OpeningQuoteAdapter.session_volume_calls == 0
+    stages = [
+        json.loads(line)
+        for line in (paper_root / "logs" / "forward_stages.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(
+        item["stage"] == "session_volume"
+        and item["status"] == "skipped"
+        and item["reason"] == "awaiting_first_completed_5minute_bar"
+        for item in stages
+    )
 
 
 def test_forward_service_handles_keyboard_interrupt_and_releases_lock(paper_root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

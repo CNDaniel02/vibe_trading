@@ -2,17 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 
 import httpx
 import pytest
 from mcp.shared.auth import OAuthClientInformationFull, OAuthMetadata, OAuthToken
 
+import scripts.broker.robinhood_mcp_audit as robinhood_mcp_audit
 from scripts.broker.robinhood_mcp_audit import (
     CapabilityAudit,
     CredentialStore,
     EXPECTED_ROBINHOOD_TOOLS,
+    ReadOnlyMcpSession,
     RobinhoodMcpCapabilityClient,
 )
 
@@ -321,3 +325,367 @@ def test_second_worker_reloads_token_after_first_worker_refreshes(tmp_path):
     tokens = asyncio.run(second.store.get_tokens())
     assert tokens is not None
     assert tokens.access_token == "new-access"
+
+
+def test_missing_expiry_with_refresh_token_is_treated_as_expired(tmp_path):
+    store = CredentialStore(tmp_path / "oauth.dpapi")
+    asyncio.run(
+        store.set_tokens(
+            OAuthToken(
+                access_token="access",
+                refresh_token="refresh",
+            )
+        )
+    )
+
+    tokens = asyncio.run(store.get_tokens())
+
+    assert tokens is not None
+    assert tokens.expires_in == 0
+    assert tokens.refresh_token == "refresh"
+
+
+def test_auth_rejection_forces_the_next_session_to_refresh(tmp_path):
+    client = RobinhoodMcpCapabilityClient(
+        {"credential_store_path": "oauth.dpapi"},
+        root=tmp_path,
+        interactive_oauth=False,
+    )
+    asyncio.run(
+        client.store.set_tokens(
+            OAuthToken(
+                access_token="access",
+                refresh_token="refresh",
+                expires_in=120,
+            )
+        )
+    )
+
+    forced = asyncio.run(client._force_refresh_after_auth_failure())
+    tokens = asyncio.run(client.store.get_tokens())
+
+    assert forced is True
+    assert tokens is not None
+    assert tokens.access_token == "access"
+    assert tokens.refresh_token == "refresh"
+    assert tokens.expires_in == 0
+
+
+def test_noninteractive_readonly_operation_retries_once_after_auth_rejection(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = RobinhoodMcpCapabilityClient(
+        {"credential_store_path": "oauth.dpapi"},
+        root=tmp_path,
+        interactive_oauth=False,
+    )
+    attempts: list[str] = []
+    forced: list[bool] = []
+
+    @asynccontextmanager
+    async def fake_session():
+        yield object()
+
+    async def operation(_session):
+        attempts.append("attempt")
+        if len(attempts) == 1:
+            raise RuntimeError("Robinhood OAuth authorization is required")
+        return "recovered"
+
+    async def force_refresh(*_args: object) -> bool:
+        forced.append(True)
+        return True
+
+    monkeypatch.setattr(client, "_session", fake_session)
+    monkeypatch.setattr(client, "_force_refresh_after_auth_failure", force_refresh, raising=False)
+
+    result = asyncio.run(client._run_readonly_operation(operation))
+
+    assert result == "recovered"
+    assert attempts == ["attempt", "attempt"]
+    assert forced == [True]
+
+
+def test_noninteractive_readonly_operation_unwraps_auth_exception_group(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = RobinhoodMcpCapabilityClient(
+        {"credential_store_path": "oauth.dpapi"},
+        root=tmp_path,
+        interactive_oauth=False,
+    )
+    attempts: list[str] = []
+    forced: list[bool] = []
+
+    @asynccontextmanager
+    async def fake_session():
+        yield object()
+
+    async def operation(_session):
+        attempts.append("attempt")
+        if len(attempts) == 1:
+            raise ExceptionGroup("MCP task group", [RuntimeError("status code 401")])
+        return "recovered"
+
+    async def force_refresh(*_args: object) -> bool:
+        forced.append(True)
+        return True
+
+    monkeypatch.setattr(client, "_session", fake_session)
+    monkeypatch.setattr(client, "_force_refresh_after_auth_failure", force_refresh, raising=False)
+
+    result = asyncio.run(client._run_readonly_operation(operation))
+
+    assert result == "recovered"
+    assert attempts == ["attempt", "attempt"]
+    assert forced == [True]
+
+
+def test_noninteractive_readonly_operation_preserves_cancellation_group(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = RobinhoodMcpCapabilityClient(
+        {"credential_store_path": "oauth.dpapi"},
+        root=tmp_path,
+        interactive_oauth=False,
+    )
+    attempts: list[str] = []
+
+    @asynccontextmanager
+    async def fake_session():
+        yield object()
+
+    async def operation(_session):
+        attempts.append("attempt")
+        if len(attempts) == 1:
+            raise BaseExceptionGroup(
+                "MCP task group",
+                [asyncio.CancelledError(), RuntimeError("status code 401")],
+            )
+        return "recovered"
+
+    monkeypatch.setattr(client, "_session", fake_session)
+
+    with pytest.raises(BaseExceptionGroup):
+        asyncio.run(client._run_readonly_operation(operation))
+    assert attempts == ["attempt"]
+
+
+def test_private_tool_helper_rejects_live_order_tool(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = RobinhoodMcpCapabilityClient(
+        {"credential_store_path": "oauth.dpapi"},
+        root=tmp_path,
+        interactive_oauth=False,
+    )
+
+    @asynccontextmanager
+    async def fake_session():
+        pytest.fail("live order tool must be rejected before a session is opened")
+        yield object()
+
+    monkeypatch.setattr(client, "_session", fake_session)
+
+    with pytest.raises(RuntimeError, match="outside the read-only data allowlist"):
+        asyncio.run(client._call_tool("place_equity_order", {}))
+
+
+def test_readonly_session_facade_rejects_live_order_tool() -> None:
+    class RawSession:
+        async def call_tool(self, *_args, **_kwargs):
+            pytest.fail("a live order tool reached the raw MCP session")
+
+    session = ReadOnlyMcpSession(RawSession())
+
+    with pytest.raises(RuntimeError, match="outside the read-only data allowlist"):
+        asyncio.run(session.call_tool("cancel_equity_order", {}))
+    assert not hasattr(session, "_session")
+
+
+def test_client_does_not_expose_a_public_raw_mcp_session(tmp_path) -> None:
+    client = RobinhoodMcpCapabilityClient(
+        {"credential_store_path": "oauth.dpapi"},
+        root=tmp_path,
+        interactive_oauth=False,
+    )
+
+    assert "session" not in dir(client)
+
+
+def test_cancelled_lock_acquisition_releases_late_acquired_lock(tmp_path):
+    class DelayedLock:
+        def __init__(self) -> None:
+            self.started = threading.Event()
+            self.allow_acquire = threading.Event()
+            self.released = threading.Event()
+
+        def acquire(self) -> bool:
+            self.started.set()
+            self.allow_acquire.wait(timeout=1)
+            return True
+
+        def release(self) -> None:
+            self.released.set()
+
+    client = RobinhoodMcpCapabilityClient(
+        {"credential_store_path": "oauth.dpapi"},
+        root=tmp_path,
+        interactive_oauth=False,
+    )
+    lock = DelayedLock()
+
+    async def run() -> None:
+        task = asyncio.create_task(client._acquire_lock(lock))
+        assert await asyncio.to_thread(lock.started.wait, 1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        lock.allow_acquire.set()
+        for _ in range(20):
+            if lock.released.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert lock.released.is_set()
+
+    asyncio.run(run())
+
+
+def test_noninteractive_readonly_operation_does_not_retry_non_auth_failure(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = RobinhoodMcpCapabilityClient(
+        {"credential_store_path": "oauth.dpapi"},
+        root=tmp_path,
+        interactive_oauth=False,
+    )
+    attempts: list[str] = []
+
+    @asynccontextmanager
+    async def fake_session():
+        yield object()
+
+    async def operation(_session):
+        attempts.append("attempt")
+        raise RuntimeError("network reset")
+
+    monkeypatch.setattr(client, "_session", fake_session)
+
+    with pytest.raises(RuntimeError, match="network reset"):
+        asyncio.run(client._run_readonly_operation(operation))
+
+    assert attempts == ["attempt"]
+
+
+def test_noninteractive_operation_fails_closed_during_auth_reconnect_cooldown(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = RobinhoodMcpCapabilityClient(
+        {"credential_store_path": "oauth.dpapi"},
+        root=tmp_path,
+        interactive_oauth=False,
+    )
+    asyncio.run(client.store.set_auth_reconnect_cooldown(60))
+
+    @asynccontextmanager
+    async def fake_session():
+        pytest.fail("cooldown must prevent another Robinhood MCP session")
+        yield object()
+
+    async def operation(_session):
+        return "unexpected"
+
+    monkeypatch.setattr(client, "_session", fake_session)
+
+    with pytest.raises(RuntimeError, match="temporarily blocked"):
+        asyncio.run(client._run_readonly_operation(operation))
+
+
+def test_valid_token_from_peer_bypasses_expiring_auth_reconnect_cooldown(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = RobinhoodMcpCapabilityClient(
+        {"credential_store_path": "oauth.dpapi"},
+        root=tmp_path,
+        interactive_oauth=False,
+    )
+    asyncio.run(
+        client.store.set_tokens(
+            OAuthToken(
+                access_token="failed-access",
+                refresh_token="refresh",
+                expires_in=3600,
+            )
+        )
+    )
+    asyncio.run(
+        client.store.set_auth_reconnect_cooldown(
+            60,
+            access_token_fingerprint=robinhood_mcp_audit._access_token_fingerprint(
+                "failed-access"
+            ),
+        )
+    )
+    asyncio.run(
+        client.store.set_tokens(
+            OAuthToken(
+                access_token="refreshed-access",
+                refresh_token="refresh",
+                expires_in=3600,
+            )
+        )
+    )
+
+    @asynccontextmanager
+    async def fake_session():
+        yield object()
+
+    async def operation(_session):
+        return "recovered-by-peer"
+
+    monkeypatch.setattr(client, "_session", fake_session)
+
+    assert asyncio.run(client._run_readonly_operation(operation)) == "recovered-by-peer"
+
+
+def test_expired_auth_reconnect_cooldown_does_not_rewrite_credentials(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store = CredentialStore(tmp_path / "oauth.dpapi")
+    asyncio.run(
+        store.set_tokens(
+            OAuthToken(
+                access_token="access",
+                refresh_token="refresh",
+                expires_in=3600,
+            )
+        )
+    )
+    asyncio.run(store.set_auth_reconnect_cooldown(1))
+    real_time = time.time
+    monkeypatch.setattr(robinhood_mcp_audit.time, "time", lambda: real_time() + 2)
+    monkeypatch.setattr(
+        store,
+        "_write",
+        lambda _envelope: pytest.fail("an expired cooldown must not rewrite the shared token envelope"),
+    )
+
+    assert asyncio.run(store.auth_reconnect_cooldown_remaining()) == 0
+
+
+def test_missing_expiry_without_refresh_token_is_treated_as_expired(tmp_path):
+    store = CredentialStore(tmp_path / "oauth.dpapi")
+    asyncio.run(store.set_tokens(OAuthToken(access_token="access")))
+
+    tokens = asyncio.run(store.get_tokens())
+
+    assert tokens is not None
+    assert tokens.expires_in == 0

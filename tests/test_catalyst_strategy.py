@@ -3,7 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from scripts.broker.robinhood_mcp_audit import READ_ONLY_DATA_TOOLS, RobinhoodMcpCapabilityClient
+from scripts.broker.robinhood_mcp_audit import (
+    READ_ONLY_DATA_TOOLS,
+    READ_ONLY_MCP_TOOLS,
+    RobinhoodMcpCapabilityClient,
+)
 from scripts.core.config import load_runtime_config
 from scripts.core.models import Quote
 from scripts.discovery.catalyst_pipeline import CatalystDiscoveryPipeline
@@ -280,6 +284,7 @@ def test_robinhood_discovery_allowlist_contains_no_order_mutations():
         "cancel_option_order",
     }
     assert forbidden.isdisjoint(READ_ONLY_DATA_TOOLS)
+    assert forbidden.isdisjoint(READ_ONLY_MCP_TOOLS)
     assert forbidden.isdisjoint(dir(RobinhoodMcpCapabilityClient))
 
 
