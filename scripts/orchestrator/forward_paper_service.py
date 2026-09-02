@@ -269,25 +269,39 @@ class ForwardPaperService:
             return event
 
         if hasattr(effective_quote_adapter, "fetch_session_volumes") and clock.open_time:
-            try:
-                self._record_forward_stage(cycle_id, decision_now, "session_volume", "started", provider=effective_quote_provider)
-                session_volumes = effective_quote_adapter.fetch_session_volumes(symbols, clock.open_time, decision_now)
-                self._record_forward_stage(cycle_id, decision_now, "session_volume", "completed", provider=effective_quote_provider)
-            except Exception as exc:
+            seconds_since_open = (
+                parse_ts(decision_now) - parse_ts(clock.open_time)
+            ).total_seconds()
+            if seconds_since_open < 5 * 60:
                 session_volumes = {}
                 self._record_forward_stage(
                     cycle_id,
                     decision_now,
                     "session_volume",
-                    "failed",
+                    "skipped",
                     provider=effective_quote_provider,
-                    reason=f"{type(exc).__name__}: {exc}",
+                    reason="awaiting_first_completed_5minute_bar",
                 )
-                append_jsonl(
-                    self.root,
-                    "audit.jsonl",
-                    {"event": "intraday_volume_failed_closed", "reason": f"{type(exc).__name__}: {exc}", "asof": decision_now},
-                )
+            else:
+                try:
+                    self._record_forward_stage(cycle_id, decision_now, "session_volume", "started", provider=effective_quote_provider)
+                    session_volumes = effective_quote_adapter.fetch_session_volumes(symbols, clock.open_time, decision_now)
+                    self._record_forward_stage(cycle_id, decision_now, "session_volume", "completed", provider=effective_quote_provider)
+                except Exception as exc:
+                    session_volumes = {}
+                    self._record_forward_stage(
+                        cycle_id,
+                        decision_now,
+                        "session_volume",
+                        "failed",
+                        provider=effective_quote_provider,
+                        reason=f"{type(exc).__name__}: {exc}",
+                    )
+                    append_jsonl(
+                        self.root,
+                        "audit.jsonl",
+                        {"event": "intraday_volume_failed_closed", "reason": f"{type(exc).__name__}: {exc}", "asof": decision_now},
+                    )
             for symbol, quote in quotes.items():
                 quote.session_volume = session_volumes.get(symbol)
             if requested_now is None:
